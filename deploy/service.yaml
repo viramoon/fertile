@@ -1,0 +1,78 @@
+# 聚合设计清单，唯一服务部署来源；TBD 必须在实现验证后解析。
+version: 2
+system: fertile
+status: design
+release:
+  repository: viramoon/fertile
+  tag_pattern: "vX.Y.Z"
+  version_source: VERSION
+  submodule_versions: gitlinks # 禁止另外手写 deploy/versions.yaml
+profiles:
+  cloudbox:
+    config_layers: [config/base.yaml, config/cloudbox.yaml]
+    persistent_root: /home/box/fertile # 配置默认，运行时读取
+    account_policy: paper-only
+  stable:
+    config_layers: [config/base.yaml, config/stable.yaml]
+    persistent_root: TBD # 迁移时选定并配置，不能写死系统目录
+    account_policy: TBD # 与运行模式独立，不能由 profile 隐式启用实盘
+components:
+  - name: finance
+    repository: viramoon/finance
+    submodule: finance
+    manifest: finance/service.yaml
+    runbook: finance/RUNBOOK.md
+    processes: [trader, collector, api]
+    target: TBD # 当前 cloudbox，迁移边界与顺序待演练确认
+    ports: TBD
+    health:
+      path: /healthz
+      live: 进程存活
+      ready: 各进程关键依赖可用、数据新鲜且交易状态可信
+  - name: web
+    repository: viramoon/web
+    submodule: web
+    manifest: web/service.yaml
+    runbook: web/RUNBOOK.md
+    processes: [web]
+    target: TBD
+    ports: TBD
+    static_artifact: frontend-dist
+    health:
+      path: /healthz
+      live: 进程存活
+      ready: 数据库、finance 数据与静态产物可用
+artifacts:
+  - name: frontend-dist
+    repository: viramoon/frontend
+    submodule: frontend
+    build_spec: frontend/docs/build.md
+    runbook: frontend/RUNBOOK.md
+    hosted_by: web
+    destination_from: config.paths.static_root
+    digest: TBD # 由选定指针的可重复构建生成，不手填版本映射
+infrastructure:
+  ib_gateway:
+    address: TBD
+    paper_port: 4002
+    lifecycle: TBD # 选定版本验证 Nautilus 上游能力
+  postgres:
+    address: TBD
+    data_root_from: config.paths.postgres
+    schemas: [app, blog]
+  tunnel:
+    protocol: quic # 云电脑短期验证依据见 ADR-001，不代表长期保证
+    public_origin: TBD
+    supervisor: TBD
+paths:
+  root: /home/box/fertile # 配置默认
+  data: /home/box/fertile/data
+  logs: /home/box/fertile/logs
+  releases: /home/box/fertile/releases
+  backups: /home/box/fertile/backups
+operations:
+  bootstrap: deploy/bootstrap.md
+  health_checks: ops/health-checks.md
+  ruler_runbook: ops/ruler-runbook.md
+  commands: TBD
+  restart_policy: TBD

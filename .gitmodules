@@ -1,0 +1,12 @@
+[submodule "finance"]
+	path = finance
+	url = https://github.com/viramoon/finance.git
+	branch = main
+[submodule "web"]
+	path = web
+	url = https://github.com/viramoon/web.git
+	branch = main
+[submodule "frontend"]
+	path = frontend
+	url = https://github.com/viramoon/frontend.git
+	branch = main
