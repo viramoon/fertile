@@ -18,10 +18,15 @@ jobs:
         with:
           persist-credentials: false
           submodules: false
+      - name: 读取锁定的文档工具版本
+        id: versions
+        run: |
+          source deploy/toolchain.env
+          echo "python=$PYTHON_VERSION" >> "$GITHUB_OUTPUT"
       - name: 准备 Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ steps.versions.outputs.python }}
       - name: 准备 YAML 解析器
         run: python -m pip install --disable-pip-version-check PyYAML==6.0.3
       - name: 检查文档与 PR 描述
