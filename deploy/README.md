@@ -8,4 +8,4 @@ fertile 的 deploy/ 是系统服务部署的唯一来源。[service.yaml](servic
 
 所有部署 / 回滚以 fertile tag 锁定的指针、配置和产物为单位；不维护手写 versions.yaml，gitlink 是子模块版本依据。环境通过 config/base.yaml + cloudbox.yaml 或 stable.yaml 区分，运行模式和账户独立，当前只用 paper。
 
-TBD：配置载入、命令、端口、域名、依赖管理和初始化脚本，在后续部署 issue 实现。本次没有部署执行器，不能直接拿设计清单上线。
+环境初始化已由 [bootstrap-box.sh](../scripts/bootstrap-box.sh) 实现，Postgres 命令与重建步骤见 [bootstrap.md](bootstrap.md)。业务配置加载器、服务端口 / 域名与常驻守护由后续骨架 / 部署 issue 实现；聚合 service.yaml 仍是设计清单。

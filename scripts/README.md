@@ -1,6 +1,6 @@
 # 脚本设计清单
 
-本目录只有设计，不包含任何脚本实现、生成器或构建配置。
+环境引导已实现：bootstrap-box.sh 安装锁定工具与 Postgres，check-toolchain.sh 核对版本和前缀，postgres.sh 管理数据库生命周期。release / check-submodules / diff-contracts 仍只有以下设计，尚未实现。
 
 ## release
 

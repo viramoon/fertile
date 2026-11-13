@@ -20,4 +20,4 @@ web 使用 axum + sqlx + PostgreSQL，业务与博客 schema 归 web；调用 fi
 
 OpenAPI 从 finance / web 代码导出（utoipa），快照在 [contracts](../contracts/README.md)，生成客户端禁止手改；实时消息另外定义。所有交易数值使用精确类型，不能用浮点传输 / 计算造成精度损失。
 
-当前在云电脑使用 paper，迁移边界与网络证据见 [ADR-001](adr/ADR-001-cloud-box-network-constraints.md)；环境 profile 与运行模式独立，路径配置化。TBD：节点内部通信、端口、域名、工具版本和恢复阈值，由对应实现 issue 明确。本次只有文档和组织结构。
+当前在云电脑使用 paper，迁移边界与网络证据见 [ADR-001](adr/ADR-001-cloud-box-network-constraints.md)；环境 profile 与运行模式独立，路径配置化。TBD：节点内部通信、端口、域名、工具版本和恢复阈值，由对应实现 issue 明确。环境引导已由 issue #3 落地；finance 的源码获取以其 ADR-0003 为准，交易与业务服务实现仍由后续骨架 issue 完成。
