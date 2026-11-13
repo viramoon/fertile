@@ -1,13 +1,21 @@
-# 云电脑重启后的重建设计
+# 云盒子重启后的重建
 
-依据 [ADR-001](../docs/adr/ADR-001-cloud-box-network-constraints.md)，假设只有 /home/box 持久；系统目录修改每次重启都可能丢失。本文件只写可重复执行初始化流程的设计，不写脚本、容器配置或系统服务文件。
+初始化实现入口为 [scripts/bootstrap-box.sh](../scripts/bootstrap-box.sh)，版本源为 [toolchain.env](toolchain.env)。支持 Ubuntu 24.04 x86_64；不依赖 systemd。所有工具二进制、源码下载、构建缓存和 Postgres 数据在 /home/box/fertile 下，系统包每次检查并补装。
 
-1. 确认要恢复的 fertile tag、上次状态和当前 profile；禁止从分支最新代码直接启动。检查持久目录、备份与配置引用权限。
-2. 按未来清单检查并重建系统依赖、证书、运行环境、系统服务与守护；已有正确状态不重复破坏，失败记录可重入阶段。TBD：包版本与权限要求。
-3. 以 tag 锁定的 gitlink 初始化子模块，恢复同版本的依赖与产物，验证来源与摘要；路径全部从配置读取。
-4. 恢复 Gateway、持久 catalog / 节点状态、PostgreSQL 及必要网络配置；先确认备份和迁移兼容，不覆盖未知状态。
-5. 采集恢复 → 交易状态 / 订单对账 → 满足 ready 后允许策略开新仓 → finance API → web 与静态资源 → Tunnel。API / web 恢复不能控制健康交易核心的生命周期。
-6. 检查本地 live / ready 和公网域名端到端；记录数据水位、订单 / 持仓核对、恢复耗时与错误。认证、数据或状态不可信时保持暂停开仓。
-7. 记录 tag、子模块指针、配置版本与各阶段结果；失败只重跑必要阶段或按已验证 tag 回滚，不通过清空状态来“恢复”。
+```sh
+cd /home/box/fertile-source
+bash scripts/bootstrap-box.sh
+source /home/box/fertile/env.sh
+bash scripts/check-toolchain.sh
+bash scripts/postgres.sh init
+bash scripts/postgres.sh start
+bash scripts/postgres.sh status
+```
 
-TBD：实际命令、幂等状态标记、锁、失败回退、凭据引用和恢复目标，由后续部署 issue 演练。当前只允许 IBKR paper；profile 与运行模式独立。重建验证需覆盖云电脑重启，不能仅验证单个服务重启。
+第二次安装全部版本正确时跳过，不重新下载。失败保留缓存，可重跑；已有数据库绝不删除，主版本不兼容时停止并要求迁移。Postgres 的日志在 logs/postgres.log，socket 在 run/postgres，数据在 data/postgres；停止用 scripts/postgres.sh stop。FERTILE_POSTGRES_PORT 可覆盖默认 5432，CI 用 55432。
+
+只有系统依赖可进入系统目录：编译器基础库、make / pkg-config、SSL / zlib、终端 / XML / Z3 运行库、bison / flex、curl / git / xz / bzip2 / CA。Rust / Python / uv / Node / pnpm / LLVM / Postgres 的安装不依赖系统目录保存，env.sh 每次可重建，source 不修改用户 HOME。
+
+Ruler 后续仍须：按选定 fertile tag 恢复组件与匹配静态资源 → 读取受控密钥与分层配置 → 恢复 Gateway 与采集 → 完成交易状态对账 → 满足 ready 后开放 API / web / Tunnel。bootstrap 只准备工具与数据库，不启动业务服务、不执行应用迁移、不登录 Gateway，也不实现常驻守护。部署与回滚始终以 fertile tag 为单位。
+
+详细上手、版本同步与 CI 见 [开发环境](../docs/dev-environment.md)，密钥见 [配置规范](../docs/configuration.md)，Gateway 见 [部署方案](../docs/ibkr-gateway.md)，网络与迁移原则见 [ADR-001](../docs/adr/ADR-001-cloud-box-network-constraints.md)。

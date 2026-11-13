@@ -2,7 +2,7 @@
 
 金融看板 + 自动交易系统的总仓库（super repo），负责初始化、集成、监控、运维和发布。以 git submodule 引入 finance、web、frontend；agent 是独立仓库，不是 submodule。
 
-本仓库按 [issue #1 方案 v2](https://github.com/viramoon/fertile/issues/1#issuecomment-6834605011) 初始化。目前只有中文文档、组织结构与最小文档检查 CI，没有业务实现；TBD 项都需后续 issue 明确后再实施。开发从 [AGENTS.md](AGENTS.md) 开始。
+本仓库按 [issue #1 方案 v2](https://github.com/viramoon/fertile/issues/1#issuecomment-6834605011) 初始化。当前已有 [云盒子初始化脚本](scripts/bootstrap-box.sh) 与 Postgres 生命周期命令，业务服务仍处骨架阶段；TBD 项都需后续 issue 明确后再实施。开发从 [AGENTS.md](AGENTS.md) 开始。
 
 ## 系统中的位置
 
@@ -71,3 +71,12 @@ fertile/
 ## 协作与检查
 
 一个任务对应一个 issue，使用 issue-<号>-<简述> 分支和 PR，CI 通过后合并，禁止直接推送 main。PR 需含 Closes #<号>、测试结果和逐条验收自检；开发问题在原分支解决，文档随行为在同一 PR 更新。文档 CI 检查必需文件、非空内容、YAML、相对链接及 PR 描述，不编译业务代码；这不代表已经完成运行或真实交易验证。
+
+## 环境与重启上手
+
+- [开发环境与工具链](docs/dev-environment.md)
+- [密钥与配置分层](docs/configuration.md)
+- [IBKR Gateway 部署方案（未安装、未登录）](docs/ibkr-gateway.md)
+- [初始化集成测试](tests/bootstrap-box.sh)
+
+当前工具链与 Postgres 引导已实现，系统发布 / 子模块检查 / 契约比对脚本仍由后续 issue 实现；VERSION 保持 0.0.0。
