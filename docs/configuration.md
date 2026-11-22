@@ -1,22 +1,31 @@
-# 配置分层与密钥注入
+# 配置与密钥
 
-每个服务采用同一优先级：config/base.yaml < config/<profile>.yaml < 显式环境变量。FERTILE_PROFILE 只接受 cloudbox / stable；未识别 profile 或必要配置缺失时服务必须拒绝启动。部署 profile 与 Nautilus Backtest / Sandbox / Live 独立；paper / 实盘是 Live 的账户选择，stable 不自动打开实盘。当前部署只允许 paper。
+应用按 config/base.yaml、config/<profile>.yaml、显式环境变量顺序加载，后者覆盖前者。部署 profile 为 cloudbox 或 stable。Nautilus 的回测 / 沙盒 / Live 是另一个维度；当前 Gateway 仅接受 paper 账户。frontend 只访问同源 web API。
 
-| 变量 | 用途与归属 |
+## 持久运行配置
+
+Ruler 在运行根 config/runtime.env 中填写每行一个非敏感 KEY=VALUE。主管按允许的变量列表加载；显式传给控制命令的同名变量优先。每次启动、恢复、巡检需要一致的设置，长期配置请保存在文件中。
+
+| 参数 | 生效位置 |
 | --- | --- |
-| FERTILE_PROFILE | Ruler 为每个进程选择部署环境 |
-| FERTILE_BOX_HOME | 初始化器的持久前缀，默认 /home/box；测试可覆盖 |
-| FERTILE_ROOT | 初始化器生成的 /home/box/fertile 运行根 |
-| FERTILE_DATA_ROOT | 服务数据目录，由 Ruler 注入，默认持久根 data |
-| DATABASE_URL | web 的 PostgreSQL URL，由 Ruler 从 web.env 注入 |
-| IB_GATEWAY_ADDRESS | finance 使用的 Gateway 地址，paper 为 127.0.0.1:4002 |
-| TWS_USERNAME / TWS_PASSWORD | Gateway / IBC 所需账户凭据，只注入该进程 |
-| WEB_STATIC_ROOT / FINANCE_BASE_URL | web 静态目录与 finance HTTP 地址，后续骨架实现消费 |
+| FERTILE_BOX_HOME、FERTILE_ROOT | bootstrap 默认使用 /home/box，生成的 env.sh 设置运行根 /home/box/fertile。 |
+| FERTILE_MARKET_SOURCE | 默认 ib。测试使用 replay，独立存入 data/replay。生产源与回放源切换需核对 catalog 与队列目录。 |
+| FERTILE_PROFILE、FERTILE_DATA_ROOT | 选择服务配置和持久数据目录。显式挂载必须存在。 |
+| FINANCE_API_PORT、FINANCE_COLLECTOR_PORT、WEB_PORT | 默认在本机监听 8081、8082、8080。 |
+| FINANCE_COLLECTOR_CONFIG、IB_GATEWAY_ADDRESS | 指向当前行情源的配置和本机 paper 接口 127.0.0.1:4002。 |
+| FERTILE_HEALTH_CONFIG、FERTILE_PUBLIC_ORIGIN | 站点巡检配置和经确认的 HTTPS 入口。公网入口为空时采样会记录跳过。 |
+| FERTILE_BACKUP_DAYS、FERTILE_BACKUP_WEEKS、FERTILE_BACKUP_REMOTE | 本地保留周期与可选 rclone remote 名。详细设置见 [备份](../ops/backup.md)。 |
 
-配置中只放非敏感值或引用，不把密码写进 YAML、Git、启动参数或日志。具体应用层的加载器由 finance / web / frontend 骨架 issue 实现，本 issue 定义规范与环境引导，不假装应用加载器已经存在。
+主管为 web 注入同一 release 的 WEB_STATIC_ROOT、finance HTTP 地址和 PostgreSQL socket。仅在需要外部或独立的数据库身份时设置 web-database.env。迁移、权限和停库恢复按 [Ruler 手册](../ops/ruler-runbook.md) 操作。
 
-密钥由 Ruler 在部署时写入 /home/box/fertile/secrets/<组件>.env：目录权限 700，文件权限 600，归对应运行用户；名称例如 finance.env、web.env、gateway.env。Ruler 先检查权限与文件归属，再在进程启动前读取并 export 必要变量。env 文件是受信任的 shell 赋值文件，禁止来源不明内容、命令替换和跨组件混用；不在交互 shell 里全局加载全部密钥，不用 set -x。
+## 凭据与轮换
 
-env.sh 只包含工具目录与缓存路径，bootstrap 不创建真实账户密码，不修改已有密钥。仓库 .gitignore 忽略 secrets/ 与本地 .env；示例只描述字段，不附真实值。CI 使用临时数据库与 Unix socket peer 认证，不需生产 DATABASE_URL 或账户环境变量。
+| 文件 | 使用者与内容 |
+| --- | --- |
+| secrets/web.env | 仅 web 管理接口和授权的运维冒烟读取。文件中只有 WEB_ADMIN_TOKEN。 |
+| secrets/web-database.env | 可选，web 专用的 DATABASE_URL。 |
+| /home/box/fertile/secrets/ibkr-paper.env | 仅 Gateway 的 IBC 包装器读取 IBKR_USERNAME、IBKR_PASSWORD。健康检查只输出服务器时间和 DU 账户前缀。 |
+| secrets/alerts.env | 可选 ALERT_WEBHOOK_URL。默认告警写本机 JSONL。 |
+| /home/box/.cloudflared/ | cloudflared 使用既有 Tunnel 文件。公网域名另由用户确认。 |
 
-Postgres 初始只在本机监听：Unix socket peer 认证，TCP 使用 scram-sha-256；Ruler 后续创建最小权限应用角色并注入数据库 URL，应用不可使用 initdb 所建管理角色。轮换密钥后按组件重启并验证健康，数据库凭据轮换与回滚在部署 issue 中演练。
+创建 secrets 目录时使用 0700，凭据文件为服务属主的 0600 普通文件。运行时 env.sh 只提供工具链路径和缓存配置。备份排除凭据，Git 忽略 secrets/ 和本地 .env 文件。轮换时在盒子本地替换对应文件并重启相应服务，保留脱敏后的就绪和业务验证结果。详情见 [Gateway](../ops/ibgateway.md)、[监控](../ops/monitoring.md) 和 [管理令牌](../ops/ruler-runbook.md)。

@@ -12,20 +12,80 @@ concurrency:
 jobs:
   integration:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 220
     steps:
       - name: Check out the locked private submodules and Nautilus source
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.FERTILE_SUBMODULES_TOKEN || github.token }}
           submodules: recursive
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: false
-      - name: Verify the actual service source checkouts
+      - name: Verify published gitlinks and their working trees
+        env:
+          GH_TOKEN: ${{ secrets.FERTILE_SUBMODULES_TOKEN || github.token }}
         run: |
-          for name in finance web frontend; do
-            test "$(git ls-tree HEAD "$name" | awk '{print $3}')" = "$(git -C "$name" rev-parse HEAD)"
-          done
+          gh auth setup-git
+          if [[ "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" == ha-runthrough ]]; then
+            scripts/check-submodules.sh --ref ha-runthrough
+          else
+            scripts/check-submodules.sh
+          fi
           source deploy/toolchain.env
           test "$(git -C finance/vendor/nautilus_trader rev-parse HEAD)" = "$NAUTILUS_COMMIT"
-          git submodule status --recursive
+      - name: Prepare disposable runner
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          echo "FERTILE_BOX_HOME=$RUNNER_TEMP/box" >> "$GITHUB_ENV"
+          echo "FERTILE_ROOT=$RUNNER_TEMP/box/fertile" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+          df -h "$RUNNER_TEMP"
+      - name: Cache the pinned native build and system tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/box/fertile/cache/finance/wheels
+            ${{ runner.temp }}/box/fertile/cache/downloads
+          key: fertile-native-v1-${{ runner.arch }}-${{ hashFiles('deploy/toolchain.env','finance/toolchain.env','finance/uv.lock','finance/scripts/build.sh') }}
+      - name: Install the locked box environment and build the three components
+        run: |
+          scripts/bootstrap-box.sh
+          source "$FERTILE_ROOT/env.sh"
+          rustup component add rustfmt
+          scripts/fertile build --ref "$GITHUB_SHA"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Re-export contracts and regenerate both clients
+        run: |
+          source "$FERTILE_ROOT/env.sh"
+          (cd frontend && pnpm install --frozen-lockfile)
+          scripts/contract-diff.sh
+          bash tests/contract-drift.sh
+      - name: Exercise the actual supervised local deployment with ReplaySource
+        run: |
+          set -eu
+          source "$FERTILE_ROOT/env.sh"
+          umask 077
+          mkdir -p "$FERTILE_ROOT/config" "$FERTILE_ROOT/secrets"
+          echo FERTILE_MARKET_SOURCE=replay > "$FERTILE_ROOT/config/runtime.env"
+          python3 - <<'PYTHON'
+          import os
+          import secrets
+          from pathlib import Path
+          with Path(os.environ["FERTILE_ROOT"], "secrets/web.env").open("x") as token:
+              token.write("WEB_ADMIN_TOKEN=" + secrets.token_hex(32) + "\n")
+          PYTHON
+          scripts/fertile up
+          export FINANCE_BUILD_ROOT="$FERTILE_ROOT/current/runtime"
+          export FERTILE_DATA_ROOT="$FERTILE_ROOT/data/replay"
+          export PYTHONDONTWRITEBYTECODE=1
+          (cd "$FERTILE_ROOT/current/finance" && bash scripts/backtest-sample.sh)
+          scripts/fertile status --json
+          tests/e2e-smoke.sh local
+      - name: Shut down the private test instance
+        if: always()
+        run: |
+          if [[ -S "$FERTILE_ROOT/run/supervisor.sock" ]]; then scripts/fertile down; fi
