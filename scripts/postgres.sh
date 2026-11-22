@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-source "${FERTILE_BOX_HOME:-/home/box}/fertile/env.sh"
+root=${FERTILE_ROOT:-${FERTILE_BOX_HOME:-/home/box}/fertile}
+if [[ -f "$root/env.sh" ]]; then
+  # shellcheck disable=SC1091
+  source "$root/env.sh"
+fi
+export FERTILE_ROOT="$root"
 data="$FERTILE_ROOT/data/postgres"
 socket="$FERTILE_ROOT/run/postgres"
 port=${FERTILE_POSTGRES_PORT:-5432}
@@ -17,6 +22,11 @@ case "${1:-}" in
     mkdir -p "$socket"
     chmod 700 "$socket"
     initdb -D "$data" --encoding=UTF8 --locale=C.UTF-8 --auth-local=peer --auth-host=scram-sha-256
+    ;;
+  foreground)
+    [[ -f "$data/PG_VERSION" ]] || { echo "先运行 postgres.sh init" >&2; exit 1; }
+    mkdir -p "$socket"; chmod 700 "$socket"
+    exec postgres -D "$data" -h "" -k "$socket" -p "$port"
     ;;
   start)
     [[ -f "$data/PG_VERSION" ]] || { echo "先运行 scripts/postgres.sh init" >&2; exit 1; }

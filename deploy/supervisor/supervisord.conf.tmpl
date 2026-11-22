@@ -1,0 +1,17 @@
+[unix_http_server]
+file=$run/supervisor.sock
+chmod=0600
+[supervisord]
+logfile=$logs/supervisord.log
+logfile_maxbytes=50MB
+logfile_backups=10
+pidfile=$run/supervisord.pid
+childlogdir=$run
+umask=0077
+minfds=256
+[rpcinterface:supervisor]
+supervisor.rpcinterface_factory=supervisor.rpcinterface:make_main_rpcinterface
+[supervisorctl]
+serverurl=unix://$run/supervisor.sock
+[include]
+files=$programs
