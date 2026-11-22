@@ -1,78 +1,88 @@
-# 聚合设计清单，唯一服务部署来源；TBD 必须在实现验证后解析。
+# 系统部署清单。命令、依赖和启用条件详见 deploy/services.yaml。
 version: 2
 system: fertile
-status: design
+services: deploy/services.yaml
 release:
   repository: viramoon/fertile
-  tag_pattern: "vX.Y.Z"
+  tag_pattern: vX.Y.Z
   version_source: VERSION
-  submodule_versions: gitlinks # 禁止另外手写 deploy/versions.yaml
+  submodule_versions: gitlinks
 profiles:
   cloudbox:
-    config_layers: [config/base.yaml, config/cloudbox.yaml]
-    persistent_root: /home/box/fertile # 配置默认，运行时读取
+    persistent_root: /home/box/fertile
     account_policy: paper-only
   stable:
-    config_layers: [config/base.yaml, config/stable.yaml]
-    persistent_root: TBD # 迁移时选定并配置，不能写死系统目录
-    account_policy: TBD # 与运行模式独立，不能由 profile 隐式启用实盘
+    persistent_root: TBD # 迁移时确认目标挂载点
+    account_policy: paper-only
 components:
   - name: finance
-    repository: viramoon/finance
     submodule: finance
     manifest: finance/service.yaml
-    runbook: finance/RUNBOOK.md
-    processes: [trader, collector, api]
-    target: TBD # 当前 cloudbox，迁移边界与顺序待演练确认
-    ports: TBD
-    health:
-      path: /healthz
-      live: 进程存活
-      ready: 各进程关键依赖可用、数据新鲜且交易状态可信
+    target: cloudbox
+    processes:
+      finance-api: {command: current/bin/finance-api, host: 127.0.0.1, port: 8081}
+      finance-collector: {command: current/bin/finance-collector, host: 127.0.0.1, port: 8082}
+      finance-backtest-worker: {command: current/finance/scripts/finance-backtest-worker}
+    health: {live: /healthz/live, ready: /healthz/ready, market: /api/v1/market/status}
   - name: web
-    repository: viramoon/web
     submodule: web
     manifest: web/service.yaml
-    runbook: web/RUNBOOK.md
-    processes: [web]
-    target: TBD
-    ports: TBD
-    static_artifact: frontend-dist
-    health:
-      path: /healthz
-      live: 进程存活
-      ready: 数据库、finance 数据与静态产物可用
+    target: cloudbox
+    command: current/bin/web serve
+    migrate: current/bin/web migrate
+    host: 127.0.0.1
+    port: 8080
+    health: {live: /healthz/live, ready: /healthz/ready, system: /api/v1/system/status}
 artifacts:
   - name: frontend-dist
-    repository: viramoon/frontend
     submodule: frontend
-    build_spec: frontend/docs/build.md
-    runbook: frontend/RUNBOOK.md
+    command: pnpm build
     hosted_by: web
-    destination_from: config.paths.static_root
-    digest: TBD # 由选定指针的可重复构建生成，不手填版本映射
+    destination: current/static
 infrastructure:
-  ib_gateway:
-    address: TBD
-    paper_port: 4002
-    lifecycle: TBD # 选定版本验证 Nautilus 上游能力
   postgres:
-    address: TBD
-    data_root_from: config.paths.postgres
+    major: 17
+    socket: run/postgres
+    database: web
     schemas: [app, blog]
+    data: data/postgres
   tunnel:
-    protocol: quic # 云电脑短期验证依据见 ADR-001，不代表长期保证
-    public_origin: TBD
-    supervisor: TBD
+    protocol: quic
+    ingress: http://127.0.0.1:8080
+    existing_config: /home/box/.cloudflared/config.yml
+    public_origin: null # 用户确认 www.viramoon.com 或 www.viramoonstar.com 后设置
+    supervisor: cloudflared
+  ib_gateway:
+    host: 127.0.0.1
+    paper_port: 4002
+    account: paper
+    read_only: true
+    credentials_file: /home/box/fertile/secrets/ibkr-paper.env
 paths:
-  root: /home/box/fertile # 配置默认
-  data: /home/box/fertile/data
-  logs: /home/box/fertile/logs
-  releases: /home/box/fertile/releases
-  backups: /home/box/fertile/backups
+  root: /home/box/fertile
+  releases: releases
+  active: current
+  data: data
+  logs: logs
+  run: run
+  backups: backups
 operations:
   bootstrap: deploy/bootstrap.md
+  runbook: ops/ruler-runbook.md
   health_checks: ops/health-checks.md
-  ruler_runbook: ops/ruler-runbook.md
-  commands: TBD
-  restart_policy: TBD
+  supervisor: supervisord
+  commands:
+    build: scripts/fertile build
+    up: scripts/fertile up
+    down: scripts/fertile down
+    ensure: scripts/fertile ensure
+    status: scripts/fertile status --json
+    restart: scripts/fertile restart <service>
+    logs: scripts/fertile logs <service>
+    rollback: scripts/fertile rollback <commit>
+  restart_policy:
+    autorestart: true
+    stopsignal: TERM
+    stopwaitsecs: 30
+    stopasgroup: true
+    killasgroup: true

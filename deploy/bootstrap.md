@@ -1,21 +1,18 @@
-# 云盒子重启后的重建
+# 云盒子初始化与重启恢复
 
-初始化实现入口为 [scripts/bootstrap-box.sh](../scripts/bootstrap-box.sh)，版本源为 [toolchain.env](toolchain.env)。支持 Ubuntu 24.04 x86_64；不依赖 systemd。所有工具二进制、源码下载、构建缓存和 Postgres 数据在 /home/box/fertile 下，系统包每次检查并补装。
+在 Ubuntu 24.04 x86_64 盒子上以 box 用户操作。首次部署从有权读取三个私有子模块的 checkout 开始。持久根目录默认为 /home/box/fertile，源码目录与运行目录分开。
 
 ```sh
 cd /home/box/fertile-source
+git submodule update --init --recursive
 bash scripts/bootstrap-box.sh
 source /home/box/fertile/env.sh
 bash scripts/check-toolchain.sh
-bash scripts/postgres.sh init
-bash scripts/postgres.sh start
-bash scripts/postgres.sh status
+scripts/fertile build
+scripts/fertile up
+scripts/fertile status --json
 ```
 
-第二次安装全部版本正确时跳过，不重新下载。失败保留缓存，可重跑；已有数据库绝不删除，主版本不兼容时停止并要求迁移。Postgres 的日志在 logs/postgres.log，socket 在 run/postgres，数据在 data/postgres；停止用 scripts/postgres.sh stop。FERTILE_POSTGRES_PORT 可覆盖默认 5432，CI 用 55432。
+bootstrap 可重入，系统包按需重装，锁定工具与 PostgreSQL 安装在持久目录。已有 PostgreSQL 数据目录须与所用主版本一致。业务启动由 supervisord 管理，手工操作 scripts/postgres.sh 之前先检查进程所有者，避免两个启动入口争用同一数据目录。
 
-只有系统依赖可进入系统目录：编译器基础库、make / pkg-config、SSL / zlib、终端 / XML / Z3 运行库、bison / flex、curl / git / xz / bzip2 / CA。Rust / Python / uv / Node / pnpm / LLVM / Postgres 的安装不依赖系统目录保存，env.sh 每次可重建，source 不修改用户 HOME。
-
-Ruler 后续仍须：按选定 fertile tag 恢复组件与匹配静态资源 → 读取受控密钥与分层配置 → 恢复 Gateway 与采集 → 完成交易状态对账 → 满足 ready 后开放 API / web / Tunnel。bootstrap 只准备工具与数据库，不启动业务服务、不执行应用迁移、不登录 Gateway，也不实现常驻守护。部署与回滚始终以 fertile tag 为单位。
-
-详细上手、版本同步与 CI 见 [开发环境](../docs/dev-environment.md)，密钥见 [配置规范](../docs/configuration.md)，Gateway 见 [部署方案](../docs/ibkr-gateway.md)，网络与迁移原则见 [ADR-001](../docs/adr/ADR-001-cloud-box-network-constraints.md)。
+重启后若系统依赖丢失，重新执行 bootstrap 并加载 env.sh，然后运行 scripts/fertile ensure。盒子没有已确认的持久启动钩子；Maas · Ruler 在重启后和定期巡检中执行 ensure 并检查各服务 ready。应急、回滚和外部访问验证见 [Ruler 手册](../ops/ruler-runbook.md)。
