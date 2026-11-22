@@ -1,6 +1,8 @@
 name: 进程守护与恢复
 on:
   pull_request:
+  push:
+    branches: [ha-runthrough]
   workflow_dispatch:
 permissions:
   contents: read

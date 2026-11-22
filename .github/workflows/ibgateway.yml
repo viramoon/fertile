@@ -1,6 +1,8 @@
 name: IB Gateway paper safeguards
 on:
   pull_request:
+  push:
+    branches: [ha-runthrough]
   workflow_dispatch:
 permissions:
   contents: read
