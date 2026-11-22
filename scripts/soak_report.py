@@ -6,6 +6,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html import escape
+from itertools import groupby
 import json
 import math
 import os
@@ -51,6 +52,7 @@ class Sample:
     at: datetime
     interval: float
     checks: dict
+    context: tuple
     prior_failures: dict = field(default_factory=dict)
 
 
@@ -69,7 +71,10 @@ def read_samples(path, start, end):
                 raise ValueError(f"{iso(at)} 的 {name} 状态无效")
         if previous and previous.at >= at:
             raise ValueError(f"采样记录重复或时间倒退：{iso(at)}")
-        sample = Sample(at, interval, checks)
+        context = tuple(row.get(k) for k in ("profile", "market_source", "release"))
+        if any(v is not None and not isinstance(v, str) for v in context):
+            raise ValueError(f"{iso(at)} 的运行配置标识无效")
+        sample = Sample(at, interval, checks, context)
         if start is not None and at < start:
             # Keep one predecessor (including when its failures began), not the
             # entire archive before the requested report.
@@ -169,6 +174,21 @@ def render(samples, alerts, start, end, hours, label):
     if hours != 24:
         enough = continuous and observed >= 86400
         lines.append(f"- 24 小时采样覆盖：{'达到' if enough else '未达到'}。")
+    lines.extend(["", "## 采样来源", "",
+                  "下表来自巡检样本记录的 profile、行情源及发布标识。空值表示未记录。", ""])
+    if window:
+        contexts = {s.context for s in window}
+        if len(contexts) > 1:
+            lines.append(f"窗口含 {len(contexts)} 组运行配置。各段分别列出，不能作为单版本或单一行情源的连续证据。")
+            lines.append("")
+        lines.extend(["| 首个样本 | 末个样本 | profile | 行情源 | release | 样本数 |",
+                      "| --- | --- | --- | --- | --- | ---: |"])
+        for context, group in groupby(window, key=lambda s: s.context):
+            period = list(group)
+            fields = " | ".join(cell(v) if v else "未记录" for v in context)
+            lines.append(f"| {iso(period[0].at)} | {iso(period[-1].at)} | {fields} | {len(period)} |")
+    else:
+        lines.append("没有可标记来源的样本。")
     lines.extend(["", "## 各巡检项可用率", "",
         "按成功样本占实测样本（成功与失败）计算。缺测表示该轮缺少此项，"
         "跳过表示该轮巡检主动标记为 skipped。", "",

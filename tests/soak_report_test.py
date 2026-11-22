@@ -28,7 +28,7 @@ class SoakReportTest(unittest.TestCase):
         self.samples.touch()
         self.alerts.touch()
 
-    def sample(self, offset, state="ok", *, interval=30, market_age=None, include_ready=True):
+    def sample(self, offset, state="ok", *, interval=30, market_age=None, include_ready=True, **metadata):
         checks = {"public:ready": {"state": "skipped", "detail": "公网域名尚未确认"}}
         if include_ready:
             checks["service:web:ready"] = {"state": state}
@@ -36,7 +36,7 @@ class SoakReportTest(unittest.TestCase):
             checks["market:fresh"] = {"state": "ok", "max_age_seconds": market_age}
         with self.samples.open("a") as handle:
             handle.write(json.dumps({"timestamp": at(offset), "interval_seconds": interval,
-                                     "checks": checks}) + "\n")
+                                     "checks": checks, **metadata}) + "\n")
 
     def run_report(self, *args):
         return subprocess.run([sys.executable, REPORT, "--samples", self.samples, "--alerts",
@@ -85,6 +85,18 @@ class SoakReportTest(unittest.TestCase):
         self.assertNotIn(at(120), report)
         self.assertEqual(self.run_report("--start", at(65), "--end", at(120)).returncode, 0)
         self.assertIn("| 已恢复 | 90 |", self.output.read_text())
+
+    def test_source_segments_keep_switches_and_unknown_release_visible(self):
+        replay = {"profile": "cloudbox", "market_source": "replay", "release": None}
+        paper = {"profile": "stable", "market_source": "ib", "release": "abc123"}
+        for offset, meta in ((0, replay), (30, replay), (60, paper), (90, replay)):
+            self.sample(offset, **meta)
+        self.assertEqual(self.run_report().returncode, 0)
+        report = self.output.read_text()
+        self.assertIn("窗口含 2 组运行配置", report)
+        self.assertIn(f"| {at(0)} | {at(30)} | cloudbox | replay | 未记录 | 2 |", report)
+        self.assertIn(f"| {at(60)} | {at(60)} | stable | ib | abc123 | 1 |", report)
+        self.assertIn(f"| {at(90)} | {at(90)} | cloudbox | replay | 未记录 | 1 |", report)
 
     def test_full_24h_window_and_gap_of_one_missing_sample(self):
         # Fixture uses real scheduled instants. Each completed pair contributes 30 s.
