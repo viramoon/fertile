@@ -29,7 +29,7 @@ git -C "$repo" add .gitmodules
 git -C "$repo" commit -qm fixture
 for id in 1 2; do
   "$builder" >"$tmp/build-$id.log" 2>&1 &
-  pids[$id]=$!
+  pids[id]=$!
 done
 for id in 1 2; do
   if wait "${pids[$id]}"; then echo 'Incomplete component unexpectedly activated' >&2; exit 1; fi

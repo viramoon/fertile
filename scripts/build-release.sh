@@ -14,7 +14,10 @@ esac
 
 root=${FERTILE_ROOT:-${FERTILE_BOX_HOME:-/home/box}/fertile}
 [[ $root == /* && $root != / ]] || { echo 'FERTILE_ROOT must be an absolute installation directory' >&2; exit 2; }
-if [[ -f $root/env.sh ]]; then source "$root/env.sh"; fi
+if [[ -f $root/env.sh ]]; then
+  # shellcheck source=/dev/null
+  source "$root/env.sh"
+fi
 export FERTILE_ROOT=$root
 mkdir -p "$root"/{run,releases,cache/build}
 exec 9>"$root/run/control.lock"
@@ -84,6 +87,7 @@ build_payload() {
 
   mkdir -p "$output"/{bin,static,web,finance,runtime,fertile}
   git -C "$repo" archive "$sha" scripts deploy | tar -x -C "$output/fertile"
+  # shellcheck source=deploy/toolchain.env
   source "$output/fertile/deploy/toolchain.env"
   [[ $vendor_sha == "$NAUTILUS_COMMIT" && $(node --version) == "v$NODE_VERSION" && $(pnpm --version) == "$PNPM_VERSION" ]]
   # The finance build checks its lock, upstream commit, wheel checksum and native extension.
