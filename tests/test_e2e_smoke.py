@@ -8,6 +8,8 @@ import json
 import os
 from pathlib import Path
 import secrets
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -40,10 +42,10 @@ class Site(BaseHTTPRequestHandler):
             self.send(200, {"database": {"ok": True}, "finance": {"ok": True, "circuit": "closed"},
                             "web": {"version": "0.0.0", "commit": "c" * 40},
                             "market": {"fresh": True, "state": "ready", "instrument_count": 1,
-                                       "stale_count": 0, "source": "replay"}})
+                                       "stale_count": 0, "source": self.server.source}})
         elif self.path == "/api/v1/market/status":
             now = datetime.now(timezone.utc)
-            self.send(200, {"state": "ready", "updated_at": now.isoformat(), "source": "replay", "max_age_seconds": 180,
+            self.send(200, {"state": "ready", "updated_at": now.isoformat(), "source": self.server.source, "max_age_seconds": 180,
                             "instruments": [{"instrument": "SPY.ARCA", "age_seconds": self.server.age,
                                              "last_bar_at": (now - timedelta(seconds=self.server.age)).isoformat(),
                                              "stale": False}]})
@@ -80,6 +82,7 @@ class SmokeTests(unittest.TestCase):
                              "total_positions": 0, "pnl": "12345678901234567890.12345678", "currency": "USD"}
         self.site.redirect = False
         self.site.age = 5
+        self.site.source = "replay"
         self.site.posts, self.site.reads = [], []
         threading.Thread(target=self.site.serve_forever, daemon=True).start()
         self.addCleanup(self.site.shutdown)
@@ -90,11 +93,11 @@ class SmokeTests(unittest.TestCase):
             handle.write("WEB_ADMIN_TOKEN=" + self.site.token + "\n")
         self.http = check.HTTP(f"http://127.0.0.1:{self.site.server_port}", local=True)
 
-    def exercise(self):
+    def exercise(self, protocol_fixture=False):
         output = io.StringIO()
         try:
             with redirect_stdout(output):
-                check.smoke(self.http, self.secret, {"ib-gateway": "disabled"})
+                check.smoke(self.http, self.secret, {"ib-gateway": "disabled"}, protocol_fixture)
         finally:
             self.assertNotIn(self.site.token, output.getvalue(), "credential appeared in evidence")
             self.assertFalse(any(auth for _, auth in self.site.reads), "authenticated GET sent unexpectedly")
@@ -113,6 +116,40 @@ class SmokeTests(unittest.TestCase):
             self.exercise()
         self.assertEqual(len(self.site.posts), 1)
         self.assertNotIn("/never-forward-here", [p for p, _ in self.site.reads])
+
+    def test_fixture_requires_ib_data_and_explicit_mode(self):
+        with self.assertRaisesRegex(check.SmokeError, "requires the IB collector"):
+            self.exercise(protocol_fixture=True)
+        self.site.source = "ib-realtime"
+        with self.assertRaisesRegex(check.SmokeError, "external services"):
+            self.exercise()
+        self.assertFalse(self.site.posts)
+        self.assertIn("synthetic loopback IB protocol fixture", self.exercise(protocol_fixture=True))
+        self.assertEqual(len(self.site.posts), 1)
+
+    def test_fixture_rejects_credentials_and_public_switch(self):
+        root = self.secret.parent
+        (root / "secrets").mkdir()
+        (root / "secrets/ibkr-paper.env").touch()
+        with self.assertRaisesRegex(check.SmokeError, "paper credentials"):
+            check.require_fixture_environment(root, root)
+        proc = subprocess.run([sys.executable, check.__file__, "public", "https://www.viramoon.com",
+                               "--protocol-fixture"], capture_output=True, timeout=3)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn(b"unrecognized arguments", proc.stderr)
+
+    def test_fixture_verifies_which_process_owns_the_socket(self):
+        script = self.secret.parent / "peer.py"
+        script.write_text("import socket, sys\ns = socket.socket()\ns.bind(('127.0.0.1', 0))\ns.listen()\n"
+                          "print(s.getsockname()[1], flush=True)\nsys.stdin.read()\n")
+        with subprocess.Popen([sys.executable, script, "gateway"], stdin=subprocess.PIPE, stdout=subprocess.PIPE) as peer:
+            try:
+                port = int(peer.stdout.readline())
+                check.require_fixture_listener(peer.pid, port)
+                with self.assertRaisesRegex(check.SmokeError, "does not own"):
+                    check.require_fixture_listener(peer.pid, self.site.server_port)
+            finally:
+                peer.stdin.close()
 
     def test_expired_bars_and_numeric_pnl_stop_before_submission(self):
         self.site.age = 300

@@ -100,13 +100,50 @@ class HTTP:
         return obj
 
 
-def await_stack():
+def require_fixture_listener(pid, port=4002):
+    require(pid > 1, "FERTILE_SMOKE_FIXTURE_PID must name the synthetic Gateway process")
+    proc = Path("/proc") / str(pid)
+    argv = (proc / "cmdline").read_bytes().split(b"\0")
+    require((proc / "exe").resolve(strict=True).name.startswith("python") and
+            any(Path(os.fsdecode(arg)).name == "peer.py" for arg in argv) and b"gateway" in argv,
+            "the provided pid is not the Python gateway protocol fixture")
+    sockets = set()
+    for descriptor in (proc / "fd").iterdir():
+        try:
+            sockets.add(os.readlink(descriptor))
+        except FileNotFoundError:
+            continue
+    address = f"0100007F:{port:04X}"
+    records = [line.split() for line in Path("/proc/net/tcp").read_text().splitlines()[1:]]
+    require(any(row[1] == address and row[3] == "0A" and f"socket:[{row[9]}]" in sockets for row in records),
+            "the named protocol fixture does not own the loopback listener")
+
+
+def require_fixture_environment(root, box):
+    for location in {root, box / "fertile", Path("/home/box/fertile")}:
+        require(not any(os.path.lexists(location / "secrets" / file) for file in ("ibkr-paper.env", "alerts.env")),
+                "paper credentials or an alert destination are present; fixture mode refused")
+    for home in {box, Path("/home/box")}:
+        folder = home / ".cloudflared"
+        if folder.exists():
+            require(not any(p.suffix in {".pem", ".json", ".yml", ".yaml"} for p in folder.iterdir()),
+                    "Cloudflare credentials or configuration are present; fixture mode refused")
+    require(os.environ.get("IB_GATEWAY_ADDRESS", "127.0.0.1:4002") == "127.0.0.1:4002",
+            "protocol fixture requires a loopback Gateway")
+    require_fixture_listener(int(os.environ.get("FERTILE_SMOKE_FIXTURE_PID", "0")))
+
+
+def await_stack(protocol_fixture=False):
     deadline = time.monotonic() + 60
     while True:
         result = subprocess.check_output([CLI, "status", "--json"], timeout=10)
         snapshot = json.loads(result)
         services = snapshot["services"]
         require(CORE <= services.keys(), "local supervisor manifest is missing a required service")
+        if protocol_fixture:
+            require(EXTERNAL <= services.keys() and all(
+                services[name]["state"] == "disabled" and services[name]["pid"] == 0 for name in EXTERNAL),
+                "protocol fixture requires explicitly disabled Gateway, xvfb and cloudflared")
         skipped, unhealthy = {}, []
         for name, svc in services.items():
             if name in EXTERNAL and svc["state"] in {"disabled", "missing_binary", "needs_credentials"}:
@@ -193,7 +230,7 @@ def check_market(market):
     log("market", source=market["source"], updated_at=market["updated_at"], instruments=market["instruments"])
 
 
-def smoke(http, secret, skipped):
+def smoke(http, secret, skipped, protocol_fixture=False):
     require(http.read("/healthz/live").get("status") == "ok", "web is not live")
     ready = http.read("/healthz/ready")
     require(ready.get("status") == "ready" and ready.get("checks")
@@ -211,8 +248,12 @@ def smoke(http, secret, skipped):
     require(state["market"]["source"] == market["source"]
             and state["market"]["instrument_count"] == len(market["instruments"]),
             "market summaries disagree across status routes")
-    require(not skipped or market["source"] == "replay", "required external services are unavailable for paper acceptance")
-    if skipped:
+    if protocol_fixture:
+        require(market["source"] in {"ib-realtime", "ib-delayed"}, "protocol fixture requires the IB collector")
+        log("synthetic loopback IB protocol fixture", external_services=skipped,
+            unverified=["IB Gateway login", "broker market data", "Cloudflare Tunnel", "public HTTPS"])
+    elif skipped:
+        require(market["source"] == "replay", "required external services are unavailable for paper acceptance")
         log("replay external services skipped", services=skipped)
     check_assets(http)
 
@@ -244,6 +285,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_subparsers(dest="mode", required=True)
     local = modes.add_parser("local")
+    local.add_argument("--protocol-fixture", action="store_true",
+                       help="isolated loopback IB wire test only; requires FERTILE_SMOKE_FIXTURE_PID")
     public = modes.add_parser("public")
     public.add_argument("origin", type=public_origin, help="explicitly confirmed HTTPS origin")
     for mode in (local, public):
@@ -255,11 +298,15 @@ def main():
     signal.signal(signal.SIGALRM, timed_out)
     signal.alarm(args.timeout_seconds)
     try:
-        origin, skipped = await_stack() if args.mode == "local" else (args.origin, {})
-        root = Path(os.environ.get("FERTILE_ROOT", Path(os.environ.get("FERTILE_BOX_HOME", "/home/box")) / "fertile"))
+        box = Path(os.environ.get("FERTILE_BOX_HOME", "/home/box"))
+        root = Path(os.environ.get("FERTILE_ROOT", box / "fertile"))
+        fixture = args.mode == "local" and args.protocol_fixture
+        if fixture:
+            require_fixture_environment(root, box)
+        origin, skipped = await_stack(fixture) if args.mode == "local" else (args.origin, {})
         secret = Path(os.environ.get("WEB_ADMIN_TOKEN_FILE", root / "secrets/web.env"))
         log("smoke", mode=args.mode, origin=origin, timeout_seconds=args.timeout_seconds)
-        smoke(HTTP(origin, args.mode == "local"), secret, skipped)
+        smoke(HTTP(origin, args.mode == "local"), secret, skipped, fixture)
     finally:
         signal.alarm(0)
 
