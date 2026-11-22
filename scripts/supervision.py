@@ -396,6 +396,16 @@ def report():
             state = svc["skip"] or info.get("statename", "STOPPED")
             services[name] = dict(enabled=svc["enabled"], state=state, pid=info.get("pid", 0),
                                   live=None, ready=None, live_url=svc["live_url"], ready_url=svc["ready_url"])
+            if name == "ib-gateway" and not svc["skip"] and state == "RUNNING":
+                try:
+                    gateway = json.loads((RUN / "ibgateway/state.json").read_text())
+                    app_state = gateway.get("state")
+                    if app_state in ("startup", "ready", "backoff", "needs_credentials", "needs_attention"):
+                        services[name]["application_state"] = app_state
+                        if gateway.get("code") == "login_or_2fa":
+                            services[name]["application_code"] = "login_or_2fa"
+                except (OSError, ValueError):
+                    pass  # Process startup may precede the first published state.
             if not svc["skip"]:
                 for check in ("live", "ready"):
                     pending[name,check] = pool.submit(http_status, svc[check+"_url"])
@@ -465,13 +475,16 @@ def main():
         else:
             print(f"supervisord {data['supervisor']} pid={data['supervisor_pid']}")
             for name, item in data["services"].items():
-                print(f"{name:24} {item['state']:24} pid={item['pid']} live={item['live']} ready={item['ready']}")
+                extra = " " + item["application_state"] if "application_state" in item else ""
+                print(f"{name:24} {item['state']:24} pid={item['pid']} live={item['live']} ready={item['ready']}{extra}")
         return
     if args.action == "logs":
         if not NAME.fullmatch(args.name):
             raise ValueError("invalid service name")
         os.execlp("tail", "tail", "-n", "100", str(LOGS / args.name / "stdout.log"))
     with lock():
+        if args.action != "down" and (RUN / "restore-journal.json").exists():
+            raise RuntimeError("unfinished restore; run scripts/restore.sh to recover before starting services")
         if args.action in ("up", "ensure"):
             ensure()
         elif args.action == "down":
