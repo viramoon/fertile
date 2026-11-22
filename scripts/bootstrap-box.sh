@@ -25,7 +25,10 @@ download() {
 }
 system_deps() {
   local packages=(build-essential ca-certificates curl xz-utils bzip2 git pkg-config
-    libssl-dev zlib1g-dev libtinfo6 libxml2 libz3-4 bison flex)
+    libssl-dev zlib1g-dev libtinfo6 libxml2 libz3-4 bison flex
+    xvfb xauth x11-utils unzip libxi6 libxrender1 libxtst6 libxext6 libfontconfig1
+    fonts-liberation libgtk-3-0t64 libasound2t64 libnss3 libxrandr2 libxkbcommon0
+    libxcomposite1 libxdamage1 libxfixes3 libgbm1 libgl1)
   local missing=() p
   for p in "${packages[@]}"; do
     dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q '^install ok installed$' ||
