@@ -8,7 +8,7 @@ permissions:
 jobs:
   recovery:
     runs-on: ubuntu-24.04
-    timeout-minutes: 12
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -18,15 +18,34 @@ jobs:
         run: |
           source deploy/toolchain.env
           echo "python=$PYTHON_VERSION" >> "$GITHUB_OUTPUT"
+          echo "pg=$POSTGRES_VERSION" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ steps.tools.outputs.python }}
+      - uses: actions/cache@v4
+        id: postgres
+        with:
+          path: ${{ runner.temp }}/backup-postgres
+          key: recovery-postgres-${{ runner.os }}-${{ runner.arch }}-${{ steps.tools.outputs.pg }}
+      - name: Build the pinned PostgreSQL tools on Ubuntu
+        if: steps.postgres.outputs.cache-hit != 'true'
+        env:
+          PG_VERSION: ${{ steps.tools.outputs.pg }}
+        run: |
+          cd "$RUNNER_TEMP"
+          archive="postgresql-$PG_VERSION.tar.bz2"
+          url="https://ftp.postgresql.org/pub/source/v$PG_VERSION/$archive"
+          curl -fsSLO --retry 3 "$url"
+          curl -fsSLO --retry 3 "$url.sha256"
+          sha256sum -c "$archive.sha256"
+          tar -xf "$archive"
+          cd "postgresql-$PG_VERSION"
+          ./configure --prefix="$RUNNER_TEMP/backup-postgres" --without-icu --without-readline
+          make -j2 > "$RUNNER_TEMP/postgres-build.log"
+          make install >> "$RUNNER_TEMP/postgres-build.log"
       - name: Restore a dropped PostgreSQL database and Parquet and SQLite data
         run: |
           python -m pip install pyarrow==26.0.1
-          if [[ ! -x /usr/lib/postgresql/17/bin/initdb ]]; then
-            sudo apt-get -o Acquire::Retries=5 update
-            sudo apt-get -o Acquire::Retries=5 install -y postgresql-17
-          fi
-          export PATH="/usr/lib/postgresql/17/bin:$PATH"
+          export PATH="$RUNNER_TEMP/backup-postgres/bin:$PATH"
+          pg_ctl --version
           python tests/backup_restore.py
