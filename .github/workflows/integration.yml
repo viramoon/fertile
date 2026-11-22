@@ -1,0 +1,31 @@
+name: Cross-repository integration
+on:
+  pull_request:
+  push:
+    branches: [ha-runthrough, main]
+permissions:
+  contents: read
+concurrency:
+  group: integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Check out the locked private submodules and Nautilus source
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.FERTILE_SUBMODULES_TOKEN || github.token }}
+          submodules: recursive
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify the actual service source checkouts
+        run: |
+          for name in finance web frontend; do
+            test "$(git ls-tree HEAD "$name" | awk '{print $3}')" = "$(git -C "$name" rev-parse HEAD)"
+          done
+          source deploy/toolchain.env
+          test "$(git -C finance/vendor/nautilus_trader rev-parse HEAD)" = "$NAUTILUS_COMMIT"
+          git submodule status --recursive
