@@ -56,6 +56,15 @@ class RuntimePlan(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid service env_file"):
             ctl.build_plan()
 
+    def test_restore_recovery_prevents_all_service_starts_and_switches(self):
+        (self.run / "restore-journal.json").write_text("{}")
+        for args in (["up"], ["ensure"], ["restart", "test"], ["rollback", "1234567"]):
+            with self.subTest(args=args), patch.object(sys, "argv", ["fertile", *args]):
+                with self.assertRaisesRegex(RuntimeError, "unfinished restore"):
+                    ctl.main()
+        with patch.object(sys, "argv", ["fertile", "down"]), patch.object(ctl, "daemon_pid", return_value=0):
+            ctl.main()
+
     def test_profile_mode_and_deterministic_render(self):
         self.write()
         config = self.root / "config/runtime.env"
