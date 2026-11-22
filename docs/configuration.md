@@ -16,7 +16,7 @@ Ruler 在运行根 config/runtime.env 中填写每行一个非敏感 KEY=VALUE�
 | FERTILE_HEALTH_CONFIG、FERTILE_PUBLIC_ORIGIN | 站点巡检配置和经确认的 HTTPS 入口。公网入口为空时采样会记录跳过。 |
 | FERTILE_BACKUP_DAYS、FERTILE_BACKUP_WEEKS、FERTILE_BACKUP_REMOTE | 本地保留周期与可选 rclone remote 名。详细设置见 [备份](../ops/backup.md)。 |
 
-主管为 web 注入同一 release 的 WEB_STATIC_ROOT、finance HTTP 地址和 PostgreSQL socket。仅在需要外部或独立的数据库身份时设置 web-database.env。迁移、权限和停库恢复按 [Ruler 手册](../ops/ruler-runbook.md) 操作。
+主管为 web 注入同一 release 的 WEB_STATIC_ROOT、finance HTTP 地址和 PostgreSQL socket。默认本机 web 使用独立的 fertile_web PostgreSQL 登录角色，通过 Unix socket peer 映射认证。运行时角色仅在其私有迁移 schema、app 和 blog 内具有相应权限；首次 SQLx 迁移的数据库 CREATE 权限由主管临时授予并收回。管理员备份继续使用原 peer 身份。外部 DATABASE_URL 放在 web-database.env，本机初始化不会改动该数据库角色或密码。迁移、权限和停库恢复按 [Ruler 手册](../ops/ruler-runbook.md) 操作。
 
 ## 凭据与轮换
 

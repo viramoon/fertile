@@ -84,7 +84,11 @@ jobs:
           export PYTHONDONTWRITEBYTECODE=1
           (cd "$FERTILE_ROOT/current/finance" && bash scripts/backtest-sample.sh)
           scripts/fertile status --json
+          WEB_DATABASE_TEST_BIN="$FERTILE_ROOT/current/bin/web" WEB_DATABASE_TEST_CONFIG="$FERTILE_ROOT/current/web/config" \
+            "$FERTILE_ROOT/tools/supervisor/bin/python" -B tests/web-database.py
+          python3 tests/test_e2e_smoke.py
           tests/e2e-smoke.sh local
+          python3 tests/chaos/services.py postgres
       - name: Shut down the private test instance
         if: always()
         run: |

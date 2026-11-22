@@ -84,3 +84,40 @@ tests/simulate-reboot.sh
 执行 scripts/backup.sh 后记录其输出路径，先用 scripts/restore.sh --dry-run 检查所选快照。实际替换数据库前须让所有写入方退出，并让 PostgreSQL 保持可用。停机顺序、恢复前自动快照、中断后的重试和校验详见 [备份操作](backup.md)。默认保留 7 个每日和 4 个每周快照，仅保存在同一台盒子的备份无法应对整机丢失。
 
 在运行时根检查 logs/alerts/alerts.jsonl 和 logs/healthwatch/samples.jsonl，把服务停用、恢复、公网探测和备份年龄分开阅读。通知默认写入本地，维护人员可按 [监控](monitoring.md) 配置独立 webhook。paper Gateway 的安装、登录失败预算、2FA、每日自动重启和健康检查见 [Gateway 运维](ibgateway.md)。不要在运行记录中复制凭据、完整账号或本机令牌。
+
+## 整栈冒烟与故障验收
+
+先生成示例回测，再用持久目录的 web 管理令牌运行冒烟。脚本检查系统分项、市场数据年龄、首页 JS/CSS，并实际提交一个幂等回测，直到取得带精确数值的成功摘要。公开入口只填写用户已确认、由其控制且确实路由到本机 web 的 HTTPS origin。
+
+~~~sh
+tests/e2e-smoke.sh local
+tests/e2e-smoke.sh public "$FERTILE_PUBLIC_ORIGIN"
+~~~
+
+在维护窗口逐项执行，确保每个场景结束后恢复业务再进入下一项。进程测试只向已核对父进程和 PID 身份的本实例服务发信号。停库场景同时检查 web 和 finance PID。
+
+~~~sh
+python3 tests/chaos/services.py services
+python3 tests/chaos/services.py postgres
+python3 tests/chaos/services.py reboot
+~~~
+
+网络演练依赖已登录的只读 paper Gateway、稳定 1 分钟行情及已确认的公网入口。其命令、真实交易时段要求与复原操作见 [网络演练](../tests/chaos/network.md)。关闭任何真实 Tunnel 之前，另保留可管理盒子的连接。
+
+## 24 小时观察
+
+在真实盒子上述测试通过后，保留 healthwatch 的持续采样，尽量覆盖一个美股正常交易时段。先核实当时采样显示的发布提交、数据源和公网入口。将起点设为一条真实样本的 UTC 时间，等待至少一天，最后一条样本必须覆盖所选终点。
+
+~~~sh
+root=/home/box/fertile
+start=$(tail -1 "$root/logs/healthwatch/samples.jsonl" | python3 -c 'import json,sys; print(json.load(sys.stdin)["timestamp"])')
+printf '%s\n' "$start" > "$root/run/soak-start.utc"
+# 至少 24 小时后，在包含上述起点的同一部署上执行
+start=$(cat "$root/run/soak-start.utc")
+python3 scripts/soak_report.py \
+  --samples "$root/logs/healthwatch/samples.jsonl" --alerts "$root/logs/alerts/alerts.jsonl" \
+  --start "$start" --require-hours 24 --label "目标盒子 · IBKR paper 与已确认的 Tunnel" \
+  --output "ops/reports/${start%%T*}-soak.md"
+~~~
+
+采样不足或存在缺口时生成器会写明覆盖区间并返回非零。核对真实服务可用率、断线及恢复时间、行情最大陈旧时间和跳过的探针；外部原因与 2FA 人工步骤附入同一条验收记录。隔离 ReplaySource 或协议替身的报告应使用其实际环境标签。
