@@ -58,6 +58,12 @@ infrastructure:
     account: paper
     read_only: true
     credentials_file: /home/box/fertile/secrets/ibkr-paper.env
+    install: scripts/install-ibgateway.sh
+    check: scripts/ib-check.sh
+    run: scripts/ibgateway.sh run
+    display: scripts/ibgateway.sh xvfb
+    state: data/ibgateway
+    logs: logs/ibgateway
 paths:
   root: /home/box/fertile
   releases: releases
@@ -86,3 +92,14 @@ operations:
     stopwaitsecs: 30
     stopasgroup: true
     killasgroup: true
+backups:
+  command: scripts/backup.sh
+  restore: scripts/restore.sh
+  storage: backups
+  format: PostgreSQL custom dump, SQLite online backup and catalog hardlinks
+  schedule: deploy/healthwatch.yaml
+  retention:
+    daily: 7
+    weekly: 4
+  offsite_remote_env: FERTILE_BACKUP_REMOTE
+  offsite_default: disabled

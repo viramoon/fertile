@@ -21,3 +21,5 @@ curl -fsS http://127.0.0.1:8080/api/v1/backtests/sample
 ```
 
 Gateway 缺凭据时先处理 needs_credentials。行情陈旧时核对数据源、交易时段、最后 bar、水位和补数日志。网页可用与 collector 就绪分别记录；交易开放另受风控与对账约束。
+
+巡检进程把采样写入 logs/healthwatch/samples.jsonl，故障和恢复写入 logs/alerts/alerts.jsonl。核对同一服务先出现故障、随后恢复，并保留起止时间。公网 /healthz/ready 独立于本机 web 的 200；在 public_origin 确认前检查显示跳过。备份年龄从已完成且有校验清单的快照读取。详见 [巡检与告警](monitoring.md)。

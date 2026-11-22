@@ -1,0 +1,32 @@
+name: Backup and health checks
+on:
+  pull_request:
+  push:
+    branches: [ha-runthrough, main]
+permissions:
+  contents: read
+jobs:
+  recovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Read locked Python
+        id: tools
+        run: |
+          source deploy/toolchain.env
+          echo "python=$PYTHON_VERSION" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.tools.outputs.python }}
+      - name: Restore a dropped PostgreSQL database and Parquet and SQLite data
+        run: |
+          python -m pip install pyarrow==26.0.1
+          if [[ ! -x /usr/lib/postgresql/17/bin/initdb ]]; then
+            sudo apt-get -o Acquire::Retries=5 update
+            sudo apt-get -o Acquire::Retries=5 install -y postgresql-17
+          fi
+          export PATH="/usr/lib/postgresql/17/bin:$PATH"
+          python tests/backup_restore.py

@@ -26,7 +26,7 @@ scripts/fertile status --json
 curl -fsS http://127.0.0.1:8080/api/v1/system/status
 ~~~
 
-打开本机 8080 端口即可访问看板。首页、仪表盘、博客和设置由同一个 web 进程托管。仪表盘展示系统状态、行情新鲜度和最近示例回测；准备样例及提交实际回测的命令见 [Ruler 手册](ops/ruler-runbook.md)。公网入口待域名确认后通过既有 Cloudflare Tunnel 启用。
+打开本机 8080 端口即可访问看板。交易、回测、博客和仪表盘四个页面由同一个 web 进程托管。仪表盘展示系统状态、行情新鲜度和最近示例回测；准备样例及提交实际回测的命令见 [Ruler 手册](ops/ruler-runbook.md)。公网入口待域名确认后通过既有 Cloudflare Tunnel 启用。
 
 ## 运维和开发
 
