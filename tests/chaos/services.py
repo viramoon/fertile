@@ -63,7 +63,9 @@ def restart_database():
         stack.callback(os.close, drill.identity(services["postgres"]["pid"], parent=daemon))
         supervisor_bin = Path(os.environ.get("FERTILE_SUPERVISOR_BIN", drill.ROOT / "tools/supervisor/bin"))
         control = [str(supervisor_bin / "supervisorctl"), "-c", str(drill.ROOT / "run/supervisord.conf")]
-        subprocess.run([*control, "stop", "postgres"], check=True, timeout=40)
+        stopped = time.monotonic()
+        subprocess.run([drill.CLI, "stop", "postgres"], check=True, timeout=35)
+        drill.report("postgres clean stop", elapsed_seconds=round(time.monotonic() - stopped, 3))
         try:
             outage = drill.wait_status(time.monotonic() + 30, lambda s: s["services"]["web"]["ready"] == 503)
             drill.report("postgres offline", web_ready=outage["services"]["web"]["ready"],

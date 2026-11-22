@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+from pwd import getpwuid
 import shlex
 import shutil
 import signal
@@ -182,9 +183,10 @@ def build_plan():
                        FINANCE_COLLECTOR_CONFIG=settings.get("FINANCE_COLLECTOR_CONFIG", str(
                            release / "finance/config/collector" / (f"{profile}.yaml" if source == "replay" else "ib-cloudbox.yaml"))))
         if name == "web":
+            authority = "localhost" if custom else "fertile_web@localhost"
             env.update(WEB_PORT=fields["web_port"], WEB_CONFIG_DIR=str(release / "web/config"),
                        WEB_STATIC_ROOT=str(release / "static"), WEB_ADMIN_TOKEN_FILE=str(ROOT / "secrets/web.env"),
-                       DATABASE_URL=f"postgresql://localhost/web?host={quote(common['PGHOST'], safe='')}&port={common['PGPORT']}",
+                       DATABASE_URL=f"postgresql://{authority}/web?host={quote(common['PGHOST'], safe='')}&port={common['PGPORT']}",
                        FINANCE_BASE_URL=f"http://127.0.0.1:{fields['finance_port']}")
         env.update({k: expand(v) for k, v in row.get("environment", {}).items()})
         skip = "" if row.get("enabled", True) else "disabled"
@@ -217,6 +219,12 @@ def build_plan():
                               enabled=row.get("enabled", True), skip=skip,
                               live_url=expand(row["live"]) if row.get("live") else None,
                               ready_url=expand(row["ready"]) if row.get("ready") else None)
+    web = services.get("web")
+    if not custom and web and not web["skip"] and "postgres" in services:
+        file = web["env_file"]
+        external = file and "DATABASE_URL" in read_env(ROOT / "secrets" / file, secret=True)
+        if not external:
+            services["postgres"]["env"]["FERTILE_WEB_PEER"] = "1"
     return dict(release=str(release), data=str(data), create_data="FERTILE_DATA_ROOT" not in settings,
                 default=not bool(custom), services=services)
 
@@ -282,8 +290,51 @@ def start_daemon():
     raise RuntimeError("supervisord did not open its private socket")
 
 
+def stop_postgres(api, pid):
+    """Promote smart shutdown to PostgreSQL's fast, transactional shutdown."""
+    binary = shutil.which("postgres")
+    if not binary or not pid:
+        return False
+    try:
+        fd = os.pidfd_open(pid)
+    except ProcessLookupError:
+        return False
+    try:
+        proc = Path(f"/proc/{pid}")
+        try:
+            is_postmaster = os.path.samefile(proc / "exe", binary)
+            parent = int((proc / "stat").read_text().rsplit(")", 1)[1].split()[1])
+        except FileNotFoundError:
+            return False
+        if not is_postmaster or parent != api.getPID() or api.getProcessInfo("postgres")["pid"] != pid:
+            return False
+        # First ask supervisord to stop it: the autorestart policy must already
+        # see an intentional stop before the postmaster receives fast shutdown.
+        api.stopProcess("postgres", False)
+        info = api.getProcessInfo("postgres")
+        if info["statename"] == "STOPPING" and info["pid"] == pid:
+            try:
+                signal.pidfd_send_signal(fd, signal.SIGINT)
+            except ProcessLookupError:
+                pass
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            info = api.getProcessInfo("postgres")
+            if info["statename"] == "STOPPED":
+                if info["exitstatus"] != 0:
+                    raise RuntimeError(f"postgres shutdown exited with {info['exitstatus']}")
+                return True
+            time.sleep(.05)
+        raise RuntimeError("postgres did not complete clean shutdown within 30 seconds")
+    finally:
+        os.close(fd)
+
+
 def stop_group(api, name):
-    state = api.getProcessInfo(name)["statename"]
+    info = api.getProcessInfo(name)
+    state = info["statename"]
+    if name == "postgres" and state == "RUNNING" and stop_postgres(api, info["pid"]):
+        return
     if state in ("STARTING", "RUNNING", "BACKOFF", "STOPPING"):
         try:
             api.stopProcess(name, True)
@@ -310,16 +361,38 @@ def down():
     raise RuntimeError("supervisord shutdown timed out")
 
 
-def prepare_web(env):
-    pg_env = {**os.environ, **env, "PGDATABASE": "postgres"}
+def prepare_web(plan):
+    services = plan["services"]
+    pg = services.get("postgres")
+    if not plan["default"] or not pg or pg["skip"] or pg["env"].get("FERTILE_WEB_PEER") != "1":
+        return
+    web = services["web"]
+    admin = {**pg["env"], "PGUSER": getpwuid(os.getuid()).pw_name, "PGDATABASE": "postgres"}
     for _ in range(50):
-        if subprocess.run(["pg_isready", "-q"], env=pg_env).returncode == 0:
+        if subprocess.run(["pg_isready", "-q"], env=admin).returncode == 0:
             break
         time.sleep(.1)
-    result = subprocess.check_output(["psql", "-XAt", "-v", "ON_ERROR_STOP=1", "-c",
-                                      "SELECT 1 FROM pg_database WHERE datname = 'web'"], env=pg_env, text=True)
-    if result.strip() != "1":
-        subprocess.run(["createdb", "web"], env=pg_env, check=True)
+    release = Path(plan["release"])
+    subprocess.run(["psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-f",
+                    release / "fertile/scripts/prepare-web-db.sql"], env=admin, check=True)
+    admin["PGDATABASE"] = "web"
+    # The initial web migration creates app and blog. Permission is limited to this
+    # database and ends before the API starts. A retried ensure recovers an interrupted grant.
+    revoke = ["psql", "-Xq", "-v", "ON_ERROR_STOP=1", "-c", "REVOKE CREATE ON DATABASE web FROM fertile_web"]
+    subprocess.run(revoke, env=admin, check=True)
+    initial = subprocess.check_output(
+        ["psql", "-XAt", "-c", "SELECT to_regnamespace('app') IS NULL AND to_regnamespace('blog') IS NULL"],
+        env=admin, text=True).strip() == "t"
+    try:
+        if initial:
+            subprocess.run(["psql", "-Xq", "-v", "ON_ERROR_STOP=1", "-c",
+                            "GRANT CREATE ON DATABASE web TO fertile_web"], env=admin, check=True)
+        subprocess.run([release / "bin/web", "migrate"], cwd=web["directory"], env=web["env"], check=True)
+    finally:
+        if initial:
+            subprocess.run(revoke, env=admin, check=True)
+    subprocess.run(["psql", "-Xq", "-v", "ON_ERROR_STOP=1", "-v", "finish=1", "-f",
+                    release / "fertile/scripts/prepare-web-db.sql"], env=admin, check=True)
 
 
 def ensure():
@@ -356,8 +429,8 @@ def ensure():
             failures.append(f"{name}: FATAL; inspect logs, then run fertile restart {name}")
             continue
         try:
-            if plan["default"] and name == "web" and "postgres" in svc and not svc["postgres"]["skip"]:
-                prepare_web(svc["postgres"]["env"])
+            if name == "web":
+                prepare_web(plan)
             api.startProcess(name, True)
         except (Fault, OSError, subprocess.CalledProcessError) as error:
             failures.append(f"{name}: {error}")
@@ -465,7 +538,7 @@ def main():
     for action in ("up", "down", "ensure"):
         sub.add_parser(action)
     sub.add_parser("status").add_argument("--json", action="store_true")
-    for action in ("logs", "restart"):
+    for action in ("logs", "restart", "stop"):
         sub.add_parser(action).add_argument("name")
     sub.add_parser("rollback").add_argument("ref")
     args = parser.parse_args()
@@ -484,7 +557,7 @@ def main():
             raise ValueError("invalid service name")
         os.execlp("tail", "tail", "-n", "100", str(LOGS / args.name / "stdout.log"))
     with lock():
-        if args.action != "down" and (RUN / "restore-journal.json").exists():
+        if args.action not in ("down", "stop") and (RUN / "restore-journal.json").exists():
             raise RuntimeError("unfinished restore; run scripts/restore.sh to recover before starting services")
         if args.action in ("up", "ensure"):
             ensure()
@@ -494,12 +567,17 @@ def main():
             rollback(args.ref)
         else:
             if not daemon_pid():
+                if args.action == "stop":
+                    return
                 raise ValueError("supervisord is stopped; use fertile ensure")
-            svc = json.loads(SNAPSHOT.read_text())["services"].get(args.name)
+            plan = json.loads(SNAPSHOT.read_text())
+            svc = plan["services"].get(args.name)
             if not svc or svc["skip"]:
                 raise ValueError(f"service unavailable: {args.name}")
             api = connection()
             stop_group(api, args.name)
+            if args.name == "web":
+                prepare_web(plan)
             api.startProcess(args.name, True)
 
 
