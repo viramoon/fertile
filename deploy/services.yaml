@@ -32,6 +32,7 @@ services:
     ready: "http://127.0.0.1:${web_port}/healthz/ready"
   - name: cloudflared
     enabled: true
+    directory: "${root}"
     command: [cloudflared, tunnel, --config, "${cloud_config}", --protocol, quic, run]
   - name: xvfb
     enabled: true

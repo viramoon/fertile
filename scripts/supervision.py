@@ -39,7 +39,7 @@ SETTING = re.compile(r"[A-Z_][A-Z_0-9]*\Z")
 SUPPORTED = {
     "FERTILE_PROFILE", "FERTILE_MARKET_SOURCE", "FERTILE_DATA_ROOT", "FERTILE_POSTGRES_PORT",
     "FINANCE_API_PORT", "FINANCE_COLLECTOR_PORT", "WEB_PORT", "IB_GATEWAY_ADDRESS",
-    "FINANCE_COLLECTOR_CONFIG", "WEB_REQUIRE_FINANCE", "FERTILE_HEALTH_CONFIG",
+    "FINANCE_COLLECTOR_CONFIG", "WEB_REQUIRE_FINANCE", "FERTILE_HEALTH_CONFIG", "FERTILE_PUBLIC_ORIGIN",
 }
 INHERIT = {
     *SUPPORTED, "HOME", "PATH", "LANG", "LC_ALL", "TZ", "USER", "LOGNAME",
@@ -162,6 +162,7 @@ def build_plan():
     common = dict(PYTHONDONTWRITEBYTECODE="1", FERTILE_ROOT=str(ROOT), FERTILE_PROFILE=profile, FERTILE_MARKET_SOURCE=source,
                   FERTILE_DATA_ROOT=str(data), PGHOST=str(RUN / "postgres"),
                   PGPORT=port(settings.get("FERTILE_POSTGRES_PORT", 5432)), PGDATABASE="web")
+    common.update({key: val for key, val in settings.items() if key not in common})
     common["FERTILE_POSTGRES_PORT"] = common["PGPORT"]
     base = {k: os.environ[k] for k in INHERIT if k in os.environ}
     services = {}
@@ -195,6 +196,12 @@ def build_plan():
             skip = "missing_binary"
         if not skip and not Path(directory).is_dir():
             skip = "missing_directory"
+        if not custom and not skip and name == "finance-collector":
+            cfg = Path(env["FINANCE_COLLECTOR_CONFIG"])
+            if not cfg.is_file():
+                skip = "missing_configuration"
+            elif yaml.safe_load(cfg.read_text()).get("source") != source:
+                raise ValueError(f"{cfg}: collector source must match FERTILE_MARKET_SOURCE")
         env_file = row.get("env_file")
         if env_file:
             if Path(env_file).name != env_file or env_file == "ibkr-paper.env":
@@ -234,8 +241,14 @@ def esc(value):
 
 
 def render(plan):
-    templates = SCRIPTS.parent / "deploy/supervisor"
+    runtime = Path(plan["release"]) / "fertile" if plan["default"] else SCRIPTS.parent
+    templates = runtime / "deploy/supervisor"
     program = Template((templates / "program.conf.tmpl").read_text())
+    # Keep the child launcher stable when a release switches. External services
+    # such as cloudflared have no dependency on a particular release tree.
+    code = (runtime / "scripts/supervision.py").read_text()
+    child_script = RUN / "programs" / ("launcher-" + hashlib.sha256(code.encode()).hexdigest() + ".py")
+    atomic(child_script, code)
     chunks = []
     for idx, (name, svc) in enumerate(plan["services"].items(), 1):
         if svc["skip"]:
@@ -246,9 +259,6 @@ def render(plan):
         digest = hashlib.sha256(text.encode()).hexdigest()
         launcher = RUN / "programs" / f"{name}-{digest}.json"
         atomic(launcher, text)
-        child_script = Path(plan["release"]) / "fertile/scripts/supervision.py"
-        if not child_script.is_file():
-            child_script = Path(__file__).resolve()
         command = shlex.join([sys.executable, str(child_script), "_exec", str(launcher), name])
         chunks.append(program.substitute(name=name, priority=idx*10, directory=esc(svc["directory"]),
                                          command=esc(command), logfile=esc(logfile)))
@@ -419,12 +429,11 @@ def rollback(ref):
     if target == previous:
         ensure()
         return
-    down()
+    # Reconcile only changed groups, including when reversing a failed switch.
     switch(ROOT/"current", target)
     try:
         ensure()
     except Exception:
-        down()
         switch(ROOT/"current", previous)
         ensure()
         raise
