@@ -40,15 +40,18 @@ trap 'exit 1' HUP INT TERM
 "${filter[@]}" -I OUTPUT 1 "${rule[@]}"
 read -r started _ </proc/uptime
 printf 'active %s\n' "$started"
-remaining=$duration
-while (( remaining > 0 )); do
-  interval=$((remaining < 30 ? remaining : 30))
+deadline=$((10#${started/./} + duration * 100))
+while true; do
+  read -r clock _ </proc/uptime
+  remaining=$((deadline - 10#${clock/./}))
+  (( remaining > 0 )) || break
+  interval=$((remaining < 3000 ? remaining : 3000))
+  printf -v timeout '%d.%02d' "$((interval / 100))" "$((interval % 100))"
   rc=0
-  read -r -t "$interval" _ || rc=$?
+  read -r -t "$timeout" _ || rc=$?
   (( rc > 128 )) || break # EOF when parent is interrupted
-  remaining=$((remaining - interval))
-  "${filter[@]}" -C OUTPUT "${rule[@]}" # Also retain the noninteractive sudo session.
+  (( interval < 3000 )) || "${filter[@]}" -C OUTPUT "${rule[@]}" # Retain noninteractive sudo session.
 done
 remove
 read -r ended _ </proc/uptime
-printf 'cleared %s\n' "$ended"
+printf 'cleared %s %s\n' "$ended" "$EPOCHREALTIME"
