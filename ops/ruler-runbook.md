@@ -34,6 +34,7 @@ curl -fsS http://127.0.0.1:8080/api/v1/backtests/sample
 ```sh
 scripts/fertile status --json
 scripts/fertile logs finance-api
+scripts/fertile stop web
 scripts/fertile restart web
 scripts/fertile down
 scripts/fertile ensure
