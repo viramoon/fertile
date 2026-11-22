@@ -1,0 +1,40 @@
+name: 进程守护与恢复
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  supervisor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check shell entry points
+        run: |
+          if ! command -v shellcheck >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y shellcheck
+          fi
+          shellcheck scripts/fertile scripts/setup-supervisor.sh scripts/build-release.sh scripts/postgres.sh \
+            tests/build-atomicity.sh tests/chaos-restart.sh tests/simulate-reboot.sh
+      - name: Verify isolated build failure preserves the current stack
+        run: bash tests/build-atomicity.sh
+      - name: Install the pinned supervisor
+        run: |
+          python3 -m venv "$RUNNER_TEMP/fertile-supervisor"
+          "$RUNNER_TEMP/fertile-supervisor/bin/python" -m pip install -r deploy/supervisor-requirements.txt
+      - name: Exercise rendering, restarts and whole-stack recovery
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/fertile-supervisor/bin/python" tests/supervision_plan.py
+          "$RUNNER_TEMP/fertile-supervisor/bin/python" -u tests/supervisor_ci.py | tee "$RUNNER_TEMP/supervisor-drill.log"
+      - name: Save drill output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: supervisor-drill
+          path: ${{ runner.temp }}/supervisor-drill.log
+          if-no-files-found: ignore
