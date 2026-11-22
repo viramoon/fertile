@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import select
+import shutil
 import signal
 import socket
 import subprocess
@@ -137,9 +138,11 @@ def tunnel_fd(stack, daemon, row, plan):
     fd = drill.identity(pid, parent=daemon)
     stack.callback(os.close, fd)
     argv = [os.fsdecode(a) for a in Path(f"/proc/{pid}/cmdline").read_bytes().rstrip(b"\0").split(b"\0")]
-    configured = plan["services"]["cloudflared"]["command"]
-    require(Path(argv[0]).name == "cloudflared" and Path(f"/proc/{pid}/exe").resolve().name == "cloudflared" and
-            argv[1:] == configured[1:] and argv[1:2] == ["tunnel"] and argv[-3:] == ["--protocol", "quic", "run"],
+    service = plan["services"]["cloudflared"]
+    configured = service["command"]
+    executable = shutil.which(configured[0], path=service["env"]["PATH"])
+    require(Path(configured[0]).name == "cloudflared" and executable and
+            os.path.samefile(executable, f"/proc/{pid}/exe") and argv[1:] == configured[1:] and argv[1:2] == ["tunnel"] and argv[-3:] == ["--protocol", "quic", "run"],
             "PID does not match this deployment's supervised QUIC Tunnel")
     state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
     require(state not in ("T", "t", "Z"), "Tunnel already stopped or traced before drill")
