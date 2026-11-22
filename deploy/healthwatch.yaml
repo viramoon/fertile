@@ -1,0 +1,6 @@
+# Site overrides use FERTILE_HEALTH_CONFIG. The tunnel origin is inherited from deploy/service.yaml.
+interval_seconds: 30
+timeout_seconds: 3
+disk_min_free_bytes: 2147483648
+backup_max_age_seconds: 129600
+backup_at_utc: "03:00"
