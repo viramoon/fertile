@@ -24,6 +24,7 @@ services:
     requires_bins: ["${release}/runtime/venv/bin/python", uv]
   - name: web
     enabled: true
+    local_database_role: fertile_web
     directory: "${release}/web"
     env_file: web-database.env
     env_file_optional: true

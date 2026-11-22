@@ -168,6 +168,7 @@ def build_plan():
     common["FERTILE_POSTGRES_PORT"] = common["PGPORT"]
     base = {k: os.environ[k] for k in INHERIT if k in os.environ}
     services = {}
+    database = "external"
     expand = lambda item: Template(str(item)).substitute(fields)
     for row in rows:
         name = row["name"]
@@ -183,7 +184,15 @@ def build_plan():
                        FINANCE_COLLECTOR_CONFIG=settings.get("FINANCE_COLLECTOR_CONFIG", str(
                            release / "finance/config/collector" / (f"{profile}.yaml" if source == "replay" else "ib-cloudbox.yaml"))))
         if name == "web":
-            authority = "localhost" if custom else "fertile_web@localhost"
+            # The controlling CLI can be newer than the selected release. Earlier
+            # managed-role bundles shipped the SQL before declaring the capability.
+            sql_available = (release / "fertile/scripts/prepare-web-db.sql").is_file()
+            if not custom:
+                declared = row.get("local_database_role")
+                if declared and (declared != "fertile_web" or not sql_available):
+                    raise ValueError("incomplete or unsupported web database provisioning in release")
+                database = "managed" if sql_available else "legacy"
+            authority = "fertile_web@localhost" if database == "managed" else "localhost"
             env.update(WEB_PORT=fields["web_port"], WEB_CONFIG_DIR=str(release / "web/config"),
                        WEB_STATIC_ROOT=str(release / "static"), WEB_ADMIN_TOKEN_FILE=str(ROOT / "secrets/web.env"),
                        DATABASE_URL=f"postgresql://{authority}/web?host={quote(common['PGHOST'], safe='')}&port={common['PGPORT']}",
@@ -223,10 +232,12 @@ def build_plan():
     if not custom and web and not web["skip"] and "postgres" in services:
         file = web["env_file"]
         external = file and "DATABASE_URL" in read_env(ROOT / "secrets" / file, secret=True)
-        if not external:
+        if external:
+            database = "external"
+        elif database == "managed":
             services["postgres"]["env"]["FERTILE_WEB_PEER"] = "1"
     return dict(release=str(release), data=str(data), create_data="FERTILE_DATA_ROOT" not in settings,
-                default=not bool(custom), services=services)
+                default=not bool(custom), services=services, web_database=database)
 
 
 def run_child(path, name):
@@ -364,15 +375,28 @@ def down():
 def prepare_web(plan):
     services = plan["services"]
     pg = services.get("postgres")
-    if not plan["default"] or not pg or pg["skip"] or pg["env"].get("FERTILE_WEB_PEER") != "1":
+    if not plan["default"] or not pg or pg["skip"]:
         return
     web = services["web"]
+    release = Path(plan["release"])
+    database = plan.get("web_database")
+    if database is None:  # restart may load a snapshot written by an older CLI
+        if web.get("env_file") and "DATABASE_URL" in read_env(ROOT / "secrets" / web["env_file"], secret=True):
+            return
+        database = "managed" if (release / "fertile/scripts/prepare-web-db.sql").is_file() else "legacy"
+    if database == "external":
+        return
     admin = {**pg["env"], "PGUSER": getpwuid(os.getuid()).pw_name, "PGDATABASE": "postgres"}
     for _ in range(50):
         if subprocess.run(["pg_isready", "-q"], env=admin).returncode == 0:
             break
         time.sleep(.1)
-    release = Path(plan["release"])
+    if database == "legacy":
+        exists = subprocess.check_output(["psql", "-XAt", "-v", "ON_ERROR_STOP=1", "-c",
+            "SELECT 1 FROM pg_database WHERE datname='web'"], env=admin, text=True)
+        if exists.strip() != "1":
+            subprocess.run(["createdb", "web"], env=admin, check=True)
+        return
     subprocess.run(["psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-f",
                     release / "fertile/scripts/prepare-web-db.sql"], env=admin, check=True)
     admin["PGDATABASE"] = "web"

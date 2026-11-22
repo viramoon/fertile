@@ -8,7 +8,6 @@ import subprocess
 import sys
 import tempfile
 import time
-from urllib.parse import quote
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
@@ -19,6 +18,29 @@ def run(*args, env, capture=False, check=True):
 
 def sql(env, query):
     return run("psql", "-XAt", "-v", "ON_ERROR_STOP=1", "-c", query, env=env, capture=True).stdout.strip()
+
+def legacy_bundle(root, source, config):
+    # Keep the rollback regression usable in shallow/squashed checkouts. The
+    # exact previous release can be supplied for a local upgrade rehearsal.
+    legacy = root / "releases/6f16f2e53e0d9f7317ce7029ce0756f693987b42"
+    (legacy / "bin").mkdir(parents=True)
+    (legacy / "bin/web").symlink_to(source)
+    (legacy / "web").mkdir()
+    (legacy / "web/config").symlink_to(config)
+    previous = os.environ.get("WEB_DATABASE_TEST_LEGACY_FERTILE")
+    if previous:
+        (legacy / "fertile").symlink_to(Path(previous).resolve(strict=True))
+    else:
+        (legacy / "fertile/scripts").mkdir(parents=True)
+        (legacy / "fertile/scripts/postgres.sh").symlink_to(REPO / "scripts/postgres.sh")
+        (legacy / "fertile/deploy").mkdir()
+        old = supervision.yaml.safe_load((REPO / "deploy/services.yaml").read_text())
+        for row in old["services"]:
+            row.pop("local_database_role", None)
+        (legacy / "fertile/deploy/services.yaml").write_text(supervision.yaml.safe_dump(old))
+    assert not (legacy / "fertile/scripts/prepare-web-db.sql").exists()
+    return legacy
+
 
 def audit():
     source = Path(os.environ["WEB_DATABASE_TEST_BIN"]).resolve(strict=True)
@@ -44,31 +66,50 @@ def audit():
         # Build the real plan. Only web and postgres are needed in this isolated release.
         plan = supervision.build_plan()
         assert plan["services"]["postgres"]["env"]["FERTILE_WEB_PEER"] == "1"
-        pg = REPO / "scripts/postgres.sh"
-        run(pg, "init", env=base, capture=True)
+        legacy = legacy_bundle(root, source, config)
+        supervision.switch(root / "current", legacy)
+        old_plan = supervision.build_plan()
+        services = old_plan["services"]
+        assert old_plan["web_database"] == "legacy"
+        assert "FERTILE_WEB_PEER" not in services["postgres"]["env"]
+        assert services["web"]["env"]["DATABASE_URL"].startswith("postgresql://localhost/web?")
+        run(*services["postgres"]["command"][:-1], "init", env=services["postgres"]["env"], capture=True)
         original = [root / "data/postgres" / f"pg_{name}.conf" for name in ("ident", "hba")]
         original_bytes = [p.read_bytes() for p in original]
         log = (root / "pg.log").open("w")
-        server = subprocess.Popen([pg, "foreground"], env=base, stdout=log, stderr=log)
-        try:
+        def start_pg(selected):
+            pg = selected["services"]["postgres"]
+            handle = subprocess.Popen(pg["command"], env=pg["env"], stdout=log, stderr=log)
             for _ in range(80):
                 if run("pg_isready", "-q", env=base, capture=True, check=False).returncode == 0:
-                    break
-                if server.poll() is not None:
+                    return handle
+                if handle.poll() is not None:
                     raise RuntimeError((root / "pg.log").read_text())
                 time.sleep(.1)
+            handle.terminate()
+            handle.wait(timeout=15)
+            raise AssertionError("postgres startup timeout")
+
+        server = start_pg(old_plan)
+        try:
             admin = dict(base, PGDATABASE="web")
             web = dict(admin, PGUSER="fertile_web")
-            candidate = dict(base, WEB_CONFIG_DIR=str(config), DATABASE_URL=
-                             "postgresql://localhost/web?host=" + quote(str(sock), safe="") + "&port=55661")
-            run("createdb", "web", env=base)
+            candidate = services["web"]["env"]
+            supervision.prepare_web(old_plan)
+            assert sql(base, "SELECT count(*) FROM pg_roles WHERE rolname='fertile_web'") == "0"
+            assert sql(admin, "SHOW hba_file") == str(original[1])
             run(source, "migrate", env=candidate)
+            print("previous bundle: new database created, original peer identity and HBA; no managed role")
             sql(admin, "INSERT INTO app.schema_info VALUES ('preserve', 17)")
             sql(admin, "CREATE SCHEMA unrelated; CREATE TABLE unrelated.keep(n int)")
             archive = root / "legacy.dump"
             run("pg_dump", "-Fc", "--create", "-f", archive, env=admin)
             run("dropdb", "web", env=base)
             run("pg_restore", "--exit-on-error", "--create", "-d", "postgres", archive, env=base)
+            server.terminate()
+            server.wait(timeout=15)
+            supervision.switch(root / "current", release)
+            server = start_pg(plan)
             for label in ("restored-legacy", "idempotent"):
                 supervision.prepare_web(plan)
                 role = sql(web, "SELECT current_user, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls,"
@@ -85,6 +126,20 @@ def audit():
                 assert sql(web, "SELECT has_schema_privilege('app','CREATE'),has_schema_privilege('blog','CREATE')") == "t|t"
                 assert run("psql","-XAt","-c","SELECT 1",env=dict(web,PGDATABASE="postgres"),capture=True,check=False).returncode != 0
                 print(label, role, "migrations=1 preserved=17")
+            server.terminate()
+            server.wait(timeout=15)
+            supervision.switch(root / "current", legacy)
+            old_plan = supervision.build_plan()
+            server = start_pg(old_plan)
+            supervision.prepare_web(old_plan)
+            run(source, "migrate", env=old_plan["services"]["web"]["env"])
+            assert sql(admin, "SELECT count(*) FROM public._sqlx_migrations WHERE success") == "1"
+            assert sql(admin, "SELECT version FROM app.schema_info WHERE component='preserve'") == "17"
+            print("rollback: previous bundle migrated using the compatibility view; existing data preserved")
+            server.terminate()
+            server.wait(timeout=15)
+            supervision.switch(root / "current", release)
+            server = start_pg(plan)
             run("dropdb", "web", env=base)
             supervision.prepare_web(plan)
             assert sql(web, "SELECT version FROM app.schema_info WHERE component='web'") == "1"
