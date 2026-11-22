@@ -576,6 +576,8 @@ def main():
                 raise ValueError(f"service unavailable: {args.name}")
             api = connection()
             stop_group(api, args.name)
+            if args.action == "stop":
+                return
             if args.name == "web":
                 prepare_web(plan)
             api.startProcess(args.name, True)
