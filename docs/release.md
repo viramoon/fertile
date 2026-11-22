@@ -1,22 +1,22 @@
-# fertile 发版规则（唯一入口）
+# fertile 发版与集成规则
 
-只有 fertile 对外带版本号；finance / web / frontend 不对外发版。版本文件初始为 0.0.0，发布 tag 为 vX.Y.Z。Maas · Ruler 只按 fertile tag 部署和回滚。
+只有 fertile 对外带版本。总仓库 gitlink、同一次构建的静态文件和两个后端产物共同决定一次部署。发布部署与回滚由 Maas · Ruler 按已验证的 fertile tag 操作。当前 ha-runthrough 使用明确提交联调，版本维持 0.0.0。
 
-## 准备与固定版本
+## 验证固定提交
 
-1. 先合并并推送子模块变更，再在 fertile 发版 PR 更新 gitlink；目标 commit 必须已推送且在各子模块 main 历史中，不能只存在本地。更新指针只能走 PR。
-2. 集成检查组合：指针、配置、代码导出的 OpenAPI 快照、生成客户端、静态产物、迁移和恢复方案。当前实际 CI 仅文档检查；子模块与契约检查的实现仍是 TBD。
-3. 未来 release 脚本 bump VERSION，读取 gitlink 和上个版本，自动生成 RELEASES.md 条目，列出每个子模块精确 commit 及包含的 PR / issue；不手写发布记录或 deploy/versions.yaml。
-4. 在同一发版 PR 中固定版本、生成说明和指针，经检查与评审合并后打 vX.Y.Z；脚本自动给各子模块锁定 commit 打内部 tag fertile-vX.Y.Z 以追溯。tag 必须不可变，重复执行只能接受已存在且指向相同 commit 的 tag。
+先推送子仓库提交，再更新总仓的三个 gitlink。常规发版以各自远端 main 为准。本次跨仓联调使用用户授权的各子仓 ha-runthrough；合并进主线后重新校验 main。
 
-“更新指针 → 集成 → bump → tag → 自动发布记录与子模块内部 tag”是发布生命周期；生成条目在准备阶段由脚本产出并随发版 PR 固定，正式 tag 指向已包含该条目的提交，不能在 tag 之后手改文件或移动 tag。生成器尚未实现，初始 RELEASES.md 只有说明。
+~~~sh
+git submodule update --init --recursive
+scripts/check-submodules.sh --ref ha-runthrough
+scripts/contract-diff.sh
+scripts/release.sh --dry-run
+~~~
 
-## 部署与回滚
+默认运行 scripts/check-submodules.sh 会从 GitHub 查询各 main，验证所锁定的提交属于该分支历史。脚本也会检查嵌套 Nautilus checkout 与子模块工作树。托管 CI 递归读取私仓需提供 Actions secret FERTILE_SUBMODULES_TOKEN，最小权限为四仓库 Contents 只读。
 
-按 tag 获取子模块和对应配置 / 产物，依据 [deploy](../deploy/README.md) 与子模块 RUNBOOK 部署，先本地 live / ready 再公网端到端检查；把 tag、PR / issue、变更影响、验证和回退依据交给 Maas · Ruler。
+## 发布预览
 
-回滚选已验证的 fertile tag，恢复匹配组件与静态资源；数据库、catalog、节点状态兼容和备份先核对。子模块内部 tag 不能替代系统 tag，agent commit 只追溯知识分发。
+在含有完整历史和发布 tag 的 checkout 运行 dry-run，并让 gh 使用能读取这些私仓 PR 与 issue 的账号。预览读取 HEAD:VERSION、三个 gitlink 和最近可达的系统版本标签，列出新增提交关联的目标为 main 的 PR、合并状态和 GitHub 记录的关闭 issue。首次发布使用各锁定提交的全部祖先。标准输出可重定向到审阅文件；查询失败会以非零退出。
 
-## 未来 CI 设计与未定项
-
-check-submodules 校验远端可达和 main 祖先关系；diff-contracts 重导出并比较快照，破坏性变化需迁移方案；设计见 [scripts](../scripts/README.md)。TBD：具体命令、发布身份、权限、首个基线、部分失败可重入策略与集成门禁。初始化不实现这些脚本，不打发布 tag，不实际部署。
+正式发布另行授权。发布变更需在同一 PR 固定 VERSION、指针和脚本生成的 RELEASES.md，经集成验证再创建不可移动的系统标签 vX.Y.Z 和子模块内部标签 fertile-vX.Y.Z。当前命令仅接受 --dry-run。数据库与 catalog 格式兼容以及对应备份是回滚的前提，详见 [Ruler 手册](../ops/ruler-runbook.md)。

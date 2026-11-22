@@ -1,10 +1,9 @@
 # 运维入口
 
-由 Maas · Ruler 依据 fertile tag 与 [deploy](../deploy/README.md) 执行部署 / 回滚，读取子模块 RUNBOOK，不按各分支临时部署。
+Maas · Ruler 在总仓库固定提交下操作。持久根默认为 /home/box/fertile。例行巡检先看服务状态，再看依赖、业务端点和外网探测。
 
-- [health-checks.md](health-checks.md)：本地 live / ready 与公网端到端检查。
-- [monitoring.md](monitoring.md)：连接、恢复、数据新鲜度与错误观测。
-- [ruler-runbook.md](ruler-runbook.md)：发布交接、暂停、故障记录与回滚。
-- [bootstrap](../deploy/bootstrap.md)：云电脑重启重建。
-
-TBD：命令、监控工具、通知通道与值班责任，在后续运维 issue 确定。本目录不含运行脚本，文档中的检查尚未实现。
+- [Ruler 手册](ruler-runbook.md)说明冷启动、生成样例、部署、停止、回滚与重启恢复。
+- [健康检查](health-checks.md)列出各服务对应的 HTTP 探测和业务验证。
+- [监控与告警](monitoring.md)说明状态迁移、备份年龄、公网与采样记录。
+- [环境引导](../deploy/bootstrap.md)说明持久化工具链与系统依赖重建。
+- [Gateway](../docs/ibkr-gateway.md)说明 paper 登录、只读 API 与人工处理条件。

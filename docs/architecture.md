@@ -4,8 +4,8 @@ fertile 是金融看板 + 自动交易系统的总仓库，负责初始化、集
 
 ```text
 浏览器 → Tunnel（入口）→ web（axum，API + frontend 静态文件）→ HTTP → finance api
-                           ↓                                      ↕（对接 TBD）
-                      PostgreSQL app / blog             trader / collector → IB Gateway / 数据源
+                           ↓                                      ↕（持久化状态）
+                      PostgreSQL app / blog             worker / collector → 回放或 paper Gateway
                                                             ↕
                                                      Nautilus Parquet catalog
 研究 / 回测（Rust + Python / PyO3）← 历史 catalog
@@ -16,8 +16,8 @@ fertile deploy/ → 服务拓扑与环境配置；fertile tag → 部署与回�
 
 finance 以 NautilusTrader 为依赖、不 fork；Rust 内核和 Python 接口承担交易 / 回测基础，我们写策略、做市商 adapter、配置、进程入口、运维和研究。行情存 Parquet，不额外起时序数据库。collector 与 trader 分进程，api 独立，web 故障不影响交易，finance 不依赖 Tunnel。
 
-web 使用 axum + sqlx + PostgreSQL，业务与博客 schema 归 web；调用 finance 的 HTTP API。frontend 为 React + TypeScript + Vite SPA，按功能组织，只调用 web，静态产物由 web 托管。常驻业务服务只有 finance（trader / collector / api）和 web，backtest 为任务。
+web 使用 axum + sqlx + PostgreSQL，业务与博客 schema 归 web；调用 finance 的 HTTP API。frontend 为 React + TypeScript + Vite SPA，按功能组织，只调用 web，静态产物由 web 托管。finance 的 API 和 collector 独立运行，worker 从队列执行回测；trader 留给后续交易阶段。
 
 OpenAPI 从 finance / web 代码导出（utoipa），快照在 [contracts](../contracts/README.md)，生成客户端禁止手改；实时消息另外定义。所有交易数值使用精确类型，不能用浮点传输 / 计算造成精度损失。
 
-当前在云电脑使用 paper，迁移边界与网络证据见 [ADR-001](adr/ADR-001-cloud-box-network-constraints.md)；环境 profile 与运行模式独立，路径配置化。TBD：节点内部通信、端口、域名、工具版本和恢复阈值，由对应实现 issue 明确。环境引导已由 issue #3 落地；finance 的源码获取以其 ADR-0003 为准，交易与业务服务实现仍由后续骨架 issue 完成。
+当前在云电脑使用 paper，迁移边界与网络证据见 [ADR-001](adr/ADR-001-cloud-box-network-constraints.md)；环境 profile 与运行模式独立，路径配置化。8080 为 web、8081 为 finance API、8082 为 collector、4002 为本机只读 paper Gateway。工具版本固定在 deploy/toolchain.env；公网域名由用户确认。
