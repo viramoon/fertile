@@ -9,7 +9,7 @@
 
 ## 验证
 
-检出 fertile 对应的子模块，使用锁定的 Rust、Node 和 pnpm，准备 JDK 17 或更高版本（含 `javac`）、`unzip` 与 `patch`。在仓库根目录运行下列命令。
+检出 fertile 对应的子模块，使用锁定的 Rust（含 rustfmt）、Node 和 pnpm，准备 JDK 17 或更高版本（含 `javac`）、`unzip` 与 `patch`。在仓库根目录运行下列命令。
 
 ```sh
 git submodule update --init --recursive

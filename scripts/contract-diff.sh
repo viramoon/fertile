@@ -3,9 +3,9 @@
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 case ${1:-} in
-  '') write=false ;;
+  ''|--check) write=false ;;
   --write) write=true ;;
-  *) echo 'Usage: scripts/contract-diff.sh [--write]' >&2; exit 2 ;;
+  *) echo 'Usage: scripts/contract-diff.sh [--check|--write]' >&2; exit 2 ;;
 esac
 [[ $# -le 1 ]] || exit 2
 work=$(mktemp -d)
@@ -42,7 +42,7 @@ for repo in finance web; do
   package=$repo
   [[ $repo != finance ]] || package=finance-api
   # An archive has no Git metadata. Give web/build.rs the exact producer revision.
-  (cd "$work/$repo" && GITHUB_SHA="$pin" cargo run --quiet --locked --release -p "$package" -- export-openapi) > "$work/$repo.openapi.json"
+  (cd "$work/$repo" && GIT_CEILING_DIRECTORIES="$work" GITHUB_SHA="$pin" cargo run --quiet --locked --release -p "$package" -- export-openapi) > "$work/$repo.openapi.json"
 done
 if $write; then
   # Do not replace either snapshot until both producer exports and clients agree.
