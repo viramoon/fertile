@@ -26,7 +26,7 @@ scripts/fertile status --json
 curl -fsS http://127.0.0.1:8090/api/v1/system/status
 ~~~
 
-本机入口为 http://127.0.0.1:8090。仪表盘展示服务和行情状态，回测页可以提交历史日线作业并查看审计，交易与博客保留入口。数据导入、提交和部署的命令见 [Ruler 手册](ops/ruler-runbook.md)。公网入口待域名确认后通过既有 Cloudflare Tunnel 启用。
+本机入口为 http://127.0.0.1:8090。仪表盘展示服务和行情状态，回测页可以提交历史日线作业并查看审计，交易与博客保留入口。数据导入、提交和部署的命令见 [Ruler 手册](ops/ruler-runbook.md)。Ruler 通过既有 Cloudflare Tunnel 配置公网入口 https://fertile.viramoon.com。
 
 ## 运维和开发
 

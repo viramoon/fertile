@@ -13,7 +13,7 @@
 ## 探针与状态变化
 
 - finance-api、finance-collector、web 的本地 live 和 ready 各有单独探针。服务清单来自 `scripts/fertile status --json`，启用项另查 supervisor 进程状态；postgres、worker、IB Gateway 等没有 HTTP 端点的服务使用进程探针。手动禁用与 replay 隐含禁用写 skipped；已启用服务缺程序或缺登录凭据记录 failed。
-- 公网独立请求 https://fertile.viramoon.com 的 `/healthz/ready`，要求 HTTP 200 和有效的 web 就绪 JSON。必需依赖均健康时，web 对可选依赖的降级状态仍视为入口可达。跳转、非预期 HTML、TLS 错误及 Tunnel 502/530 使该探针失败。域名未确认时记录 skipped；候选为 `www.viramoon.com`、`www.viramoonstar.com`。检查从盒子访问公网入口；不同运营商与地域的可达性另需从相应地点测量。
+- 公网独立请求 https://fertile.viramoon.com 的 `/healthz/ready`，要求 HTTP 200 和有效的 web 就绪 JSON。必需依赖均健康时，web 对可选依赖的降级状态仍视为入口可达。跳转、非预期 HTML、TLS 错误及 Tunnel 502/530 使该探针失败。隔离实例显式设置 `public_origin: null` 后，该探针记录 skipped。检查从盒子访问公网入口；不同运营商与地域的可达性另需从相应地点测量。
 - `market:fresh` 从 finance `/api/v1/market/status` 读取业务状态、每个标的的年龄和陈旧标志。统计标的数、陈旧数、观测到的最大年龄及数据源；缺少行情或数据心跳过期标记失败。未启用采集或旧版接口返回 404 会记录 skipped。
 - 磁盘检查默认为部署根的父目录，对应 `/home/box`。可用空间低于 2 GiB 时告警。最近完成的备份需同时具备合法 UTC 时间戳目录、`snapshot.json` 和 `SHA256SUMS`；超过 36 小时、时间在未来或从未完成均告警。清单内容完整性由备份及恢复流程校验。
 - 未就绪、已断开的服务与行情陈旧分别计时。业务健康不等同于 PID 存在；交易的订单核对、未决写请求和真实券商认证应结合 [健康检查](health-checks.md) 与 [Ruler 手册](ruler-runbook.md) 验证。采样不能发现两次轮询之间始末皆已结束的短暂故障，系统与守护日志可补充事件级时间线。
