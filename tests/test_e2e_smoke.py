@@ -133,7 +133,7 @@ class SmokeTests(unittest.TestCase):
         (root / "secrets/ibkr-paper.env").touch()
         with self.assertRaisesRegex(check.SmokeError, "paper credentials"):
             check.require_fixture_environment(root, root)
-        proc = subprocess.run([sys.executable, check.__file__, "public", "https://www.viramoon.com",
+        proc = subprocess.run([sys.executable, check.__file__, "public", "https://fertile.viramoon.com",
                                "--protocol-fixture"], capture_output=True, timeout=3)
         self.assertEqual(proc.returncode, 2)
         self.assertIn(b"unrecognized arguments", proc.stderr)
@@ -162,9 +162,10 @@ class SmokeTests(unittest.TestCase):
         self.assertFalse(self.site.posts)
 
     def test_explicit_origins_only_and_private_secret(self):
-        self.assertEqual(check.public_origin("https://www.viramoon.com/"), "https://www.viramoon.com")
-        for origin in ("http://www.viramoon.com", "https://www.viramoon.com.evil.invalid",
-                       "https://www.viramoon.com/other", "https://account@www.viramoonstar.com"):
+        self.assertEqual(check.public_origin("https://fertile.viramoon.com/"), "https://fertile.viramoon.com")
+        for origin in ("http://fertile.viramoon.com", "https://fertile.viramoon.com.evil.invalid",
+                       "https://fertile.viramoon.com/other", "https://account@fertile.viramoon.com",
+                       "https://www.viramoon.com"):
             with self.assertRaises(argparse.ArgumentTypeError):
                 check.public_origin(origin)
         self.secret.chmod(0o640)

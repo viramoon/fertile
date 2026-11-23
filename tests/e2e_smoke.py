@@ -19,9 +19,9 @@ from uuid import uuid4
 
 
 CLI = Path(__file__).resolve().parents[1] / "scripts/fertile"
-PUBLIC_ORIGINS = {"https://www.viramoon.com", "https://www.viramoonstar.com"}
+PUBLIC_ORIGIN = "https://fertile.viramoon.com"
 CORE = {"postgres", "finance-api", "finance-collector", "finance-backtest-worker", "web", "healthwatch"}
-EXTERNAL = {"xvfb", "ib-gateway", "cloudflared"}
+PAPER_SERVICES = {"xvfb", "ib-gateway"}
 JOB = {"strategy": "DemoStrategy", "instrument": "6EH4.XCME", "start": "2024-01-01T23:02:00Z",
        "end": "2024-01-01T23:06:00Z", "params": {}}
 
@@ -42,8 +42,8 @@ def log(event, **fields):
 
 def public_origin(value):
     origin = value.removesuffix("/")
-    if origin not in PUBLIC_ORIGINS:
-        raise argparse.ArgumentTypeError("pass the confirmed HTTPS origin (www.viramoon.com or www.viramoonstar.com)")
+    if origin != PUBLIC_ORIGIN:
+        raise argparse.ArgumentTypeError(f"pass the Ruler-managed HTTPS origin {PUBLIC_ORIGIN}")
     return origin
 
 
@@ -123,11 +123,6 @@ def require_fixture_environment(root, box):
     for location in {root, box / "fertile", Path("/home/box/fertile")}:
         require(not any(os.path.lexists(location / "secrets" / file) for file in ("ibkr-paper.env", "alerts.env")),
                 "paper credentials or an alert destination are present; fixture mode refused")
-    for home in {box, Path("/home/box")}:
-        folder = home / ".cloudflared"
-        if folder.exists():
-            require(not any(p.suffix in {".pem", ".json", ".yml", ".yaml"} for p in folder.iterdir()),
-                    "Cloudflare credentials or configuration are present; fixture mode refused")
     require(os.environ.get("IB_GATEWAY_ADDRESS", "127.0.0.1:4002") == "127.0.0.1:4002",
             "protocol fixture requires a loopback Gateway")
     require_fixture_listener(int(os.environ.get("FERTILE_SMOKE_FIXTURE_PID", "0")))
@@ -141,12 +136,14 @@ def await_stack(protocol_fixture=False):
         services = snapshot["services"]
         require(CORE <= services.keys(), "local supervisor manifest is missing a required service")
         if protocol_fixture:
-            require(EXTERNAL <= services.keys() and all(
-                services[name]["state"] == "disabled" and services[name]["pid"] == 0 for name in EXTERNAL),
-                "protocol fixture requires explicitly disabled Gateway, xvfb and cloudflared")
+            require(PAPER_SERVICES <= services.keys() and all(
+                services[name]["state"] == "disabled" and services[name]["pid"] == 0 for name in PAPER_SERVICES),
+                "protocol fixture requires explicitly disabled Gateway and xvfb")
+            require(not ({"cloudflared", "tunnel", "viramoon-site", "watchdog"} & services.keys()),
+                    "protocol fixture must not manage external services")
         skipped, unhealthy = {}, []
         for name, svc in services.items():
-            if name in EXTERNAL and svc["state"] in {"disabled", "missing_binary", "needs_credentials"}:
+            if name in PAPER_SERVICES and svc["state"] in {"disabled", "missing_binary", "needs_credentials"}:
                 skipped[name] = svc["state"]
                 continue
             running = svc["state"] == "RUNNING" and svc["pid"] > 1
@@ -258,7 +255,7 @@ def smoke(http, secret, skipped, protocol_fixture=False):
     check_assets(http)
 
     key = "e2e-" + uuid4().hex
-    log("submitting job", idempotency_key=key)
+    log("submitting example job")
     accepted = http.read("/api/v1/backtests", data=json.dumps(JOB).encode(), expected=202,
                          headers={"Authorization": "Bearer " + token_from(secret), "Content-Type": "application/json",
                                   "Idempotency-Key": key})
@@ -281,6 +278,55 @@ def smoke(http, secret, skipped, protocol_fixture=False):
         time.sleep(1)
 
 
+def research_smoke(http, secret, instrument, kind):
+    base = "/api/v1/backtests"
+    datasets = http.read(base + "/datasets")["items"]
+    dataset = next((row for row in datasets if row["instrument"] == instrument), None)
+    require(dataset is not None, f"missing explicitly requested research dataset: {instrument}")
+    require(dataset["data_kind"] == kind, "research dataset does not match the specified source kind")
+    request = {
+        "strategy": "SmaCrossover", "instrument": instrument,
+        "start": dataset["first_session"] + "T00:00:00Z",
+        "end": dataset["last_session"] + "T00:00:00Z",
+        "params": {"fast_period": 5, "slow_period": 20, "shares": 10},
+    }
+    headers = {"Authorization": "Bearer " + token_from(secret), "Content-Type": "application/json",
+               "Idempotency-Key": "e2e-research-" + uuid4().hex}
+    payload = json.dumps(request).encode()
+    job_id = http.read(base, data=payload, headers=headers, expected=202)["id"]
+    require(http.read(base + "/by-key", headers=headers)["id"] == job_id, "lookup returned a different job")
+    require(http.read(base, data=payload, headers=headers, expected=202)["id"] == job_id, "same key created another job")
+    log("research key lookup and duplicate submit matched", id=job_id, data_kind=kind)
+    phase = None
+    while True:
+        job = http.read(f"{base}/{job_id}")
+        require(job["request"] == request, "research request was changed")
+        if phase != job["status"]:
+            phase = job["status"]
+            log("research job", id=job_id, phase=phase)
+        if phase == "succeeded":
+            result = job["summary"]
+            report = result["research"]
+            audit = report["audit"]
+            require(result["strategy"] == request["strategy"] and result["instrument"] == instrument,
+                    "research summary did not match the job")
+            require(report["dataset"] == dataset and report["observations"] >= 21,
+                    "invalid catalog provenance or insufficient samples")
+            require([row["requested_years"] for row in report["windows"]] == [50, 10, 5]
+                    and all(row["coverage"] == "full" or row["metrics"] is None for row in report["windows"]),
+                    "invalid historical window coverage")
+            require(audit["fills"] == result["total_orders"] and
+                    all(fill["signal_session"] < fill["execution_session"] for fill in audit["recent_fills"]),
+                    "research fills failed the audit")
+            log("research completed", id=job_id, data_kind=kind, source=dataset["source"], instrument=instrument,
+                observed=report["observations"], actual=[report["actual_start"], report["actual_end"]],
+                pnl=result["pnl"], currency=result["currency"], windows=[row["coverage"] for row in report["windows"]],
+                fills=audit["fills"], zero_volume_bars=audit["zero_volume_bars"])
+            return
+        require(phase in {"queued", "running"}, f"research {job_id} entered {phase}: {job.get('error')}")
+        time.sleep(1)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_subparsers(dest="mode", required=True)
@@ -291,7 +337,11 @@ def main():
     public.add_argument("origin", type=public_origin, help="explicitly confirmed HTTPS origin")
     for mode in (local, public):
         mode.add_argument("--timeout-seconds", type=int, default=240, metavar="N", help="total wall-clock deadline (1..1800)")
+        mode.add_argument("--research-instrument", help="also submit a historical job for this exact imported instrument")
+        mode.add_argument("--research-kind", choices=("historical", "fixture"))
     args = parser.parse_args()
+    require(bool(args.research_instrument) == bool(args.research_kind),
+            "provide both --research-instrument and --research-kind")
     require(1 <= args.timeout_seconds <= 1800, "invalid total deadline")
     def timed_out(_signum, _frame):
         raise SmokeError("end-to-end smoke exceeded its total deadline")
@@ -306,7 +356,10 @@ def main():
         origin, skipped = await_stack(fixture) if args.mode == "local" else (args.origin, {})
         secret = Path(os.environ.get("WEB_ADMIN_TOKEN_FILE", root / "secrets/web.env"))
         log("smoke", mode=args.mode, origin=origin, timeout_seconds=args.timeout_seconds)
-        smoke(HTTP(origin, args.mode == "local"), secret, skipped, fixture)
+        http = HTTP(origin, args.mode == "local")
+        smoke(http, secret, skipped, fixture)
+        if args.research_instrument:
+            research_smoke(http, secret, args.research_instrument, args.research_kind)
     finally:
         signal.alarm(0)
 

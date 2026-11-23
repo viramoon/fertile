@@ -1,7 +1,7 @@
 """Local, single-user supervisor control through its private Unix-domain RPC socket."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import ctypes
 import fcntl
 import hashlib
@@ -13,6 +13,7 @@ from pwd import getpwuid
 import shlex
 import shutil
 import signal
+import sqlite3
 import stat
 from string import Template
 import subprocess
@@ -37,8 +38,10 @@ SNAPSHOT = RUN / "services.json"
 BINDIR = Path(os.environ.get("FERTILE_SUPERVISOR_BIN", ROOT / "tools/supervisor/bin"))
 NAME = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]*\Z")
 SETTING = re.compile(r"[A-Z_][A-Z_0-9]*\Z")
+EXTERNAL_PROGRAMS = {"cloudflared", "tunnel", "viramoon-site", "watchdog", "viramoon-watchdog"}
 SUPPORTED = {
     "FERTILE_PROFILE", "FERTILE_MARKET_SOURCE", "FERTILE_DATA_ROOT", "FERTILE_POSTGRES_PORT",
+    "FERTILE_RESEARCH_ROOT",
     "FINANCE_API_PORT", "FINANCE_COLLECTOR_PORT", "WEB_PORT", "IB_GATEWAY_ADDRESS",
     "FINANCE_COLLECTOR_CONFIG", "WEB_REQUIRE_FINANCE", "FERTILE_HEALTH_CONFIG", "FERTILE_PUBLIC_ORIGIN",
     "FERTILE_BACKUP_DAYS", "FERTILE_BACKUP_WEEKS", "FERTILE_BACKUP_REMOTE",
@@ -120,24 +123,20 @@ def check_secret(path):
     return ""
 
 
-def tunnel_config(path):
-    if not path.is_file():
-        return "needs_credentials"
-    cfg = yaml.safe_load(path.read_text()) or {}
-    cred = Path(str(cfg.get("credentials-file", ""))).expanduser()
-    if not cred.is_absolute() or cred.resolve().parent != path.parent.resolve() or not cred.is_file():
-        return "needs_credentials"
-    if not any(isinstance(r, dict) and r.get("service") in ("http://127.0.0.1:8080", "http://localhost:8080")
-               for r in cfg.get("ingress", [])):
-        return "invalid_tunnel_ingress"
-    return ""
-
-
 def port(value):
     n = int(value)
     if not 1 <= n <= 65535:
         raise ValueError("port outside valid range")
     return str(n)
+
+
+def active_programs(api):
+    rows = api.getAllProcessInfo()
+    if any({row["name"], row["group"]} & EXTERNAL_PROGRAMS
+           and (row["pid"] or row["statename"] not in {"STOPPED", "FATAL"})
+           for row in rows):
+        raise RuntimeError("A legacy supervisor contains a running Ruler-managed service. Ruler must resolve ownership first.")
+    return rows
 
 
 def build_plan():
@@ -158,11 +157,16 @@ def build_plan():
     data = Path(settings.get("FERTILE_DATA_ROOT", default_data))
     if not data.is_absolute():
         raise ValueError("FERTILE_DATA_ROOT must be absolute")
+    research_base = ROOT / "data/research"
+    research = Path(settings.get("FERTILE_RESEARCH_ROOT", research_base))
+    if not research.is_relative_to(research_base) or research.resolve() != research:
+        raise ValueError("FERTILE_RESEARCH_ROOT must be a concrete path within the fertile data/research directory")
     fields = dict(root=str(ROOT), release=str(release), finance_port=port(settings.get("FINANCE_API_PORT", 8081)),
-                  collector_port=port(settings.get("FINANCE_COLLECTOR_PORT", 8082)), web_port=port(settings.get("WEB_PORT", 8080)),
-                  cloud_config=str(Path(os.environ.get("FERTILE_BOX_HOME", "/home/box")) / ".cloudflared/config.yml"))
+                  collector_port=port(settings.get("FINANCE_COLLECTOR_PORT", 8082)), web_port=port(settings.get("WEB_PORT", 8090)))
+    if "8080" in (fields["finance_port"], fields["collector_port"], fields["web_port"]):
+        raise ValueError("port 8080 belongs to the existing Ruler-managed website")
     common = dict(PYTHONDONTWRITEBYTECODE="1", FERTILE_ROOT=str(ROOT), FERTILE_PROFILE=profile, FERTILE_MARKET_SOURCE=source,
-                  FERTILE_DATA_ROOT=str(data), PGHOST=str(RUN / "postgres"),
+                  FERTILE_DATA_ROOT=str(data), FERTILE_RESEARCH_ROOT=str(research), PGHOST=str(RUN / "postgres"),
                   PGPORT=port(settings.get("FERTILE_POSTGRES_PORT", 5432)), PGDATABASE="web")
     common.update({key: val for key, val in settings.items() if key not in common})
     common["FERTILE_POSTGRES_PORT"] = common["PGPORT"]
@@ -174,6 +178,12 @@ def build_plan():
         name = row["name"]
         if not NAME.fullmatch(name) or name in services:
             raise ValueError(f"invalid or duplicate service name: {name}")
+        if name in EXTERNAL_PROGRAMS:
+            # Older bundles may still declare an external program. A rollback
+            # must keep exclusive ownership with Ruler even for those bundles.
+            if not custom:
+                continue
+            raise ValueError(f"{name} is external to the fertile supervisor")
         cmd = [expand(s) for s in row["command"]]
         directory = expand(row.get("directory", str(release)))
         env = {**base, **common}
@@ -201,8 +211,6 @@ def build_plan():
         skip = "" if row.get("enabled", True) else "disabled"
         if not skip and row.get("ib"):
             skip = "disabled" if source == "replay" else check_secret(Path("/home/box/fertile/secrets/ibkr-paper.env"))
-        if not skip and name == "cloudflared" and not custom:
-            skip = tunnel_config(Path(fields["cloud_config"]))
         extra = [expand(s) for s in row.get("requires_bins", [])]
         if not skip and any(not shutil.which(binary, path=env.get("PATH")) for binary in [cmd[0], *extra]):
             skip = "missing_binary"
@@ -264,8 +272,7 @@ def render(plan):
     runtime = Path(plan["release"]) / "fertile" if plan["default"] else SCRIPTS.parent
     templates = runtime / "deploy/supervisor"
     program = Template((templates / "program.conf.tmpl").read_text())
-    # Keep the child launcher stable when a release switches. External services
-    # such as cloudflared have no dependency on a particular release tree.
+    # Keep each child launcher pinned to the bundle when a release switches.
     code = (runtime / "scripts/supervision.py").read_text()
     child_script = RUN / "programs" / ("launcher-" + hashlib.sha256(code.encode()).hexdigest() + ".py")
     atomic(child_script, code)
@@ -342,6 +349,8 @@ def stop_postgres(api, pid):
 
 
 def stop_group(api, name):
+    if name in EXTERNAL_PROGRAMS:
+        raise ValueError(f"{name} is external to the fertile supervisor")
     info = api.getProcessInfo(name)
     state = info["statename"]
     if name == "postgres" and state == "RUNNING" and stop_postgres(api, info["pid"]):
@@ -358,9 +367,9 @@ def down():
     if not daemon_pid():
         return
     api = connection()
-    infos = api.getAllProcessInfo()
+    infos = active_programs(api)
     order = list(json.loads(SNAPSHOT.read_text())["services"]) if SNAPSHOT.exists() else []
-    names = {info["name"] for info in infos}
+    names = {info["name"] for info in infos} - EXTERNAL_PROGRAMS
     for name in reversed(list(dict.fromkeys([*order, *sorted(names - set(order))]))):
         if name in names:
             stop_group(api, name)
@@ -419,8 +428,28 @@ def prepare_web(plan):
                     release / "fertile/scripts/prepare-web-db.sql"], env=admin, check=True)
 
 
+def check_queue_compatibility(plan):
+    if not plan["default"] or (Path(plan["release"]) / "finance/python/fertile_finance/backtest_research.py").is_file():
+        return
+    queue = Path(plan["data"]) / "finance-state/backtests/jobs.sqlite3"
+    if not queue.is_file():
+        return
+    try:
+        with closing(sqlite3.connect(queue.as_uri() + "?mode=ro", uri=True, timeout=3)) as db:
+            incompatible = db.execute(
+                "SELECT 1 FROM jobs WHERE json_extract(request, '$.strategy') IS NOT 'DemoStrategy' LIMIT 1"
+            ).fetchone()
+    except sqlite3.Error as error:
+        raise ValueError("Could not verify legacy backtest queue compatibility") from error
+    if incompatible:
+        raise ValueError("This bundle cannot read the existing research queue. Retain it and select a compatible data snapshot.")
+
+
 def ensure():
     plan = build_plan()
+    check_queue_compatibility(plan)
+    if daemon_pid():
+        active_programs(connection())
     svc = plan["services"]
     if plan["default"]:
         data = Path(plan["data"])
@@ -437,8 +466,12 @@ def ensure():
     added, changed, removed = api.reloadConfig()[0]
     for name in reversed(list(dict.fromkeys([*svc, *removed]))):
         if name in changed or name in removed:
-            stop_group(api, name)
+            if name not in EXTERNAL_PROGRAMS:
+                stop_group(api, name)
             api.removeProcessGroup(name)
+    # Recheck once the replaced API can no longer accept jobs. A concurrent
+    # submission must not get stranded in a queue served by an older parser.
+    check_queue_compatibility(plan)
     failures = []
     for name, service in svc.items():
         if service["skip"]:
@@ -490,6 +523,8 @@ def report():
     with ThreadPoolExecutor(max_workers=12) as pool:
         pending = {}
         for name, svc in plan["services"].items():
+            if name in EXTERNAL_PROGRAMS:
+                continue
             info = infos.get(name, {})
             state = svc["skip"] or info.get("statename", "STOPPED")
             services[name] = dict(enabled=svc["enabled"], state=state, pid=info.get("pid", 0),
@@ -537,6 +572,7 @@ def rollback(ref):
     if target == previous:
         ensure()
         return
+    check_queue_compatibility({**build_plan(), "release": str(target)})
     # Reconcile only changed groups, including when reversing a failed switch.
     switch(ROOT/"current", target)
     try:
@@ -559,7 +595,7 @@ def lock():
 def main():
     parser = argparse.ArgumentParser(prog="fertile")
     sub = parser.add_subparsers(dest="action", required=True)
-    for action in ("up", "down", "ensure"):
+    for action in ("up", "down", "ensure", "ensure-up"):
         sub.add_parser(action)
     sub.add_parser("status").add_argument("--json", action="store_true")
     for action in ("logs", "restart", "stop"):
@@ -583,13 +619,17 @@ def main():
     with lock():
         if args.action not in ("down", "stop") and (RUN / "restore-journal.json").exists():
             raise RuntimeError("unfinished restore; run scripts/restore.sh to recover before starting services")
-        if args.action in ("up", "ensure"):
+        if args.action in ("up", "ensure", "ensure-up"):
             ensure()
         elif args.action == "down":
             down()
         elif args.action == "rollback":
+            if daemon_pid():
+                active_programs(connection())
             rollback(args.ref)
         else:
+            if args.name in EXTERNAL_PROGRAMS:
+                raise ValueError(f"{args.name} is external to the fertile supervisor")
             if not daemon_pid():
                 if args.action == "stop":
                     return

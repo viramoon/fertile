@@ -20,4 +20,4 @@ web 使用 axum + sqlx + PostgreSQL，业务与博客 schema 归 web；调用 fi
 
 OpenAPI 从 finance / web 代码导出（utoipa），快照在 [contracts](../contracts/README.md)，生成客户端禁止手改；实时消息另外定义。所有交易数值使用精确类型，不能用浮点传输 / 计算造成精度损失。
 
-当前在云电脑使用 paper，迁移边界与网络证据见 [ADR-001](adr/ADR-001-cloud-box-network-constraints.md)；环境 profile 与运行模式独立，路径配置化。8080 为 web、8081 为 finance API、8082 为 collector、4002 为本机只读 paper Gateway。工具版本固定在 deploy/toolchain.env；公网域名由用户确认。
+当前在云电脑使用 paper，迁移边界与网络证据见 [ADR-001](adr/ADR-001-cloud-box-network-constraints.md)；环境 profile 与运行模式独立，路径配置化。8090 为 web、8081 为 finance API、8082 为 collector、4002 为本机只读 paper Gateway。工具版本固定在 deploy/toolchain.env；公网域名由用户确认。

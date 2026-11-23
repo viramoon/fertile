@@ -11,7 +11,8 @@ Ruler 在运行根 config/runtime.env 中填写每行一个非敏感 KEY=VALUE�
 | FERTILE_BOX_HOME、FERTILE_ROOT | bootstrap 默认使用 /home/box，生成的 env.sh 设置运行根 /home/box/fertile。 |
 | FERTILE_MARKET_SOURCE | 默认 ib。测试使用 replay，独立存入 data/replay。生产源与回放源切换需核对 catalog 与队列目录。 |
 | FERTILE_PROFILE、FERTILE_DATA_ROOT | 选择服务配置和持久数据目录。显式挂载必须存在。 |
-| FINANCE_API_PORT、FINANCE_COLLECTOR_PORT、WEB_PORT | 默认在本机监听 8081、8082、8080。 |
+| FINANCE_API_PORT、FINANCE_COLLECTOR_PORT、WEB_PORT | 默认在本机监听 8081、8082、8090。8080 由现有网站使用。 |
+| FERTILE_RESEARCH_ROOT | 默认为持久根下 data/research，API、worker、备份共用。可选该目录下的一个具体子目录。 |
 | FINANCE_COLLECTOR_CONFIG、IB_GATEWAY_ADDRESS | 指向当前行情源的配置和本机 paper 接口 127.0.0.1:4002。 |
 | FERTILE_HEALTH_CONFIG、FERTILE_PUBLIC_ORIGIN | 站点巡检配置和经确认的 HTTPS 入口。公网入口为空时采样会记录跳过。 |
 | FERTILE_BACKUP_DAYS、FERTILE_BACKUP_WEEKS、FERTILE_BACKUP_REMOTE | 本地保留周期与可选 rclone remote 名。详细设置见 [备份](../ops/backup.md)。 |
@@ -26,6 +27,6 @@ Ruler 在运行根 config/runtime.env 中填写每行一个非敏感 KEY=VALUE�
 | secrets/web-database.env | 可选，web 专用的 DATABASE_URL。 |
 | /home/box/fertile/secrets/ibkr-paper.env | 仅 Gateway 的 IBC 包装器读取 IBKR_USERNAME、IBKR_PASSWORD。健康检查只输出服务器时间和 DU 账户前缀。 |
 | secrets/alerts.env | 可选 ALERT_WEBHOOK_URL。默认告警写本机 JSONL。 |
-| /home/box/.cloudflared/ | cloudflared 使用既有 Tunnel 文件。公网域名另由用户确认。 |
+| 共享网站与隧道 | Maas · Ruler 管理现有网站、隧道、DNS 和凭据。fertile 只提供 127.0.0.1:8090 的源站。 |
 
 创建 secrets 目录时使用 0700，凭据文件为服务属主的 0600 普通文件。运行时 env.sh 只提供工具链路径和缓存配置。备份排除凭据，Git 忽略 secrets/ 和本地 .env 文件。轮换时在盒子本地替换对应文件并重启相应服务，保留脱敏后的就绪和业务验证结果。详情见 [Gateway](../ops/ibgateway.md)、[监控](../ops/monitoring.md) 和 [管理令牌](../ops/ruler-runbook.md)。

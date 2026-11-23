@@ -4,8 +4,9 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import sys
+import sqlite3
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import supervision as ctl
@@ -58,7 +59,7 @@ class RuntimePlan(unittest.TestCase):
 
     def test_restore_recovery_prevents_all_service_starts_and_switches(self):
         (self.run / "restore-journal.json").write_text("{}")
-        for args in (["up"], ["ensure"], ["restart", "test"], ["rollback", "1234567"]):
+        for args in (["up"], ["ensure"], ["ensure-up"], ["restart", "test"], ["rollback", "1234567"]):
             with self.subTest(args=args), patch.object(sys, "argv", ["fertile", *args]):
                 with self.assertRaisesRegex(RuntimeError, "unfinished restore"):
                     ctl.main()
@@ -82,6 +83,46 @@ class RuntimePlan(unittest.TestCase):
         config.write_text("FERTILE_MARKET_SOURCE=live\n")
         with self.assertRaisesRegex(ValueError, "unsupported"):
             ctl.build_plan()
+
+    def test_8080_reserved_and_research_paths_are_owned(self):
+        self.write(name="web")
+        self.assertEqual(ctl.build_plan()["services"]["web"]["env"]["WEB_PORT"], "8090")
+        for key in ("WEB_PORT", "FINANCE_API_PORT", "FINANCE_COLLECTOR_PORT"):
+            with patch.dict(os.environ, {key: "8080"}), self.assertRaisesRegex(ValueError, "8080 belongs"):
+                ctl.build_plan()
+        with patch.dict(os.environ, {"FERTILE_RESEARCH_ROOT": "/home/box/quant-research"}):
+            with self.assertRaisesRegex(ValueError, "fertile data/research"):
+                ctl.build_plan()
+
+    def test_external_group_keeps_legacy_supervisor_untouched(self):
+        self.write(name="cloudflared")
+        with self.assertRaisesRegex(ValueError, "external to the fertile supervisor"):
+            ctl.build_plan()
+        self.write()
+        api = Mock()
+        api.getAllProcessInfo.return_value = [{"name": "edge", "group": "tunnel", "pid": 42, "statename": "RUNNING"}]
+        with patch.object(ctl, "connection", return_value=api), patch.object(ctl, "daemon_pid", return_value=1):
+            for task in (ctl.ensure, ctl.down):
+                with self.assertRaisesRegex(RuntimeError, "Ruler must resolve ownership"):
+                    task()
+        api.stopProcess.assert_not_called()
+        api.reloadConfig.assert_not_called()
+        api.shutdown.assert_not_called()
+
+    def test_legacy_bundle_rejects_a_research_queue_without_mutating_it(self):
+        plan = {"data": str(self.root / "data"), "release": str(self.root / "old"), "default": True}
+        queue = self.root / "data/finance-state/backtests/jobs.sqlite3"
+        queue.parent.mkdir(parents=True)
+        with sqlite3.connect(queue) as db:
+            db.execute("CREATE TABLE jobs (request TEXT)")
+            db.execute("INSERT INTO jobs VALUES (?)", ('{"strategy":"DemoStrategy"}',))
+        ctl.check_queue_compatibility(plan)
+        with sqlite3.connect(queue) as db:
+            db.execute("INSERT INTO jobs VALUES (?)", ('{"strategy":"SmaCrossover"}',))
+        before = queue.read_bytes()
+        with self.assertRaisesRegex(ValueError, "cannot read the existing research queue"):
+            ctl.check_queue_compatibility(plan)
+        self.assertEqual(queue.read_bytes(), before)
 
 
 if __name__ == "__main__":

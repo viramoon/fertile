@@ -55,6 +55,7 @@ class Snapshots(unittest.TestCase):
         data = root / "data/replay"
         state = data / "finance-state"
         catalog = data / "catalog"
+        research = root / "data/research"
         socket = root / "run/postgres"
         for path in (state / "backtests", state / "collector", catalog / "data/bar/SPY.XNYS",
                      catalog / ".finance-collector", root / "config", root / "secrets", socket):
@@ -77,11 +78,19 @@ class Snapshots(unittest.TestCase):
         table = pa.table({"ts_event": [watermark["SPY.XNYS"]], "close": pa.array(
             [Decimal("123.000000000123456")], type=pa.decimal128(30, 15))})
         parquet.write_table(table, catalog / rel)
+        dataset = research / "TEST.XNYS/dataset.json"
+        dataset.parent.mkdir(parents=True)
+        dataset.write_text('{"instrument":"TEST.XNYS"}\n')
+        research_rel = Path("TEST.XNYS/data/bar/published.parquet")
+        (research / research_rel).parent.mkdir(parents=True)
+        parquet.write_table(table, research / research_rel)
+        (research / ".import-aside").mkdir()
+        (research / ".import-aside/not-committed.parquet").write_text("unpublished")
         db = state / "backtests/jobs.sqlite3"
         pgdata = self.root / "pgdata"
         env = {k: v for k, v in os.environ.items() if not k.startswith("PG")}
         env.update(FERTILE_ROOT=str(root), PGHOST=str(socket), PGPORT="55461", PGDATABASE="web_drill", PGUSER="drill")
-        for name in ["FERTILE_DATA_ROOT", "FERTILE_MARKET_SOURCE", "FERTILE_BACKUP_REMOTE", "PGSERVICE"]:
+        for name in ["FERTILE_DATA_ROOT", "FERTILE_RESEARCH_ROOT", "FERTILE_MARKET_SOURCE", "FERTILE_BACKUP_REMOTE", "PGSERVICE"]:
             env.pop(name, None)
 
         def run(*args, check=True):
@@ -121,9 +130,12 @@ class Snapshots(unittest.TestCase):
             conn.execute("INSERT INTO jobs VALUES(2,'uncommitted')")
             first = Path(run(REPO / "scripts/backup.sh").stdout.strip())
             first_inode = (first / "catalog" / rel).stat().st_ino
+            research_inode = (first / "research" / research_rel).stat().st_ino
             conn.rollback()
             snapshot = Path(run(REPO / "scripts/backup.sh").stdout.strip())
             self.assertEqual((snapshot / "catalog" / rel).stat().st_ino, first_inode)
+            self.assertEqual((snapshot / "research" / research_rel).stat().st_ino, research_inode)
+        self.assertFalse((snapshot / "research/.import-aside").exists())
         self.assertFalse((snapshot / "catalog/.finance-collector/active").exists())
         self.assertFalse(any(p.name.endswith(("-wal", "-shm")) for p in snapshot.rglob("*")))
         self.assertFalse(any(b"MUST_STAY_LOCAL" in p.read_bytes() for p in snapshot.rglob("*") if p.is_file()))
@@ -147,10 +159,13 @@ class Snapshots(unittest.TestCase):
         run("dropdb", "web_drill")
         shutil.rmtree(state)
         shutil.rmtree(catalog)
+        shutil.rmtree(research)
         result = run(REPO / "scripts/restore.sh", snapshot)
         self.assertIn("Before-restore snapshot:", result.stdout)
         self.assertEqual(sql(query), expected)
         self.assertEqual(parquet.read_table(catalog / rel), table)
+        self.assertEqual(parquet.read_table(research / research_rel), table)
+        self.assertEqual(dataset.read_text(), '{"instrument":"TEST.XNYS"}\n')
         self.assertNotEqual((catalog / rel).stat().st_ino, (snapshot / "catalog" / rel).stat().st_ino)
         self.assertEqual(json.loads((state / "collector/watermarks.json").read_text()), watermark)
         self.assertEqual(json.loads((catalog / ".finance-collector/source.json").read_text()), meta)
@@ -193,11 +208,24 @@ class Snapshots(unittest.TestCase):
         self.assertIn("post_restore_only", run("pg_restore", "-l", prior / "postgres.dump").stdout)
         self.assertEqual(secret.read_text(), "MUST_STAY_LOCAL")
         self.assertEqual(private.read_text(), "MUST_STAY_LOCAL")
+        legacy = self.root / "legacy"
+        shutil.copytree(snapshot, legacy)
+        shutil.rmtree(legacy / "research")
+        manifest = legacy / "snapshot.json"
+        meta_without_research = json.loads(manifest.read_text())
+        del meta_without_research["trees"]["research"]
+        manifest.write_text(json.dumps(meta_without_research))
+        (legacy / "SHA256SUMS").write_text("".join(
+            f"{backup.digest(legacy / path)}  {path}\n" for path in sorted(backup.members(legacy))))
+        run(REPO / "scripts/restore.sh", legacy)
+        self.assertEqual(parquet.read_table(research / research_rel), table)
+        self.assertTrue(dataset.exists())
         print(run("pg_config", "--version").stdout.strip())
         print(result.stdout.strip())
         print(expected)
         print("Checksum mismatch refused before writes; restore twice, secrets unchanged; "
-              "live SQLite WAL, idempotent row, hardlinked Parquet and original watermark match.")
+              "SQLite WAL, market and research Parquet, source manifest and watermarks match. "
+              "Restoring a legacy snapshot preserved the research catalog.")
 
 
 if __name__ == "__main__":

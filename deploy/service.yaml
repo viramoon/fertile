@@ -31,7 +31,7 @@ components:
     command: current/bin/web serve
     migrate: current/bin/web migrate
     host: 127.0.0.1
-    port: 8080
+    port: 8090
     health: {live: /healthz/live, ready: /healthz/ready, system: /api/v1/system/status}
 artifacts:
   - name: frontend-dist
@@ -47,11 +47,10 @@ infrastructure:
     schemas: [app, blog]
     data: data/postgres
   tunnel:
-    protocol: quic
-    ingress: http://127.0.0.1:8080
-    existing_config: /home/box/.cloudflared/config.yml
-    public_origin: null # 用户确认 www.viramoon.com 或 www.viramoonstar.com 后设置
-    supervisor: cloudflared
+    managed_by: Maas · Ruler
+    external: true
+    ingress: http://127.0.0.1:8090
+    public_origin: https://fertile.viramoon.com
   ib_gateway:
     host: 127.0.0.1
     paper_port: 4002
@@ -69,6 +68,7 @@ paths:
   releases: releases
   active: current
   data: data
+  research_catalog: data/research
   logs: logs
   run: run
   backups: backups
@@ -81,7 +81,7 @@ operations:
     build: scripts/fertile build
     up: scripts/fertile up
     down: scripts/fertile down
-    ensure: scripts/fertile ensure
+    ensure: scripts/fertile ensure-up
     status: scripts/fertile status --json
     restart: scripts/fertile restart <service>
     logs: scripts/fertile logs <service>

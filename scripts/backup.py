@@ -17,7 +17,8 @@ import time
 import uuid
 
 STAMP = "%Y%m%dT%H%M%S.%fZ"
-ALLOWED_TREES = {"finance-state", "config", "catalog"}
+BASE_TREES = {"finance-state", "config", "catalog"}
+ALLOWED_TREES = {*BASE_TREES, "research"}
 SIDECARS = ("-wal", "-shm", "-journal")
 
 
@@ -92,10 +93,13 @@ class Box:
         require(self.data.is_absolute() and self.data.is_dir(), "active data root is missing")
         self.data = self.data.resolve(strict=True)
         self.catalog = Path(settings.get("FERTILE_BACKUP_CATALOG", self.data / "catalog"))
+        research_base = self.root / "data/research"
+        self.research = Path(settings.get("FERTILE_RESEARCH_ROOT", research_base))
+        require(self.research.is_relative_to(research_base), "research catalog must be within fertile data/research")
         self.backups = self.root / "backups"
         self.run = self.root / "run"
         self.trees = {"finance-state": self.data / "finance-state", "catalog": self.catalog,
-                      "config": self.config}
+                      "config": self.config, "research": self.research}
         roots = [self.backups, self.root / "secrets", self.run, *self.trees.values()]
         for path in roots:
             require(path.is_absolute() and path == path.resolve(), f"unsafe directory: {path}")
@@ -154,7 +158,8 @@ def payload_files(tree, kind):
         for name in dirs.copy():
             path = base / name
             if (secret_name(name) or name.startswith(("run-", ".")) and kind == "finance-state"
-                    or path == tree / ".finance-collector/active" and kind == "catalog"):
+                    or path == tree / ".finance-collector/active" and kind == "catalog"
+                    or kind == "research" and name.startswith(".")):
                 dirs.remove(name)
             else:
                 require(not path.is_symlink(), f"symlink found in {kind}")
@@ -164,6 +169,9 @@ def payload_files(tree, kind):
             if name.endswith(".lock") or secret_name(name) or name.startswith(".") and kind == "finance-state":
                 continue
             if kind == "catalog" and path.suffix != ".parquet" and rel.as_posix() != ".finance-collector/source.json":
+                continue
+            if kind == "research" and path.suffix != ".parquet" and not (
+                    len(rel.parts) == 2 and name == "dataset.json"):
                 continue
             if kind == "finance-state" and name.endswith(SIDECARS):
                 continue
@@ -195,7 +203,7 @@ def copy_tree_payload(src, dst, kind, previous):
         target.parent.mkdir(parents=True, exist_ok=True)
         if kind == "finance-state" and source.suffix in (".db", ".sqlite", ".sqlite3"):
             copy_sqlite(source, target)
-        elif kind == "catalog" and previous and rel.suffix == ".parquet":
+        elif kind in {"catalog", "research"} and previous and rel.suffix == ".parquet":
             old = previous / kind / rel
             if old.is_file() and not old.is_symlink() and digest(source) == digest(old):
                 os.link(old, target)
@@ -268,9 +276,11 @@ def verify(snapshot):
     actual = {str(path): digest(snapshot / path) for path in members(snapshot)}
     require(actual == expected, "SHA256SUMS mismatch")
     meta = json.loads((snapshot / "snapshot.json").read_bytes())
-    require(meta["format"] == 1 and set(meta["trees"]) == ALLOWED_TREES and
+    declared = set(meta["trees"])
+    require(meta["format"] == 1 and declared in (BASE_TREES, ALLOWED_TREES) and
             all(type(present) is bool for present in meta["trees"].values()), "unknown snapshot format")
-    require(all((snapshot / key).is_dir() for key in ALLOWED_TREES), "snapshot tree missing")
+    require(all((snapshot / key).is_dir() for key in declared)
+            and (not (snapshot / "research").exists() or "research" in declared), "snapshot tree mismatch")
     require(meta["has_database"] == (snapshot / "postgres.dump").is_file(), "database dump missing")
     check_provenance(snapshot)
     return meta
@@ -309,7 +319,7 @@ def backup(box, recovery=False):
         trees = {name: path.is_dir() for name, path in box.trees.items()}
         # Copy the atomic checkpoint first. Immutable catalog files enumerated
         # later can only be newer; the collector recomputes its watermark at open.
-        for name in ("finance-state", "catalog", "config"):
+        for name in ("finance-state", "catalog", "config", "research"):
             copy_tree_payload(box.trees[name], stage / name, name, previous)
         check_provenance(stage)
         stamp = utc_stamp()
@@ -424,8 +434,11 @@ def restore(box, snapshot, dry_run):
                     restore_db=meta["has_database"], trees=[],
                     location=dict(PGHOST=box.pg["PGHOST"], PGPORT=box.pg["PGPORT"], PGDATABASE=box.db,
                                   FERTILE_DATA_ROOT=str(box.data), FERTILE_MARKET_SOURCE=box.source,
-                                  FERTILE_BACKUP_CATALOG=str(box.catalog)))
+                                  FERTILE_BACKUP_CATALOG=str(box.catalog),
+                                  FERTILE_RESEARCH_ROOT=str(box.research)))
         for key, path in box.trees.items():
+            if key not in meta["trees"]:  # Snapshots taken before research must leave its catalog intact.
+                continue
             plan["trees"].append(dict(key=key, path=str(path), had=path.is_dir(), install=meta["trees"][key] or key == "config" and path.is_dir()))
         atomic_json(journal, plan)
         try:

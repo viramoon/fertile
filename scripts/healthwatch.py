@@ -108,7 +108,7 @@ def http_json(url, timeout, local=False):
 
 def public_ready(origin, timeout):
     if not origin:
-        return result("skipped", "public_origin unconfirmed")
+        return result("skipped", "public probe disabled for this instance")
     code, body = http_json(origin.rstrip("/") + "/healthz/ready", timeout)
     ok = (code == 200 and isinstance(body, dict) and body.get("status") in ("ready", "degraded")
           and isinstance(body.get("checks"), list) and bool(body["checks"])

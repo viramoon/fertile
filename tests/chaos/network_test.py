@@ -1,10 +1,11 @@
-"""Scope, alert and process-identity safeguards for the Linux network drill."""
+"""Scope, alert and netfilter cleanup safeguards for the Linux network drill."""
 from datetime import datetime, timezone
 import os
 from pathlib import Path
 import select
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
 import time
 import unittest
 from unittest.mock import patch
@@ -24,10 +25,12 @@ class NetworkDrillTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             network.public_target(flags, "https://www.viramoon.com")
         flags.protocol_fixture, flags.fixture_origin = False, None
-        flags.public_origin = "https://www.viramoonstar.com"
+        flags.public_origin = "https://fertile.viramoon.com"
         with self.assertRaisesRegex(RuntimeError, "match"):
             network.public_target(flags, "https://www.viramoon.com")
         self.assertEqual(network.public_target(flags, flags.public_origin), flags.public_origin)
+        flags.paper_only, flags.public_origin = True, None
+        self.assertIsNone(network.public_target(flags, "https://fertile.viramoon.com"))
 
     def test_early_close_and_weekend_do_not_count_as_trading(self):
         class Clock(datetime):
@@ -38,12 +41,12 @@ class NetworkDrillTests(unittest.TestCase):
         with patch.object(network, "datetime", Clock), patch.object(network.subprocess, "check_output") as calendar:
             calendar.return_value = b'["2026-11-27T14:30:00+00:00","2026-11-27T18:00:00+00:00"]'
             with self.assertRaisesRegex(RuntimeError, "closing time"):
-                network.session(None, None, 120)
+                network.session(Path("/release"), None, None, 120)
             with self.assertRaisesRegex(RuntimeError, "including early closes"):
-                network.session("2026-11-27T09:30:00-05:00", "2026-11-27T16:00:00-05:00", 120)
+                network.session(Path("/release"), "2026-11-27T09:30:00-05:00", "2026-11-27T16:00:00-05:00", 120)
             calendar.return_value = b'null'
             with self.assertRaisesRegex(RuntimeError, "exchange is closed"):
-                network.session(None, None, 120)
+                network.session(Path("/release"), None, None, 120)
 
     def test_prior_or_out_of_order_alerts_do_not_complete_this_fault(self):
         def event(which, when):
@@ -58,37 +61,41 @@ class NetworkDrillTests(unittest.TestCase):
         alerts[key].append(event("recovery", 25))
         self.assertTrue(network.completed(alerts, key, 10, 20))
 
-    def test_coordinator_kill_resumes_only_the_pinned_process(self):
-        with subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"]) as target:
+    def test_coordinator_kill_clears_only_the_scoped_rule(self):
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            rule = root / "rule"
+            fake = root / "iptables"
+            fake.write_text(
+                '#!/bin/bash\n'
+                'if [[ $3 == -S ]]; then exit 0; fi\n'
+                '[[ "$*" == *" -o lo -p tcp -d 127.0.0.1 --dport 4002 -m comment --comment fertile-drill-"* ]] || exit 42\n'
+                'case "$3" in -I) touch "$QA_RULE";; -C) test -f "$QA_RULE";; -D) rm "$QA_RULE";; *) exit 42;; esac\n'
+            )
+            fake.chmod(0o700)
+            env = {**os.environ, "PATH": folder + os.pathsep + os.environ["PATH"], "QA_RULE": str(rule)}
+            controller = subprocess.Popen([sys.executable, __file__, "--hold"], env=env,
+                                          stdout=subprocess.PIPE, text=True)
             try:
-                controller = subprocess.Popen([sys.executable, __file__, "--hold", str(target.pid)],
-                                              stdout=subprocess.PIPE, text=True)
-                try:
-                    self.assertTrue(select.select([controller.stdout], [], [], 5)[0])
-                    self.assertEqual(controller.stdout.readline().strip(), "paused")
-                    state = Path(f"/proc/{target.pid}/stat")
-                    self.assertIn(state.read_text().rsplit(")", 1)[1].split()[0], {"T", "t"})
-                    controller.kill()
-                    controller.wait(5)
-                    limit = time.monotonic() + 5
-                    while state.read_text().rsplit(")", 1)[1].split()[0] in {"T", "t"}:
-                        self.assertLess(time.monotonic(), limit, "orphan guardian failed to resume pidfd")
-                        time.sleep(.02)
-                finally:
-                    controller.kill()
-                    controller.wait()
-                    controller.stdout.close()
+                self.assertTrue(select.select([controller.stdout], [], [], 5)[0])
+                self.assertEqual(controller.stdout.readline().strip(), "active")
+                self.assertTrue(rule.exists())
+                controller.kill()
+                controller.wait(5)
+                limit = time.monotonic() + 5
+                while rule.exists():
+                    self.assertLess(time.monotonic(), limit, "orphan guardian failed to clear its rule")
+                    time.sleep(.02)
             finally:
-                target.kill()
-                target.wait()
+                controller.kill()
+                controller.wait()
+                controller.stdout.close()
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "--hold":
-        pid = int(sys.argv[2])
-        fd = os.pidfd_open(pid)
-        with network.pause_tunnel(pid, fd, 10):
-            print("paused", flush=True)
+    if sys.argv[1:] == ["--hold"]:
+        with network.blocked_port(120):
+            print("active", flush=True)
             time.sleep(30)
     else:
         unittest.main(verbosity=2)

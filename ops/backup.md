@@ -59,3 +59,5 @@ python3 tests/backup_restore.py
 ```
 
 演练包括两个有 15 位小数的 PG 金额、中文记录、序列及 ACL；持有未提交写事务的 SQLite WAL；真实定点 Parquet；硬链接、秘密排除、清单篡改、删库恢复、已有库替换及 SIGKILL 中断重试。另用 42 天共 84 份快照检查 7 日与 4 周轮转。
+
+研究日线使用运行配置 FERTILE_RESEARCH_ROOT 指向的持久 catalog。快照包含已发布的 Parquet 和每标的 dataset.json，排除导入暂存目录。验证恢复时同时核对来源 SHA、区间、作业队列与回测摘要。恢复早于研究功能的旧快照会保留当前研究目录。需要切换数据批次时先停止接单并让作业结束，再由 Ruler 执行快照和配置切换。

@@ -2,19 +2,22 @@
 
 常规发布依据已验证的 fertile tag。当前高可用联调使用指定的 fertile 集成提交，其 gitlink 锁定 finance、web 和 frontend。所有命令从总仓库根目录运行。保留上一次可用的构建和备份，再切换代码或数据格式。
 
+Ruler 负责目标盒子部署、现有网站、Cloudflare 隧道、DNS 和线上恢复。现网站使用 127.0.0.1:8080。fertile 的独立源站为 127.0.0.1:8090，目标域名为 https://fertile.viramoon.com。fertile 的脚本只管理本项目进程和持久目录。部署不安装开机钩子、shell 启动项或主机定时任务。
+
 ## 首次启动
 
 1. 用 box 用户将源码 checkout 到 /home/box/fertile-source。初始化三个私有子模块及 Nautilus 源码。核对目标提交和 profile。
 2. 按 [bootstrap](../deploy/bootstrap.md) 安装锁定的工具，执行 source /home/box/fertile/env.sh。确认磁盘剩余足以构建 Rust、Python wheel、前端与备份。
-3. 按 [web RUNBOOK](https://github.com/viramoon/web/blob/ha-runthrough/RUNBOOK.md) 配置 web 管理令牌。凭据文件只允许属主读写。保留 /home/box/.cloudflared/ 下的既有配置和凭据。
+3. 按 web 手册确认静态目录、数据库角色和管理令牌。凭据文件只允许属主读写。[web RUNBOOK](https://github.com/viramoon/web/blob/ha-runthrough/RUNBOOK.md)
 4. 在本机 Gateway 完成 paper 登录前，公网可达性、paper 账号和行情连续性独立记录。开发演练可显式选 replay，并为回放与真实行情分别安排持久数据根。
 
 ```sh
 git submodule update --init --recursive
-scripts/fertile build
-scripts/fertile up
+candidate=$(git rev-parse HEAD)
+scripts/fertile build --ref "$candidate"
+scripts/fertile ensure-up
 scripts/fertile status --json
-curl -fsS http://127.0.0.1:8080/api/v1/system/status
+curl -fsS http://127.0.0.1:8090/api/v1/system/status
 ```
 
 当前版本目录的 bin/ 下放编译产物，static/ 存放同一批次的 Vite dist。finance 与 web 各自读取版本目录内的配置，PostgreSQL、队列和 catalog 保留于持久数据目录。首次准备示例摘要时，加载同一个环境与数据根，再从当前 release 中执行以下命令。
@@ -24,10 +27,24 @@ source /home/box/fertile/env.sh
 # paper 默认 data；回放实例设置为 "$FERTILE_ROOT/data/replay"。
 export FERTILE_DATA_ROOT="$FERTILE_ROOT/data" FINANCE_BUILD_ROOT="$FERTILE_ROOT/current/runtime"
 (cd "$FERTILE_ROOT/current/finance" && PYTHONDONTWRITEBYTECODE=1 bash scripts/backtest-sample.sh)
-curl -fsS http://127.0.0.1:8080/api/v1/backtests/sample
+curl -fsS http://127.0.0.1:8090/api/v1/backtests/sample
 ~~~
 
-客户端提交回测必须保留幂等键，任何超时可用同一键重试并查询原作业。
+## 导入历史日线
+
+选择经许可的原始 OHLCV，确认标的是 NYSE 上市的 USD 股票或 ETF，并核对区间内无拆股。价格使用美分、成交量使用整股，UTC 收盘时间由日历生成。生产不随包附带行情。将批准的 CSV 从独立路径导入，持久配置的 FERTILE_RESEARCH_ROOT 可选择 fertile 的 data/research 下的具体目录。默认命令如下。[finance 历史回测手册](https://github.com/viramoon/finance/blob/ha-runthrough/docs/historical-backtest.md)
+
+~~~sh
+export FERTILE_RESEARCH_ROOT="$FERTILE_ROOT/data/research"
+PYTHONPATH="$FERTILE_ROOT/current/finance/python" \
+  "$FERTILE_ROOT/current/runtime/venv/bin/python" -m fertile_finance.research_catalog \
+  /path/to/approved.csv --instrument IBM.XNYS --asset-type stock \
+  --kind historical --source "Approved provider IBM" --raw-split-free-reviewed
+curl -fsS http://127.0.0.1:8090/api/v1/backtests/datasets
+tests/e2e-smoke.sh local --research-instrument IBM.XNYS --research-kind historical
+~~~
+
+打开 /backtests 填写均线天数与目标股数，临时输入 web 提交令牌。结果应显示作业状态、来源、可用窗口和成交审计。提交超时先查询原幂等键，收到 404 后才用同一键和参数重试。样本缺口按失败处理，数据更新和回滚按 catalog 快照进行。
 
 ## 启停、诊断与回滚
 
@@ -37,17 +54,17 @@ scripts/fertile logs finance-api
 scripts/fertile stop web
 scripts/fertile restart web
 scripts/fertile down
-scripts/fertile ensure
+scripts/fertile ensure-up
 scripts/fertile rollback <previous-fertile-commit>
 ```
 
-rollback 的参数为已经构建并验证的 fertile 提交。先核对迁移、队列和 catalog 格式，必要时先备份，再切换到匹配的服务与静态资源。部署记录包括当前/上次提交、三个 gitlink、迁移状态、操作开始和恢复时间。不要用单独替换前端或二进制的方式跨版本组合。
+rollback 的参数为已经构建并验证的 fertile 提交。先核对迁移、队列和 catalog 格式，必要时先备份，再切换到匹配的服务与静态资源。旧版不能读取含历史作业的队列，即使作业已经结束。控制器会拒绝该组合。跨此边界回滚由 Ruler 先暂停接单、完成并备份当前队列，再选择旧版能读的独立持久数据根或受控恢复到升级前快照。记录当前和旧数据根，恢复制品时把它们与对应提交一起切换。使用本批控制器执行回滚以保留 8090 和外部隧道边界。若私有 supervisor 已管理正在运行的共享服务，操作会停在所有权检查，交由 Ruler 处理。部署记录包括当前/上次提交、三个 gitlink、迁移状态、操作开始和恢复时间。
 
 ## 重启与外部入口
 
-主机重启后先按 bootstrap 重建系统依赖，然后运行 scripts/fertile ensure。云盒子尚无已确认的持久启动钩子，Ruler 负责重启后的首次 ensure，之后巡检也可重复执行。优先检查守护、PostgreSQL、finance 数据路径与行情源，再检查 web 和 Tunnel。按 [健康检查](health-checks.md) 同时记录本地端点和业务状态。
+主机重启后由 Ruler 按 bootstrap 核对持久根和工具链，运行 scripts/fertile ensure-up。在运行配置一致时，重复调用可保留现有服务 PID。Ruler 决定调用时机和外部调度。优先核对持久数据库、finance 数据路径和行情新鲜度，再分别验收本地 web 与公网。记录端点和业务状态。[健康检查](health-checks.md)
 
-cloudflared 使用既有 Tunnel，QUIC ingress 目标为 http://127.0.0.1:8080。公网域名候选为 www.viramoon.com 与 www.viramoonstar.com。由用户确认后再配置 public_origin 并对该 HTTPS 主机进行带鉴权的验收。密钥或 Cookie 不进入终端记录、告警或 PR。
+Ruler 在现有 Tunnel 和 DNS 中为 fertile.viramoon.com 配置 http://127.0.0.1:8090 的路由。现有站点继续使用 8080，现场核验的进程、启动方式、隧道配置和凭据由 Ruler 管理。deploy/service.yaml 只记录公网 URL 和本机端口。healthwatch 独立探测 /healthz/ready 并记录失败，隧道修复由 Ruler 执行。
 
 ## 管理令牌
 
@@ -92,7 +109,7 @@ tests/simulate-reboot.sh
 
 ~~~sh
 tests/e2e-smoke.sh local
-tests/e2e-smoke.sh public "$FERTILE_PUBLIC_ORIGIN"
+tests/e2e-smoke.sh public https://fertile.viramoon.com
 ~~~
 
 在维护窗口逐项执行，确保每个场景结束后恢复业务再进入下一项。进程测试只向已核对父进程和 PID 身份的本实例服务发信号。停库场景同时检查 web 和 finance PID。
@@ -103,7 +120,7 @@ python3 tests/chaos/services.py postgres
 python3 tests/chaos/services.py reboot
 ~~~
 
-网络演练依赖已登录的只读 paper Gateway、稳定 1 分钟行情及已确认的公网入口。其命令、真实交易时段要求与复原操作见 [网络演练](../tests/chaos/network.md)。关闭任何真实 Tunnel 之前，另保留可管理盒子的连接。
+网络演练依赖已登录的只读 paper Gateway 和稳定的 1 分钟行情。它只给本机 paper 连接施加限定故障，公网只观察。真实 Tunnel 恢复的命令和验收由 Ruler 记录。[网络演练](../tests/chaos/network.md)
 
 ## 24 小时观察
 

@@ -1,4 +1,4 @@
-"""Verified, bounded fault on the selected deployment's paper socket and Tunnel."""
+"""Verify bounded paper-socket loss and observe the independently managed HTTPS origin."""
 import argparse
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
@@ -7,7 +7,6 @@ import json
 import os
 from pathlib import Path
 import select
-import shutil
 import signal
 import socket
 import subprocess
@@ -15,7 +14,6 @@ import sys
 import time
 from urllib.parse import urlsplit
 from uuid import uuid4
-from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -28,7 +26,7 @@ import e2e_smoke
 
 ROOT = drill.ROOT
 NS_MINUTE = 60_000_000_000
-PUBLIC = {"https://www.viramoon.com", "https://www.viramoonstar.com"}
+PUBLIC = "https://fertile.viramoon.com"
 MARKET_KEYS = {"market:fresh", "service:finance-collector:ready"}
 
 
@@ -37,11 +35,10 @@ def require(value, message):
         raise RuntimeError(message)
 
 
-def session(opened, closed, duration):
+def session(release, opened, closed, duration):
     now = datetime.now(timezone.utc)
-    day = now.astimezone(ZoneInfo("America/New_York")).date().isoformat()
     bounds = json.loads(subprocess.check_output(
-        ["uv", "run", "--script", HERE / "network-session.py", day], timeout=90))
+        [release / "runtime/venv/bin/python", HERE / "network-session.py", now.isoformat()], timeout=30))
     require(bounds, "US equity exchange is closed today")
     start, end = map(datetime.fromisoformat, bounds)
     require(bool(opened) == bool(closed), "supply both session bounds to narrow the official schedule")
@@ -67,9 +64,9 @@ def public_target(args, configured):
         return args.fixture_origin
     require(not args.fixture_origin, "fixture origin only works in protocol fixture mode")
     if args.paper_only:
-        require(not args.public_origin and not configured, "paper-only mode requires an unconfigured public origin")
+        require(not args.public_origin, "paper-only mode does not take a public origin")
         return None
-    require(args.public_origin in PUBLIC and args.public_origin == configured,
+    require(args.public_origin == PUBLIC == configured,
             "explicitly confirmed public origin must match this deployment's healthwatch configuration")
     return args.public_origin
 
@@ -133,58 +130,6 @@ def tcp():
         return False
 
 
-def tunnel_fd(stack, daemon, row, plan):
-    pid = row["pid"]
-    fd = drill.identity(pid, parent=daemon)
-    stack.callback(os.close, fd)
-    argv = [os.fsdecode(a) for a in Path(f"/proc/{pid}/cmdline").read_bytes().rstrip(b"\0").split(b"\0")]
-    service = plan["services"]["cloudflared"]
-    configured = service["command"]
-    executable = shutil.which(configured[0], path=service["env"]["PATH"])
-    require(Path(configured[0]).name == "cloudflared" and executable and
-            os.path.samefile(executable, f"/proc/{pid}/exe") and argv[1:] == configured[1:] and argv[1:2] == ["tunnel"] and argv[-3:] == ["--protocol", "quic", "run"],
-            "PID does not match this deployment's supervised QUIC Tunnel")
-    state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-    require(state not in ("T", "t", "Z"), "Tunnel already stopped or traced before drill")
-    return fd
-
-
-@contextmanager
-def pause_tunnel(pid, fd, duration):
-    if fd is None:
-        yield
-        return
-    read_ctl, write_ctl = os.pipe()
-    ack_r, ack_w = os.pipe()
-    guard = os.fork()
-    if guard == 0:
-        os.close(write_ctl)
-        os.close(ack_r)
-        try:
-            os.setsid()
-            try:
-                if not drill.freeze(pid, fd):
-                    raise RuntimeError("Tunnel vanished before SIGSTOP")
-                os.write(ack_w, b"1")
-                select.select([read_ctl], [], [], duration + 5)
-            finally:
-                signal.pidfd_send_signal(fd, signal.SIGCONT)
-        finally:
-            os._exit(0)
-    os.close(read_ctl)
-    os.close(ack_w)
-    try:
-        require(select.select([ack_r], [], [], 5)[0] and os.read(ack_r, 1) == b"1", "Tunnel freeze failed")
-        yield
-    finally:
-        os.close(write_ctl)
-        os.close(ack_r)
-        try:
-            signal.pidfd_send_signal(fd, signal.SIGCONT)
-        finally:
-            os.waitpid(guard, 0)
-
-
 @contextmanager
 def blocked_port(duration):
     helper = str(HERE / "network-filter.sh")
@@ -238,21 +183,19 @@ def run(args):
     release = (root / "current").resolve(strict=True)
     require(release == Path(plan["release"]).resolve(strict=True), "supervisor plan and active release differ")
     origin = public_target(args, configured_origin(plan, release))
-    opened = None if args.protocol_fixture else session(args.session_open, args.session_close, args.duration)
+    opened = None if args.protocol_fixture else session(release, args.session_open, args.session_close, args.duration)
     daemon, active, skipped = drill.running_initial()
     required = {"finance-api", "finance-collector", "web", "healthwatch", "postgres", "finance-backtest-worker"}
     if not args.protocol_fixture:
         required.add("ib-gateway")
-    if not (args.paper_only or args.protocol_fixture):
-        required.add("cloudflared")
     require(not healthwatch.webhook_url(root), "use a maintenance window with local alert delivery only")
     require(required <= active.keys(), "required services missing: " + str(sorted(required - active.keys())))
     if args.protocol_fixture:
         # Keep a loopback TLS fixture on loopback even if the calling shell sets a proxy.
         os.environ["no_proxy"] = os.environ["NO_PROXY"] = "127.0.0.1,::1,localhost"
         e2e_smoke.require_fixture_environment(root, Path(os.environ.get("FERTILE_BOX_HOME", "/home/box")))
-        require(all(skipped.get(n) == "disabled" for n in ("ib-gateway", "xvfb", "cloudflared")),
-                "fixture requires explicitly disabled real external services")
+        require(all(skipped.get(n) == "disabled" for n in ("ib-gateway", "xvfb")),
+                "fixture requires disabled real Gateway and display")
     require(all(not active[n].get("ready_url") or active[n]["ready"] == 200 for n in required),
             "required services must initially be ready")
     coll = plan["services"]["finance-collector"]["env"]
@@ -290,15 +233,14 @@ def run(args):
     paper_probe(release, args.protocol_fixture)
     mode = "protocol-fixture" if args.protocol_fixture else "paper-only" if args.paper_only else "full"
     omitted = (["real IB account", "exchange session", "real Cloudflare Tunnel", "public smoke"]
-               if args.protocol_fixture else ["Cloudflare Tunnel", "public smoke"] if args.paper_only else [])
+               if args.protocol_fixture else ["Ruler-managed tunnel recovery", "public smoke"] if args.paper_only
+               else ["Ruler-managed tunnel recovery"])
     drill.report("network_baseline", mode=mode, duration_seconds=args.duration, bars=before_bars,
                  unverified=omitted, skipped_services=skipped)
     with ExitStack() as stack:
         stack.callback(os.close, drill.identity(daemon, daemon=True))
-        tunnel = active.get("cloudflared", {}) if mode == "full" else {}
-        fd = tunnel_fd(stack, daemon, tunnel, plan) if tunnel else None
         fault_wall = time.time()
-        with pause_tunnel(tunnel.get("pid"), fd, args.duration), blocked_port(args.duration) as active_filter:
+        with blocked_port(args.duration) as active_filter:
             guard, filter_start = active_filter
             drill.report("network_fault_active", mode=mode)
             failed_origin = False
@@ -307,7 +249,7 @@ def run(args):
             while guard.poll() is None:
                 if not degraded_collector:
                     degraded_collector = healthwatch.http_json(ready_url, 2, local=True)[0] == 503
-                if origin and not failed_origin:
+                if args.protocol_fixture and origin and not failed_origin:
                     failed_origin = healthwatch.public_ready(origin, 2)["state"] == "failed"
                 time.sleep(.25)
             cleared = guard.stdout.readline().split()
@@ -318,7 +260,9 @@ def run(args):
         released_ns = time.time_ns()
         drill.report("network_fault_cleared", duration_seconds=round(elapsed, 2))
     require(elapsed >= args.duration - .2, "fault stopped before requested duration")
-    require(degraded_collector and (not origin or failed_origin), "missing observed collector or origin failure")
+    local_tls_fault = args.protocol_fixture and origin is not None
+    require(degraded_collector and (not local_tls_fault or failed_origin),
+            "missing observed collector or fixture origin failure")
     require(tcp(), "paper TCP did not reopen")
     paper_probe(release, args.protocol_fixture)
     target = (released_ns // NS_MINUTE + 1) * NS_MINUTE
@@ -333,16 +277,16 @@ def run(args):
         elapsed = round(time.monotonic() - ended, 2)
         if market_ok:
             recovery.setdefault("collector_ready_seconds", elapsed)
-        if origin and origin_ok:
-            recovery.setdefault("origin_ready_seconds", elapsed)
+        if local_tls_fault and origin_ok:
+            recovery.setdefault("fixture_origin_ready_seconds", elapsed)
         if market_ok and min(end.values()) >= target:
             recovery.setdefault("post_outage_watermark_seconds", elapsed)
         if (market_ok and min(end.values()) >= target and market_recovered and origin_ok
-                and (not origin or completed(events, "public:ready", fault_wall, cutoff_wall))):
+                and (not local_tls_fault or completed(events, "public:ready", fault_wall, cutoff_wall))):
             break
         time.sleep(1)
     else:
-        raise TimeoutError("no verified market/Tunnel recovery, post-outage watermark or matching alert transitions: "
+        raise TimeoutError("no verified market recovery or origin readiness, post-outage watermark or matching alert transitions: "
                            + str({k: [r["event"] for r in v] for k, v in events.items()}))
     final_status = drill.status()
     require(final_status["supervisor_pid"] == daemon and

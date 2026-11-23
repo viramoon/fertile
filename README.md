@@ -21,12 +21,12 @@ scripts/fertile build
 mkdir -p "$FERTILE_ROOT/config"
 # 仅在新测试实例上创建；已有配置请编辑并保留原设置。
 ( set -C; printf '%s\n' FERTILE_MARKET_SOURCE=replay > "$FERTILE_ROOT/config/runtime.env" )
-scripts/fertile up
+scripts/fertile ensure-up
 scripts/fertile status --json
-curl -fsS http://127.0.0.1:8080/api/v1/system/status
+curl -fsS http://127.0.0.1:8090/api/v1/system/status
 ~~~
 
-打开本机 8080 端口即可访问看板。交易、回测、博客和仪表盘四个页面由同一个 web 进程托管。仪表盘展示系统状态、行情新鲜度和最近示例回测；准备样例及提交实际回测的命令见 [Ruler 手册](ops/ruler-runbook.md)。公网入口待域名确认后通过既有 Cloudflare Tunnel 启用。
+本机入口为 http://127.0.0.1:8090。仪表盘展示服务和行情状态，回测页可以提交历史日线作业并查看审计，交易与博客保留入口。数据导入、提交和部署的命令见 [Ruler 手册](ops/ruler-runbook.md)。公网入口待域名确认后通过既有 Cloudflare Tunnel 启用。
 
 ## 运维和开发
 

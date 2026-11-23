@@ -1,35 +1,33 @@
-# Paper 行情与 Tunnel 断网演练
+# Paper 行情断网演练
 
-`tests/chaos/network.sh` 在已运行的部署上阻断本机 IPv4 loopback 发往 TCP 4002 的流量，同时暂停该实例由 supervisord 管理的 QUIC cloudflared 进程。默认持续 120 秒，支持 120 至 300 秒。命令不会读取或修改 Cloudflare 凭据，不会修改主机默认防火墙策略。演练期间公网入口暂时不可用；同机其他连接 127.0.0.1:4002 的 paper 客户端也会受影响。
+在 Ruler 批准的维护窗口，确认只有本次演练的客户端使用本机 paper 端口。脚本验证部署身份，然后在当前网络命名空间插入限定于本机 IPv4 loopback、目标 TCP 4002 的临时 DROP。持续 120 至 300 秒。真实账户保持 paper 只读。保留本机管理通道和告警日志。
 
-## 在目标盒子执行
+脚本验证同一个 collector 先失去就绪、后重订阅并补齐连续分钟线，同时核对合成试验或维护窗口的告警与恢复。前后用实际 Parquet 读回验证时间戳唯一。临时规则带独立标签，正常结束或控制器退出后由守护清除。不会清空防火墙规则。
 
-使用部署账户，从含当前版本测试的 fertile checkout 运行。环境需要 Linux pidfd、iptables 及直接操作指定网络命名空间的权限，或针对 iptables 的非交互式 sudo 权限。确认运行的是本机只读 paper Gateway、实时 IB 分钟线 collector 和默认服务清单，告警只写本地文件。先检查 `scripts/fertile status --json`、`scripts/ib-check.sh` 和 [巡检规则](../../ops/monitoring.md)。同一告警类型有 15 分钟去重窗口，等近期故障完全恢复并过了该窗口再安排下一次演练。
+## 目标盒子
 
-公网完整模式要求操作员明确提供已确认的 HTTPS origin，且它与当前 healthwatch 配置一致。候选域名由使用者确定。脚本先核实公网与本机返回相同的 web 提交和启动时间，验证 supervisor 父子关系、cloudflared 可执行文件和 QUIC 参数，再用 pidfd 固定进程身份。
+确认 Gateway 已登录、会话身份为 DU，官方交易日历处于开盘时段且距收盘足够久。先跑完整本地冒烟。若 SaaS 或代理的长连接周期性中断，另记录断线频率、reconnect/backoff、恢复水位和失败区间。
 
-```bash
+~~~sh
 source /home/box/fertile/env.sh
-set -o pipefail
-mkdir -p "$FERTILE_ROOT/logs/drills"
-tests/chaos/network.sh --duration 120 --public-origin "$FERTILE_PUBLIC_ORIGIN" \
-  | tee "$FERTILE_ROOT/logs/drills/network-$(date -u +%Y%m%dT%H%M%SZ).jsonl"
-```
+scripts/ib-check.sh
+scripts/fertile status --json
+tests/e2e-smoke.sh local
+tests/chaos/network.sh --paper-only --duration 120
+~~~
 
-实际 IB 模式只在美国股票常规交易时段运行。脚本用固定版本的 `exchange-calendars` 查询 XNYS 开、收盘时间，排除节假日和提前收盘后的时段，并要求恢复验证有足够时间。第一次使用时 uv 会缓存独立的日历依赖。可事先执行 `uv run --script tests/chaos/network-session.py "$(date -u +%F)"`。临时休市、停牌和分钟内无成交会影响验收，应选取正常连续交易的高流动性标的。可用 `--session-open` 与 `--session-close`（带 UTC 偏移的 ISO 时间）进一步缩小演练窗口。
+Ruler 完成 fertile.viramoon.com → 127.0.0.1:8090 的路由后，可以在同一演练中独立校验公网入口。脚本比对本地与公网 web 身份，检查 HTTPS 就绪，故障只对 paper 连接施加。共享站点、隧道进程、隧道凭据、DNS 和现场恢复仍由 Ruler 管理。
 
-## 验收证据
+~~~sh
+tests/chaos/network.sh --public-origin https://fertile.viramoon.com --duration 120
+~~~
 
-- 前置检查要求本地各核心服务 ready，Gateway 握手返回 DU 前缀和当前服务器时间，finance 报告 `ib-realtime` 且每个标的新鲜。校验运行中配置、catalog 的来源标记和 collector 的磁盘水位，并通过 release 自带的 Nautilus wheel 读取起始分钟。
-- `network_fault_active` 之后，实际连接 127.0.0.1:4002 必须超时或失败，collector 的 ready 必须出现 503，公网 ready 必须出现故障。当前演练只添加一条带随机标识的 OUTPUT 规则。控制进程退出时，管道关闭触发清理。辅助进程还持有时限清理，Tunnel 另由独立进程按 pidfd 恢复。用 `SIGINT` 可以提前终止和清理；未完成整个阻断窗口会得到非零结果。
-- `network_fault_cleared` 记录实测阻断时长。随后再次握手，要求同一个 collector 进程重新 ready。巡检 JSONL 须包含此次断网窗口内的行情或 collector 故障，公众入口故障需要单独记录，两者随后均应解除。
-- 验收持续到每个标的的水位超过解除后的第一个整分钟，并用 Nautilus 回读从原水位到新水位的整个区间。每个整分钟都应恰好有一根已收盘的 bar。缺失或重复一根都会令演练失败。
-- `network_recovery_verified` 记录行情、公网、恢复后水位三个阶段的秒数、告警 UTC 时间和每个标的的分钟数。最后重跑本地冒烟与同一已确认域名的公网冒烟，包含真实的回测作业。只有两次均成功才产生完整模式的 `network_drill_complete`。
+## 隔离协议试验
 
-恢复失败时保留日志并检查 `iptables -S OUTPUT` 中本次 `fertile-drill-` 规则、`scripts/fertile status --json`、`scripts/ib-check.sh` 和 alerts.jsonl。不要清空 OUTPUT 链。若 Gateway 报人工确认或行情仍过期，在恢复真实行情和补数前保留该项失败。
+隔离网络命名空间中运行真实业务进程与 TCP 协议测试端。真实 Gateway 和 Xvfb 必须禁用，须提供拥有 127.0.0.1:4002 监听 socket 的测试端 PID。可选本机 HTTPS 测试入口由该命名空间的试验驱动在 active/cleared 事件时断开和恢复。巡检配置与 fixture origin 一致。此模式验证内核断线、真实重连、告警转换和 Parquet 回补。报告标记协议替身与本机 TLS。
 
-## 受限环境
-
-- `tests/chaos/network.sh --paper-only --duration 120` 仍要求真实 paper 握手、交易时段、补数、告警和本地冒烟。该模式用于未配置公网 origin 的部署，跳过 Tunnel 和公网两项，输出列出未验证项。
-- `--protocol-fixture` 用于独立的开发或 CI 网络命名空间。真实 Gateway、Xvfb 和 cloudflared 均须显式禁用，测试环境无 IBKR、Cloudflare 和 webhook 凭据。`FERTILE_SMOKE_FIXTURE_PID` 必须是持有 127.0.0.1:4002 监听 socket 的测试 peer。该模式使用真实应用、iptables、告警和 Parquet，同时跳过真实账户、交易所会话、Cloudflare 和公网冒烟。可向 `--fixture-origin` 提供 **127.0.0.1 的 HTTPS 地址** 验证本地 TLS 故障与恢复；由隔离夹具响应 active/cleared 两个事件暂停和恢复该监听，healthwatch 必须配置同一地址。全程不会向真实域名发送请求。
-- 轻量测试可运行 `python3 tests/chaos/network_test.py`。它在私有子进程上验证控制进程收到 SIGKILL 后，守护进程仍会恢复被暂停的目标。实际盒子验收请保存完整模式 JSONL 及两个 smoke 的退出码。
+~~~sh
+export FERTILE_SMOKE_FIXTURE_PID="$local_test_peer_pid"
+tests/chaos/network.sh --protocol-fixture --duration 120 --fixture-origin https://127.0.0.1:14443
+python3 tests/chaos/network_test.py -v
+~~~

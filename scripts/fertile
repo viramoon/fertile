@@ -10,7 +10,7 @@ export FERTILE_ROOT="$root"
 export PYTHONDONTWRITEBYTECODE=1
 if [[ ${1:-} == build ]]; then shift; exec "$scripts/build-release.sh" "$@"; fi
 if [[ -z ${FERTILE_CONTROL_PYTHON:-} && -z ${FERTILE_SUPERVISOR_BIN:-} ]]; then
-  if [[ ${1:-} == up || ${1:-} == ensure ]]; then "$scripts/setup-supervisor.sh"; fi
+  if [[ ${1:-} == up || ${1:-} == ensure || ${1:-} == ensure-up ]]; then "$scripts/setup-supervisor.sh"; fi
 fi
 python=${FERTILE_CONTROL_PYTHON:-${FERTILE_SUPERVISOR_BIN:-$root/tools/supervisor/bin}/python}
 [[ -x "$python" ]] || { echo "Install the bootstrap toolchain and run scripts/setup-supervisor.sh" >&2; exit 1; }
