@@ -1,4 +1,5 @@
 """Check the release/secret boundary without touching any persistent box files."""
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -19,7 +20,7 @@ class RuntimePlan(unittest.TestCase):
         self.root = Path(tmp.name)
         self.run = self.root / "run"
         self.logs = self.root / "logs"
-        for directory in [self.run, self.logs, self.root / "config", self.root / "secrets"]:
+        for directory in [self.run, self.logs, self.root / "config"]:
             directory.mkdir()
         for key, value in (("ROOT", self.root), ("RUN", self.run), ("LOGS", self.logs),
                            ("CONF", self.run / "supervisord.conf"), ("SNAPSHOT", self.run / "services.json")):
@@ -39,6 +40,7 @@ class RuntimePlan(unittest.TestCase):
         self.write(env_file="test.env")
         self.assertEqual(ctl.build_plan()["services"]["test"]["skip"], "needs_credentials")
         path = self.root / "secrets/test.env"
+        path.parent.mkdir()
         path.write_text("EXAMPLE_VALUE=must-stay-out-of-rendered-files\n")
         path.chmod(0o644)
         self.assertEqual(ctl.build_plan()["services"]["test"]["skip"], "invalid_credentials_permissions")
@@ -93,6 +95,60 @@ class RuntimePlan(unittest.TestCase):
         with patch.dict(os.environ, {"FERTILE_RESEARCH_ROOT": "/home/box/quant-research"}):
             with self.assertRaisesRegex(ValueError, "fertile data/research"):
                 ctl.build_plan()
+
+    def test_research_root_accepts_default_and_concrete_children(self):
+        self.write()
+        base = self.root / "data/research"
+        self.assertEqual(ctl.build_plan()["services"]["test"]["env"]["FERTILE_RESEARCH_ROOT"], str(base))
+        for path in (base, base / "catalog"):
+            with self.subTest(path=path), patch.dict(os.environ, FERTILE_RESEARCH_ROOT=str(path)):
+                env = ctl.build_plan()["services"]["test"]["env"]
+                self.assertEqual(env["FERTILE_RESEARCH_ROOT"], str(path))
+
+    def test_research_root_rejects_relative_paths_and_escapes(self):
+        self.write()
+        base = self.root / "data/research"
+        base.mkdir(parents=True)
+        outside = self.root / "data/other"
+        outside.mkdir()
+        link = base / "escape"
+        link.symlink_to(outside, target_is_directory=True)
+        for path in (Path("data/research"), outside, base / "../other", base / "catalog/../other", link):
+            with self.subTest(path=path), patch.dict(os.environ, FERTILE_RESEARCH_ROOT=str(path)):
+                with self.assertRaisesRegex(ValueError, "fertile data/research"):
+                    ctl.build_plan()
+
+    def test_database_audit_rebases_inherited_data_roots(self):
+        spec = importlib.util.spec_from_file_location("web_database", Path(__file__).with_name("web-database.py"))
+        database = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(database)
+        caller_env = {
+            "PATH": os.defpath,
+            "FERTILE_BOX_HOME": str(self.root),
+            "FERTILE_ROOT": str(self.root),
+            "FERTILE_DATA_ROOT": str(self.root / "data/replay"),
+            "FERTILE_RESEARCH_ROOT": str(self.root / "data/research"),
+            "WEB_DATABASE_TEST_BIN": "/bin/true",
+            "WEB_DATABASE_TEST_CONFIG": str(self.root),
+        }
+
+        class ReachedDatabaseInit(Exception):
+            pass
+
+        with (patch.dict(os.environ, caller_env, clear=True),
+              patch.object(ctl, "ROOT", self.root), patch.object(ctl, "RUN", self.run),
+              patch.object(ctl, "check_secret", return_value="needs_credentials"),
+              patch.object(ctl.shutil, "which", return_value="/bin/true"),
+              patch.object(database, "run", side_effect=ReachedDatabaseInit) as run):
+            with self.assertRaises(ReachedDatabaseInit):
+                database.audit()
+
+        self.assertEqual(run.call_args.args[-1], "init")
+        env = run.call_args.kwargs["env"]
+        audit_root = Path(env["FERTILE_ROOT"])
+        self.assertNotEqual(audit_root, self.root)
+        self.assertEqual(env["FERTILE_DATA_ROOT"], str(audit_root / "data/replay"))
+        self.assertEqual(env["FERTILE_RESEARCH_ROOT"], str(audit_root / "data/research"))
 
     def test_external_group_keeps_legacy_supervisor_untouched(self):
         self.write(name="cloudflared")

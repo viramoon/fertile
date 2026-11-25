@@ -12,7 +12,7 @@ Ruler 在运行根 config/runtime.env 中填写每行一个非敏感 KEY=VALUE�
 | FERTILE_MARKET_SOURCE | 默认 ib。测试使用 replay，独立存入 data/replay。生产源与回放源切换需核对 catalog 与队列目录。 |
 | FERTILE_PROFILE、FERTILE_DATA_ROOT | 选择服务配置和持久数据目录。显式挂载必须存在。 |
 | FINANCE_API_PORT、FINANCE_COLLECTOR_PORT、WEB_PORT | 默认在本机监听 8081、8082、8090。8080 由现有网站使用。 |
-| FERTILE_RESEARCH_ROOT | 默认为持久根下 data/research，API、worker、备份共用。可选该目录下的一个具体子目录。 |
+| FERTILE_RESEARCH_ROOT | 默认为当前 FERTILE_ROOT 下的 data/research，API、worker、备份共用。可显式设置为该目录本身或其具体子目录，须使用绝对路径并通过目录边界校验。独立数据库审计使用临时根及其默认研究和回放目录。 |
 | FINANCE_COLLECTOR_CONFIG、IB_GATEWAY_ADDRESS | 指向当前行情源的配置和本机 paper 接口 127.0.0.1:4002。 |
 | FERTILE_HEALTH_CONFIG、FERTILE_PUBLIC_ORIGIN | 站点巡检配置和经确认的 HTTPS 入口。公网入口为空时采样会记录跳过。 |
 | FERTILE_BACKUP_DAYS、FERTILE_BACKUP_WEEKS、FERTILE_BACKUP_REMOTE | 本地保留周期与可选 rclone remote 名。详细设置见 [备份](../ops/backup.md)。 |

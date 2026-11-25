@@ -56,11 +56,13 @@ def audit():
         (release / "web/config").symlink_to(config)
         (root / "current").symlink_to(release)
         (root / "data").mkdir()
-        (root / "secrets").mkdir()
         sock = root / "run/postgres"
-        base = dict(os.environ, FERTILE_ROOT=tmp, FERTILE_WEB_PEER="1", FERTILE_MARKET_SOURCE="replay",
-                    FERTILE_POSTGRES_PORT="55661", PGHOST=str(sock), PGPORT="55661", PGDATABASE="postgres", PGUSER=admin_name)
+        # Deployment overrides point at the caller's root. Use this audit's replay defaults.
+        os.environ.pop("FERTILE_DATA_ROOT", None)
+        os.environ.pop("FERTILE_RESEARCH_ROOT", None)
         os.environ.update(FERTILE_ROOT=tmp, FERTILE_POSTGRES_PORT="55661", FERTILE_MARKET_SOURCE="replay")
+        base = dict(os.environ, FERTILE_WEB_PEER="1", PGHOST=str(sock), PGPORT="55661",
+                    PGDATABASE="postgres", PGUSER=admin_name)
         supervision.ROOT = root
         supervision.RUN = root / "run"
         # Build the real plan. Only web and postgres are needed in this isolated release.
@@ -177,6 +179,7 @@ def audit():
             assert sql(admin, "SELECT shobj_description('fertile_web'::regrole,'pg_authid')") == 'reserved by another operator'
             print("unmanaged same-name LOGIN preserved; default provisioning refused")
             secret = root / "secrets/web-database.env"
+            secret.parent.mkdir()
             secret.write_text("DATABASE_URL=postgresql://dedicated@external.invalid/application\n")
             secret.chmod(0o600)
             external = supervision.build_plan()
