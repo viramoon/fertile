@@ -110,7 +110,7 @@ scripts/fertile rollback <previous-fertile-commit>
    cp -a -- "$new_snapshot" "$archive/new-version"
    ```
 
-3. 验证升级前快照再恢复到新目录和新库。首次恢复使用空目录或尚未创建的目录，以及空库或不存在的库。
+3. 验证升级前快照再恢复到新目录和新库。带显式目标的 `--dry-run` 会只读检查目标目录和库的占用情况。首次恢复使用空目录或尚未创建的目录，以及空库或不存在的库。遇到占用时，dry-run 会在标准错误中点名目录或库并退出 1。确认允许覆盖时可加 `--overwrite` 做预检，dry-run 会警告正式恢复将替换哪些内容，其余检查通过时退出 0。PostgreSQL 不可达或已存在的目标库无法读取时，命令会点名目标库并退出 1。即使看到 `SHA256 verified`，也要检查退出码再继续。
 
    ```bash
    scripts/restore.sh "$pre_upgrade" --dry-run --target-data-root "$old_data" --target-database "$old_db"
@@ -190,7 +190,7 @@ tests/simulate-reboot.sh
 
 ## 备份、恢复与账户运维
 
-执行 `snapshot=$(scripts/backup.sh)` 保存输出的快照路径。备份成功后，执行 `scripts/restore.sh "$snapshot" --dry-run` 检查快照。实际写入时使用 `--target-data-root` 和 `--target-database` 指定目标。数据库须在所有写入方退出后保持可用。默认保留 7 个每日和 4 个每周快照，整机恢复还需异机副本。[备份操作](backup.md)
+执行 `snapshot=$(scripts/backup.sh)` 保存输出的快照路径。备份成功后，执行 `scripts/restore.sh "$snapshot" --dry-run` 检查快照，可在 PostgreSQL 停止时执行。要检查目标占用，带上 `--target-data-root` 与 `--target-database` 并保持 PostgreSQL 可用。正式恢复使用同一组目标，且须先停止所有写入方。默认保留 7 个每日和 4 个每周快照，整机恢复还需异机副本。[备份操作](backup.md)
 
 在运行时根检查 logs/alerts/alerts.jsonl 和 logs/healthwatch/samples.jsonl，把服务停用、恢复、公网探测和备份年龄分开阅读。通知默认写入本地，维护人员可按 [监控](monitoring.md) 配置独立 webhook。paper Gateway 的安装、登录失败预算、2FA、每日自动重启和健康检查见 [Gateway 运维](ibgateway.md)。不要在运行记录中复制凭据、完整账号或本机令牌。
 

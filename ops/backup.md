@@ -1,6 +1,6 @@
 # 盒子备份与恢复
 
-巡检默认每天 UTC 03:00 调用一次 `scripts/backup.sh`。时间和备份过期阈值由 [巡检配置](../deploy/healthwatch.yaml) 决定。手动执行相同命令会输出完成的目录名。每个快照保存在 `$FERTILE_ROOT/backups/<UTC 时间戳>/`，只有在文件落盘、生成 SHA256 清单后才以该名称发布。并发备份与恢复由 `run/backup.lock` 串行化。
+巡检默认每天 UTC 03:00 调用一次 `scripts/backup.sh`。时间和备份过期阈值由 [巡检配置](../deploy/healthwatch.yaml) 决定。手动执行相同命令会输出完成的目录名。每个快照保存在 `$FERTILE_ROOT/backups/<UTC 时间戳>/`，只有在文件落盘、生成 SHA256 清单后才以该名称发布。并发备份与正式恢复由 `run/backup.lock` 串行化。
 
 ## 数据与位置
 
@@ -34,15 +34,18 @@ source /home/box/fertile/env.sh
 snapshot="$FERTILE_ROOT/backups/<已选快照时间戳>"
 target_data="$FERTILE_ROOT/data-paper-rollback"
 target_db=web_rollback
-scripts/restore.sh "$snapshot" --dry-run --target-data-root "$target_data" --target-database "$target_db"
+scripts/restore.sh "$snapshot" --dry-run
 (cd "$snapshot" && sha256sum --check SHA256SUMS)
 ```
 
-`--dry-run` 核对所有文件的 SHA256、快照结构、行情来源和 PG 归档格式。有目标时还核对目标路径和库名的合法性。该模式也接受仅传快照路径，可在 PostgreSQL 停止时运行。实际写入前检查目标占用情况。
+`--dry-run` 核对所有文件的 SHA256、快照结构、行情来源和 PG 归档格式。仅传快照时可在 PostgreSQL 停止期间运行。同时指定 `--target-data-root` 和 `--target-database` 后，dry-run 还会核对路径和库名是否合法，并检查数据根、各目标目录及目标库是否被占用。检查需要连到 PostgreSQL 的 `postgres` 维护库。目标库不存在时视为空，已存在时须能连接该库并读取其应用 schema、对象定义和大对象元数据。数据库不可达或查询失败时，命令会在标准错误中点名目标库并退出 1。
+
+发现占用且未加 `--overwrite` 时，命令在标准错误中输出 `non-empty restore directory` 或 `non-empty target database`，点名目标并退出 1。加 `--overwrite` 后，占用目标会收到 `Warning:`，说明正式恢复会替换、移除或保留哪些内容。其余检查都通过时退出 0。以退出码判断整次检查是否通过，因为 `SHA256 verified` 可能先于占用错误输出。dry-run 只读检查，不创建目录、数据库、锁、恢复日志或临时归档。正式恢复仍需停止写入方，并在未加 `--overwrite` 时重新检查占用。
 
 ```bash
 scripts/fertile down
 scripts/postgres.sh start
+scripts/restore.sh "$snapshot" --dry-run --target-data-root "$target_data" --target-database "$target_db"
 scripts/restore.sh "$snapshot" --target-data-root "$target_data" --target-database "$target_db"
 scripts/postgres.sh stop
 ```
@@ -63,6 +66,6 @@ export PATH="$(pg_config --bindir):$PATH"
 python3 tests/backup_restore.py
 ```
 
-演练包含精确 PG 金额、中文记录、序列、ACL、SQLite WAL、定点 Parquet、硬链接、秘密排除、删库恢复和 SIGKILL 中断重试。独立目标演练检查空库恢复、改名恢复、原库与原目录的隔离，以及覆盖失败后的回滚。缺 PG 服务端工具时，离线校验和轮转用例照常执行。只有真实 Parquet 演练依赖 PyArrow。
+演练包含精确 PG 金额、中文记录、序列、ACL、SQLite WAL、定点 Parquet、硬链接、秘密排除、删库恢复和 SIGKILL 中断重试。独立目标演练检查 dry-run 对空库和非空库的处理、空库恢复、改名恢复、原库与原目录的隔离，以及覆盖失败后的回滚。缺 PG 服务端工具时，离线校验、目录占用和轮转用例照常执行。只有真实 Parquet 演练依赖 PyArrow。
 
 研究日线使用运行配置 FERTILE_RESEARCH_ROOT 指向的持久 catalog。快照包含已发布的 Parquet 和每标的 dataset.json，排除导入暂存目录。验证恢复时同时核对来源 SHA、区间、作业队列与回测摘要。恢复早于研究功能的旧快照会保留当前研究目录。需要切换数据批次时先停止接单并让作业结束，再由 Ruler 执行快照和配置切换。

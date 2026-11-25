@@ -11,7 +11,7 @@
 | scripts/fertile rollback SHA | 校验既有版本并切换，重新加载受影响服务。 |
 | scripts/fertile rollback --switch-only SHA | supervisor 已停时，校验既有版本并切换 `current`，由后续 `ensure-up` 启动。 |
 | scripts/backup.sh | 将活动库、队列、catalog 和公开配置备份到持久目录。 |
-| scripts/restore.sh SNAPSHOT --target-data-root PATH --target-database NAME | 校验快照并恢复到显式目标。`--dry-run` 只校验，`--overwrite` 允许覆盖非空目标，`--target-research-root` 单独指定研究 catalog。参见 [备份操作](../ops/backup.md)。 |
+| scripts/restore.sh SNAPSHOT --target-data-root PATH --target-database NAME | 校验快照并恢复到显式目标。`--dry-run` 只读校验，在指定目标时也检查占用。`--overwrite` 在正式恢复时允许覆盖，在 dry-run 时警告非空目标的处理方式。`--target-research-root` 单独指定研究 catalog。参见 [备份操作](../ops/backup.md)。 |
 | scripts/check-submodules.sh [--ref BRANCH] | 检查三个 gitlink、干净的递归工作树、远端分支上已推送的提交，默认 main。 |
 | scripts/contract-diff.sh | 从两个生产者代码导出 OpenAPI，并重跑两端客户端生成检查。 |
 | scripts/release.sh --dry-run | 从 Git 和 GitHub 读取版本、包含的提交与 PR、关闭 issue，向标准输出写入预览。 |

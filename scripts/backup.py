@@ -122,13 +122,14 @@ class Box:
         require(self.days >= 1 and self.weeks >= 0, "retention requires days>=1 and weeks>=0")
         self.remote = settings.get("FERTILE_BACKUP_REMOTE", "")
 
-    def command(self, *args, sql=None):
-        return subprocess.run(args, input=sql, env=self.pg, check=True,
-                              stdout=subprocess.PIPE, text=True, pass_fds=self.fds).stdout.strip()
+    def command(self, *args, input_data=None, text=True):
+        output = subprocess.run(args, input=input_data, env=self.pg, check=True,
+                                stdout=subprocess.PIPE, text=text, pass_fds=self.fds).stdout
+        return output.strip() if text else output
 
     def sql(self, sql, database="postgres"):
         return self.command("psql", "-XqAt", "--set", "ON_ERROR_STOP=1",
-                            "--dbname", database, sql=sql)
+                            "--dbname", database, input_data=sql)
 
     def exists(self, db):
         return self.sql(f"SELECT EXISTS(SELECT FROM pg_database WHERE datname='{db}')") == "t"
@@ -459,24 +460,53 @@ def database_empty(box):
     # built-in schemas, including empty application schemas and database extensions.
     if box.sql("SELECT EXISTS (SELECT FROM pg_largeobject_metadata)", box.db) != "f":
         return False
-    with tempfile.TemporaryDirectory(prefix="fertile-empty-") as directory:
-        archive = Path(directory) / "schema.dump"
-        box.command("pg_dump", "--schema-only", "--no-comments", "--no-privileges", "--format=custom",
-                    "--dbname", box.db, "--file", archive)
-        toc = box.command("pg_restore", "--list", archive)
-    standard = re.compile(r"\d+; (?:2615 2200 SCHEMA - public \S+|0 0 (?:ENCODING|STDSTRINGS|SEARCHPATH) - .*)")
-    return not any(re.match(r"^\d+;", line) and not standard.fullmatch(line) for line in toc.splitlines())
+    # Pass the schema archive in memory so dry-run creates no temporary files.
+    archive = box.command("pg_dump", "--schema-only", "--no-comments", "--no-privileges", "--format=custom",
+                          "--dbname", box.db, text=False)
+    toc = box.command("pg_restore", "--list", input_data=archive, text=False)
+    standard = re.compile(rb"\d+; (?:2615 2200 SCHEMA - public \S+|0 0 (?:ENCODING|STDSTRINGS|SEARCHPATH) - .*)")
+    return not any(re.match(rb"^\d+;", line) and not standard.fullmatch(line) for line in toc.splitlines())
+
+
+def check_occupancy(box, meta, overwrite, *, dry_run=False):
+    if overwrite and not dry_run:
+        return box.exists(box.db)
+
+    def occupied(target, effect):
+        if not overwrite:
+            raise ValueError(f"non-empty {target}; use --overwrite")
+        print(f"Warning: non-empty {target}; {effect}", file=sys.stderr)
+
+    for key, path in ((None, box.data), *box.trees.items()):
+        if not path.exists() or not any(path.iterdir()):
+            continue
+        if key is None:
+            effect = "restore will replace or remove snapshot-managed directories and keep other entries"
+        elif key not in meta["trees"]:
+            effect = "restore will keep this directory"
+        elif meta["trees"][key]:
+            effect = "restore will replace this directory"
+        else:
+            effect = "restore will remove this directory"
+        occupied(f"restore directory: {path}", effect)
+
+    try:
+        had_db = box.exists(box.db)
+        nonempty_db = had_db and not database_empty(box)
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ValueError(f"cannot check occupancy of target database {box.db}; "
+                         f"PostgreSQL must be reachable and the database readable: {error}") from error
+    if nonempty_db:
+        effect = "restore will replace this database" if meta["has_database"] else "restore will keep this database"
+        occupied(f"target database: {box.db}", effect)
+    return had_db
 
 
 def restore(box, snapshot, meta, overwrite, targets):
     with locked(box.run / "control.lock") as control_fd:
         box.fds.append(control_fd)
         quiescent(box)
-        had_db = box.exists(box.db)
-        if not overwrite:
-            for path in {box.data, *box.trees.values()}:
-                require(not path.exists() or not any(path.iterdir()), f"non-empty restore directory: {path}; use --overwrite")
-            require(not had_db or database_empty(box), f"non-empty target database: {box.db}; use --overwrite")
+        had_db = check_occupancy(box, meta, overwrite)
         journal = box.run / "restore-journal.json"
         before = backup(box, recovery=True)
         print(f"Before-restore snapshot: {before}", flush=True)
@@ -539,8 +569,11 @@ def main():
     sub.add_argument("--target-data-root", type=Path, help="absolute destination for finance-state, catalog and research")
     sub.add_argument("--target-database", help="destination PostgreSQL database name on the configured server")
     sub.add_argument("--target-research-root", type=Path, help="explicit research destination under FERTILE_ROOT/data/research")
-    sub.add_argument("--overwrite", action="store_true", help="allow replacing payload in non-empty destinations")
-    sub.add_argument("--dry-run", action="store_true", help="verify SHA256, format and explicit target paths without writes")
+    sub.add_argument("--overwrite", action="store_true",
+                     help="allow replacing payload in non-empty destinations; dry-run warns about occupied targets")
+    sub.add_argument("--dry-run", action="store_true",
+                     help="verify the snapshot and check explicit target occupancy without writes; "
+                          "explicit targets require PostgreSQL, and occupied targets fail unless --overwrite is set")
     args = parser.parse_args()
     targets = None
     if args.action == "restore":
@@ -553,7 +586,10 @@ def main():
     root = Path(os.getenv("FERTILE_ROOT", "/home/box/fertile")).resolve(strict=True)
     journal = root / "run/restore-journal.json"
     if args.action == "restore" and args.dry_run:
-        verify_restore(Box(restoring=True), args.snapshot, targets)
+        box = Box(restoring=True)
+        meta = verify_restore(box, args.snapshot, targets)
+        if targets is not None:
+            check_occupancy(box, meta, args.overwrite, dry_run=True)
         return
     with locked(root / "run/backup.lock") as backup_fd:
         if journal.exists():
