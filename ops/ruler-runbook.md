@@ -190,7 +190,7 @@ tests/simulate-reboot.sh
 
 ## 备份、恢复与账户运维
 
-执行 `scripts/backup.sh` 后记录输出的快照路径。先执行 `scripts/restore.sh --dry-run` 检查快照，实际写入时指定数据根和库名。数据库须在所有写入方退出后保持可用。默认保留 7 个每日和 4 个每周快照，整机恢复还需异机副本。[备份操作](backup.md)
+执行 `snapshot=$(scripts/backup.sh)` 保存输出的快照路径。备份成功后，执行 `scripts/restore.sh "$snapshot" --dry-run` 检查快照。实际写入时使用 `--target-data-root` 和 `--target-database` 指定目标。数据库须在所有写入方退出后保持可用。默认保留 7 个每日和 4 个每周快照，整机恢复还需异机副本。[备份操作](backup.md)
 
 在运行时根检查 logs/alerts/alerts.jsonl 和 logs/healthwatch/samples.jsonl，把服务停用、恢复、公网探测和备份年龄分开阅读。通知默认写入本地，维护人员可按 [监控](monitoring.md) 配置独立 webhook。paper Gateway 的安装、登录失败预算、2FA、每日自动重启和健康检查见 [Gateway 运维](ibgateway.md)。不要在运行记录中复制凭据、完整账号或本机令牌。
 
