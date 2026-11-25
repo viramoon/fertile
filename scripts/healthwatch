@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+scripts=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+root=${FERTILE_ROOT:-/home/box/fertile}
+python=${FERTILE_CONTROL_PYTHON:-${FERTILE_SUPERVISOR_BIN:-$root/tools/supervisor/bin}/python}
+[[ -x "$python" ]] || { echo "healthwatch requires the control Python from scripts/setup-supervisor.sh" >&2; exit 1; }
+export PYTHONDONTWRITEBYTECODE=1 FERTILE_ROOT="$root"
+exec "$python" "$scripts/healthwatch.py" "$@"

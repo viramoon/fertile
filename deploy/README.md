@@ -1,11 +1,7 @@
-# 服务部署唯一准绳
+# 云盒子部署
 
-fertile 的 deploy/ 是系统服务部署的唯一来源。[service.yaml](service.yaml) 聚合组件清单并定义部署形态；finance、web 的 service.yaml 提供组件字段，RUNBOOK 提供操作设计。agent deploy-map 只做 skill / prompt / 工作流分发，不作为服务拓扑或版本依据。
+[系统清单](service.yaml) 记录部署契约、健康端点和持久路径。[服务配置](services.yaml) 描述进程的启动顺序与就绪条件。Ruler 在 fertile 仓库运行 [操作手册](../ops/ruler-runbook.md) 中的命令。
 
-当前只有 finance 的 trader / collector / api 与 web 常驻业务进程，frontend Vite 产物由 web 托管；backtest 是任务，agent 是独立知识仓库。Gateway、PostgreSQL 与 Tunnel 为基础依赖，实际实例与启动命令 TBD。
+finance API 和采集器分别在本机的 8081、8082 端口提供健康检查。回测由独立 worker 消费持久队列。web 监听 8090，连接 PostgreSQL，调用 finance API 并托管与自身匹配的 frontend dist。公网入口由现有的 Cloudflare Tunnel 提供。Gateway 只用于已授权的 paper 会话。
 
-按只有 /home/box 持久处理。代码、配置、数据、日志、二进制与备份均使用配置化持久目录；/etc、/srv、/usr 下系统级改动必须写进未来可重复执行的初始化流程，不能靠一次手工设置。重启重建设计见 [bootstrap.md](bootstrap.md)。
-
-所有部署 / 回滚以 fertile tag 锁定的指针、配置和产物为单位；不维护手写 versions.yaml，gitlink 是子模块版本依据。环境通过 config/base.yaml + cloudbox.yaml 或 stable.yaml 区分，运行模式和账户独立，当前只用 paper。
-
-环境初始化已由 [bootstrap-box.sh](../scripts/bootstrap-box.sh) 实现，Postgres 命令与重建步骤见 [bootstrap.md](bootstrap.md)。业务配置加载器、服务端口 / 域名与常驻守护由后续骨架 / 部署 issue 实现；聚合 service.yaml 仍是设计清单。
+/home/box 保存工具、配置、数据、日志、构建和备份。部署锁定三个 gitlink。构建按 fertile 提交写入 releases/，current 指向所选构建。生产发版的统一版本来自 VERSION；本次联调用明确提交验证，未发布新版本。云盒子恢复的步骤见 [bootstrap](bootstrap.md)，守护选型见 [ADR-002](../docs/adr/ADR-002-process-supervision.md)。

@@ -1,0 +1,133 @@
+name: Cross-repository integration
+on:
+  pull_request:
+  push:
+    branches: [ha-runthrough, main]
+permissions:
+  contents: read
+concurrency:
+  group: integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 220
+    steps:
+      - name: Check out the fertile candidate
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify private repository access and hydrate the committed gitlinks
+        env:
+          GH_TOKEN: ${{ secrets.FERTILE_SUBMODULES_TOKEN }}
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::error::Set FERTILE_SUBMODULES_TOKEN in fertile Actions secrets with Contents read access to the three private component repositories."
+            exit 1
+          fi
+          for module in finance web frontend; do
+            repo="viramoon/$module"
+            if ! gh api --silent "repos/$repo"; then
+              echo "::error::Cannot read $repo with FERTILE_SUBMODULES_TOKEN. Check repository selection and authorization."
+              exit 1
+            fi
+            pin=$(git rev-parse "HEAD:$module")
+            if ! gh api --silent "repos/$repo/commits/$pin"; then
+              echo "::error::$repo is readable but commit $pin is unavailable. Check Contents read access and the published gitlink."
+              exit 1
+            fi
+          done
+          gh auth setup-git --hostname github.com
+          git submodule sync --recursive
+          git submodule update --init --recursive
+          fetch_contract_source() {
+            local producer=$1 marker="$2/openapi/$1.commit" recorded
+            recorded=$(cat "$marker")
+            if [[ ! $recorded =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::Expected a full producer commit in $marker."
+              return 1
+            fi
+            if [[ $(git -C "$producer" cat-file -t "$recorded" 2>/dev/null) != commit ]]; then
+              if ! git -C "$producer" fetch --no-tags origin "$recorded"; then
+                echo "::error::Cannot fetch the producer commit recorded in $marker."
+                return 1
+              fi
+            fi
+          }
+          fetch_contract_source finance web
+          fetch_contract_source web frontend
+          git config --global --remove-section credential.https://github.com
+      - name: Verify published gitlinks and their working trees
+        env:
+          GH_TOKEN: ${{ secrets.FERTILE_SUBMODULES_TOKEN }}
+        run: |
+          gh auth setup-git --hostname github.com
+          scripts/check-submodules.sh
+          source deploy/toolchain.env
+          test "$(git -C finance/vendor/nautilus_trader rev-parse HEAD)" = "$NAUTILUS_COMMIT"
+          git config --global --remove-section credential.https://github.com
+      - name: Prepare disposable runner
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          echo "FERTILE_BOX_HOME=$RUNNER_TEMP/box" >> "$GITHUB_ENV"
+          echo "FERTILE_ROOT=$RUNNER_TEMP/box/fertile" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+          df -h "$RUNNER_TEMP"
+      - name: Cache the pinned native build and system tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/box/fertile/cache/finance/wheels
+            ${{ runner.temp }}/box/fertile/cache/downloads
+          key: fertile-native-v1-${{ runner.arch }}-${{ hashFiles('deploy/toolchain.env','finance/toolchain.env','finance/uv.lock','finance/scripts/build.sh') }}
+      - name: Install the locked box environment and build the three components
+        run: |
+          scripts/bootstrap-box.sh
+          source "$FERTILE_ROOT/env.sh"
+          rustup component add rustfmt
+          scripts/fertile build --ref "$GITHUB_SHA"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Re-export contracts and regenerate both clients
+        run: |
+          source "$FERTILE_ROOT/env.sh"
+          (cd frontend && pnpm install --frozen-lockfile)
+          scripts/contract-diff.sh
+          bash tests/contract-drift.sh
+      - name: Exercise the actual supervised local deployment with ReplaySource
+        run: |
+          set -eu
+          source "$FERTILE_ROOT/env.sh"
+          umask 077
+          mkdir -p "$FERTILE_ROOT/config" "$FERTILE_ROOT/secrets"
+          printf '%s\n' FERTILE_MARKET_SOURCE=replay "FERTILE_HEALTH_CONFIG=$FERTILE_ROOT/config/healthwatch-ci.yaml" > "$FERTILE_ROOT/config/runtime.env"
+          echo 'public_origin: null' > "$FERTILE_ROOT/config/healthwatch-ci.yaml"
+          python3 - <<'PYTHON'
+          import os
+          import secrets
+          from pathlib import Path
+          with Path(os.environ["FERTILE_ROOT"], "secrets/web.env").open("x") as token:
+              token.write("WEB_ADMIN_TOKEN=" + secrets.token_hex(32) + "\n")
+          PYTHON
+          scripts/fertile up
+          export FINANCE_BUILD_ROOT="$FERTILE_ROOT/current/runtime"
+          export FERTILE_DATA_ROOT="$FERTILE_ROOT/data/replay"
+          export PYTHONDONTWRITEBYTECODE=1
+          (cd "$FERTILE_ROOT/current/finance" && bash scripts/backtest-sample.sh)
+          export FERTILE_RESEARCH_ROOT="$FERTILE_ROOT/data/research"
+          PYTHONPATH="$FERTILE_ROOT/current/finance/python" "$FINANCE_BUILD_ROOT/venv/bin/python" tests/research-fixture.py
+          scripts/fertile status --json
+          WEB_DATABASE_TEST_BIN="$FERTILE_ROOT/current/bin/web" WEB_DATABASE_TEST_CONFIG="$FERTILE_ROOT/current/web/config" \
+            "$FERTILE_ROOT/tools/supervisor/bin/python" -B tests/web-database.py
+          python3 tests/test_e2e_smoke.py
+          tests/e2e-smoke.sh local --research-instrument FIXTURE.XNYS --research-kind fixture
+          python3 tests/chaos/services.py postgres
+      - name: Shut down the private test instance
+        if: always()
+        run: |
+          if [[ -S "$FERTILE_ROOT/run/supervisor.sock" ]]; then scripts/fertile down; fi

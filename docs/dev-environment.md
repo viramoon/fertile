@@ -32,3 +32,5 @@ finance 的 rust-toolchain.toml、.python-version、.uv-version、toolchain.env 
 所有仓库只使用 GitHub 托管 runner，不在云盒子自建 runner。bootstrap CI 在干净 ubuntu:24.04 容器内运行：首次真实安装、二次全 SKIP、source 后逐工具核对精确版本与前缀、Postgres 建表写入并跨重启读取。日志与冷 / 热耗时作为 artifact 保存，不能用 mock 代替安装验收。
 
 finance CI 从上游源码构建 wheel，缓存以 source commit + 工具链 / lock / 构建脚本为依据，并运行上游离线最小示例。缓存只能加速，不能跳过来源校验与回测。部署与 CI 相互独立：CI 不访问 IBKR 账户、不登录 Gateway、不执行生产迁移。密钥与配置见 [configuration.md](configuration.md)，Gateway 方案见 [ibkr-gateway.md](ibkr-gateway.md)。
+
+总仓 Actions 先使用内置令牌检出 fertile。管理员在 fertile 的 Settings → Secrets and variables → Actions 新增仓库级 FERTILE_SUBMODULES_TOKEN，选择能够读取 finance、web、frontend 的细粒度凭据，三个仓库仅授予 Contents: Read 并按所属组织规则审批。重跑集成作业。诊断依次检查 secret 配置、仓库可读性和锁定提交可达性；Nautilus 源码来自公开上游。验证远端祖先、从源构建三组件、重导出两份契约及重跑两个客户端生成器后，在专用运行根启动 PostgreSQL、回放行情、finance 与 web，执行真实队列和页面冒烟。备份恢复、Gateway 离线保护、巡检与 supervisor 各自有独立作业；这些作业只需读取总仓。

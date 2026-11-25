@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-source "${FERTILE_BOX_HOME:-/home/box}/fertile/env.sh"
+root=${FERTILE_ROOT:-${FERTILE_BOX_HOME:-/home/box}/fertile}
+if [[ -f "$root/env.sh" ]]; then
+  # shellcheck disable=SC1091
+  source "$root/env.sh"
+fi
+export FERTILE_ROOT="$root"
 data="$FERTILE_ROOT/data/postgres"
 socket="$FERTILE_ROOT/run/postgres"
 port=${FERTILE_POSTGRES_PORT:-5432}
@@ -17,6 +22,32 @@ case "${1:-}" in
     mkdir -p "$socket"
     chmod 700 "$socket"
     initdb -D "$data" --encoding=UTF8 --locale=C.UTF-8 --auth-local=peer --auth-host=scram-sha-256
+    ;;
+  foreground)
+    [[ -f "$data/PG_VERSION" ]] || { echo "先运行 postgres.sh init" >&2; exit 1; }
+    mkdir -p "$socket"; chmod 700 "$socket"
+    extra=()
+    if [[ ${FERTILE_WEB_PEER:-0} == 1 ]]; then
+      # Keep the cluster's real authentication files untouched. PG17 supports include in both.
+      umask 077
+      for setting in hba ident; do
+        original=$(postgres -D "$data" -C "${setting}_file")
+        [[ "$original" == /* ]] || original=$data/$original
+        [[ -f "$original" && "$original" != *$'\n'* && "$original" != *'"'* && "$original" != *\\* ]] || exit 2
+        generated=$(mktemp "$socket/.${setting}-XXXXXXXX")
+        if [[ $setting == hba ]]; then
+          printf '%s\n' 'local web fertile_web peer map=fertile_managed_web' 'local all fertile_web reject' > "$generated"
+        else
+          user=$(id -un)
+          [[ $user =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$ ]] || exit 2
+          printf 'fertile_managed_web "%s" fertile_web\n' "$user" > "$generated"
+        fi
+        printf 'include "%s"\n' "$original" >> "$generated"
+        mv -T -- "$generated" "$socket/${setting}.conf"
+        extra+=(-c "${setting}_file=$socket/${setting}.conf")
+      done
+    fi
+    exec postgres -D "$data" -h "" -k "$socket" -p "$port" "${extra[@]}"
     ;;
   start)
     [[ -f "$data/PG_VERSION" ]] || { echo "先运行 scripts/postgres.sh init" >&2; exit 1; }

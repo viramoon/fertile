@@ -1,31 +1,27 @@
-# IBKR Gateway 部署方案（只设计）
+# IBKR paper Gateway
 
-本 issue **不安装、不启动、不登录 Gateway**。拟选稳定通道 Gateway **10.50.1g**，配套 IBC **3.24.2**；版本依据为 gnzsnz/ib-gateway-docker 的 stable/Dockerfile，部署时锁定安装包与 SHA256，不使用会漂移的 stable / latest 安装 URL。具体值维护在 deploy/toolchain.env。Nautilus v1.231.0 的 nautilus-ibapi 为 10.45.1，API 包版本与 Gateway 产品版本不是同一个编号；真实协议兼容性要在 paper 验证后才能验收。
+云盒子通过原生 IB Gateway 10.50.1g、IBC 3.24.2 和 Xvfb 提供只读 paper API。supervisor 管理 `xvfb` 与 `ib-gateway`。只有 `ib` 行情来源需要这两个进程。Replay 验收可以独立进行。可执行命令及恢复步骤见 [操作手册](../ops/ibgateway.md)。
 
-## 方案比较与选择
+## 安装和持久化
 
-| 方案 | 优点 | 代价与边界 |
-| --- | --- | --- |
-| 原生 Gateway，手工登录 | 官方流程直观，人工处理 2FA | 重启后需人工操作，自动恢复有限 |
-| 原生 Gateway + IBC（拟选） | 安装、JRE、配置与日志可全部放 /home/box，减少对容器守护的依赖 | 要维护 GUI / Xvfb 与 IBC 兼容性，2FA / 周期性重新认证仍需人工 |
-| 上游 DockerizedIBGateway + 固定镜像 | Nautilus 已有生命周期管理，环境易复现 | 需可恢复的 Docker daemon、持久 bind mount 和固定 digest；当前云盒子无 systemd，需先解决守护与恢复 |
+版本和两个 SHA256 固定在 [toolchain.env](../deploy/toolchain.env)。[安装器](../scripts/install-ibgateway.sh) 下载指定版本的 gnzsnz/ib-gateway-docker 安装包归档与 IbcAlpha 的 IBC zip，逐个校验后先在同一文件系统解包，再安装到 `tools/ibgateway/<版本>` 及 `tools/ibc/<版本>`。默认根目录为 `/home/box/fertile`。Gateway 使用安装包自带的 JRE。bootstrap 在 Ubuntu 24.04 x86-64 重装可丢弃的 Xvfb、X11、字体及 AWT 依赖。
 
-选择原生 Gateway + IBC 作为盒子方案，保留 Nautilus Docker 方案作为后续部署评估项。IBC 是 UI 自动化，不保证绕过 IBKR 认证或 2FA；登录态过期时停止开新仓并等待人工认证。
+Jts 设置、IB 自身保存的认证状态位于 `data/ibgateway`，限次重试与进程身份位于 `run/ibgateway`，脱敏事件位于 `logs/ibgateway/events.jsonl`。以上状态由运行用户拥有。用于 IBC 的 0600 配置仅在启动与运行期间存在。应排除整个凭据目录、IB 登录状态及运行时配置的备份和上传。
 
-## 路径与网络
+## 访问边界
 
-安装目录 /home/box/fertile/tools/ibgateway/<版本>；自带 JRE 与程序一起持久化。IBC 位于 tools/ibc/<版本>。Jts 设置、受控登录状态和账户配置位于 data/ibgateway，日志位于 logs/ibgateway；实际路径从配置读取。密钥按 [configuration.md](configuration.md) 由 Ruler 注入，登录态属于敏感数据，不进入源码仓库。
+服务只读取 `/home/box/fertile/secrets/ibkr-paper.env`。IBC 固定 paper、只读、端口 4002、拒绝未经许可的连接；Xvfb 使用本地 Unix socket 和私有 Xauthority cookie。IBC `BindAddress` 控制的是 IBC 自身的命令服务，不能用来声明 API 的监听地址。命令服务已关闭。
 
-paper API 只监听本机 **4002**，不开放实盘 4001，不通过 Tunnel 暴露 Gateway。collector 使用独立 client_id 与只读权限，trader 的写权限单独配置。API 地址从 IB_GATEWAY_ADDRESS 读取。上游 Docker wrapper 默认还会映射宿主 4004；若以后采用容器，必须显式固定端口映射，不能把 4002 与 4004 混为一谈。
+安装器使用系统 C 编译器构建 [Linux 监听限制](../deploy/ibgateway/loopback.c)，仅对 IBC/JVM 子进程设置 `LD_PRELOAD`。Gateway 的 IPv4 4002 绑定固定为 127.0.0.1；实盘 4001 和 IPv6 的 4002 绑定会失败。启动器在提交凭据前通过同一动态加载环境实际执行绑定，加载或验证失败即停止。健康检查还会检查内核 IPv4/IPv6 监听表。发现非回环 4002 或实盘 4001 时，Gateway 停止并要求人工处理。规则不会变更盒子的防火墙或其他服务的环境。
 
-## 重启恢复与验收
+`ib-check.sh` 调用同一部署中的 `finance-ib probe`，验证 server time 和全部账户的 DU 前缀。输出只含时间、前缀和数量。API 和 X11 均不配置公网 Tunnel。行情订阅、行情权限、长时间实时连接及订单权限应分别验证。
 
-1. 运行 bootstrap-box.sh 并 source env.sh，恢复系统编译 / GUI 依赖（具体 Xvfb 包与启动命令由部署 issue 落地）。
-2. 核对持久安装包版本、hash、权限、配置与登录状态；启动选定 GUI 会话和 IBC / Gateway，不重写密钥。
-3. 验证 paper 账户身份、API 4002、行情权限；必要时人工处理 2FA，不无条件循环登录。
-4. finance 连接后恢复订阅、按水位补数，拉取账户 / 订单 / 成交 / 持仓快照完成对账，ready 通过才允许开新仓。
-5. 记录断线、认证、重连与 ready 时间；执行 ADR-001 的断网、重启和 24～72 小时真实协议观察。当前尚未进行这些账户验证。
+## 方案选择
 
-常驻守护、GUI 启停、安装包授权获取与恢复命令属于后续部署 issue；本次仅选型与版本方案，没有实际 Gateway 安装或登录副作用。
+| 方案 | 恢复和部署特点 |
+| --- | --- |
+| 原生 Gateway + IBC | 使用持久 JRE、私有 Xvfb 和同一套 supervisor；可自动恢复已允许的 paper 会话。账户过期或 2FA 由账户持有人处理。 |
+| 仅原生 Gateway | 安装相同，登录与重启后的确认依赖人工。 |
+| 容器 Gateway | 需要容器引擎、固定镜像与另行管理的持久挂载、端口映射。 |
 
-参考：[上游 stable Dockerfile](https://github.com/gnzsnz/ib-gateway-docker/blob/master/stable/Dockerfile)、[IBC](https://github.com/IbcAlpha/IBC)、[Nautilus Gateway 实现](https://github.com/nautechsystems/nautilus_trader/blob/v1.231.0/nautilus_trader/adapters/interactive_brokers/gateway.py)。
+当前部署采用第一种。Nautilus v1.231.0 的 nautilus-ibapi 10.45.1 是客户端协议库；其与 Gateway 的真实账户兼容性通过盒子上的 paper 验收确认。[固定 Gateway 安装包](https://github.com/gnzsnz/ib-gateway-docker/releases/tag/ibgateway-stable%4010.50.1g) · [IBC 3.24.2](https://github.com/IbcAlpha/IBC/releases/tag/3.24.2)

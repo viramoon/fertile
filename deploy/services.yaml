@@ -1,0 +1,46 @@
+# 自上而下启动，自下而上停止。路径解析为本次发布的绝对路径。
+services:
+  - name: postgres
+    enabled: true
+    command: ["${release}/fertile/scripts/postgres.sh", foreground]
+    requires_bins: [postgres, initdb, pg_isready]
+  - name: finance-api
+    enabled: true
+    directory: "${release}/finance"
+    command: ["${release}/bin/finance-api"]
+    live: "http://127.0.0.1:${finance_port}/healthz/live"
+    ready: "http://127.0.0.1:${finance_port}/healthz/ready"
+  - name: finance-collector
+    enabled: true
+    directory: "${release}/finance"
+    command: ["${release}/bin/finance-collector"]
+    requires_bins: ["${release}/runtime/venv/bin/python"]
+    live: "http://127.0.0.1:${collector_port}/healthz/live"
+    ready: "http://127.0.0.1:${collector_port}/healthz/ready"
+  - name: finance-backtest-worker
+    enabled: true
+    directory: "${release}/finance"
+    command: ["${release}/finance/scripts/finance-backtest-worker"]
+    requires_bins: ["${release}/runtime/venv/bin/python", uv]
+  - name: web
+    enabled: true
+    local_database_role: fertile_web
+    directory: "${release}/web"
+    env_file: web-database.env
+    env_file_optional: true
+    command: ["${release}/bin/web"]
+    live: "http://127.0.0.1:${web_port}/healthz/live"
+    ready: "http://127.0.0.1:${web_port}/healthz/ready"
+  - name: xvfb
+    enabled: true
+    command: ["${release}/fertile/scripts/ibgateway.sh", xvfb]
+    requires_bins: [Xvfb, xauth]
+    ib: true
+  - name: ib-gateway
+    enabled: true
+    command: ["${release}/fertile/scripts/ibgateway.sh", run]
+    requires_bins: ["${release}/bin/finance-ib"]
+    ib: true
+  - name: healthwatch
+    enabled: true
+    command: ["${release}/fertile/scripts/healthwatch"]

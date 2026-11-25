@@ -1,82 +1,42 @@
 # fertile
 
-金融看板 + 自动交易系统的总仓库（super repo），负责初始化、集成、监控、运维和发布。以 git submodule 引入 finance、web、frontend；agent 是独立仓库，不是 submodule。
+fertile 将 finance 的行情与回测、web 的 HTTP 网关和前端看板部署在同一云盒子上。浏览器访问 web；web 经 HTTP 调用 finance。finance 将行情写入 Nautilus Parquet catalog，worker 从持久队列执行回测。PostgreSQL 保存 web 的 app 和 blog 数据。当前接入范围为 IBKR paper 只读行情。
 
-本仓库按 [issue #1 方案 v2](https://github.com/viramoon/fertile/issues/1#issuecomment-6834605011) 初始化。当前已有 [云盒子初始化脚本](scripts/bootstrap-box.sh) 与 Postgres 生命周期命令，业务服务仍处骨架阶段；TBD 项都需后续 issue 明确后再实施。开发从 [AGENTS.md](AGENTS.md) 开始。
+## 如何使用
 
-## 系统中的位置
+使用可读取三个私有子仓库的身份，在 Ubuntu 24.04 x86_64 盒子上以 box 用户运行。检出待部署的总仓库提交后，gitlink 会确定各组件版本。开发联调从 ha-runthrough 分支取得提交。
 
-| 仓库 | 在 fertile 系统中的职责 |
-| --- | --- |
-| [fertile](https://github.com/viramoon/fertile) | 金融看板 + 自动交易系统的总仓库；初始化、集成、监控、运维和发布 |
-| [finance](https://github.com/viramoon/finance) | 主项目；基于 NautilusTrader 的策略、数据采集、交易、回测和 HTTP API |
-| [web](https://github.com/viramoon/web) | axum 后端网关；调用 finance HTTP API，管理 PostgreSQL 业务与博客数据，托管前端静态文件 |
-| [frontend](https://github.com/viramoon/frontend) | React + TypeScript + Vite 单页应用；只调用 web |
-| [agent](https://github.com/viramoon/agent) | 独立的开发流程知识库；通用 skill、prompt、工作流、评估和复盘 |
-
-
-系统关系、版本、契约、配置、健康和环境规则见 [docs/README.md](docs/README.md)。服务部署唯一来源是 fertile deploy/，agent 只分发知识；只有 fertile 对外发版，Maas · Ruler 只按 fertile tag 部署 / 回滚。
-## 获取与子模块
-
-```sh
-git clone --recurse-submodules https://github.com/viramoon/fertile.git
-cd fertile
+~~~sh
+git clone --branch ha-runthrough https://github.com/viramoon/fertile.git /home/box/fertile-source
+cd /home/box/fertile-source
 git submodule update --init --recursive
-```
+scripts/bootstrap-box.sh
+source /home/box/fertile/env.sh
+scripts/fertile build
+~~~
 
-.gitmodules 的 branch=main 说明更新来源，部署与复现仍使用 gitlink 锁定的 commit。更新指针只能通过 PR；先推子模块、再推总仓库，目标必须已推送且属于各自 main 历史。
+选择行情源后启动。paper 部署先按 [Gateway 操作说明](docs/ibkr-gateway.md) 安装和配置只读登录。离线体验可在全新测试盒子的持久配置中选择 replay，行情与 paper 使用独立数据目录。
 
-```text
-fertile ── submodule ── finance（Nautilus / Parquet / HTTP API）
-        ├─ submodule ── web（axum / PostgreSQL / 前端静态托管）
-        └─ submodule ── frontend（Vite SPA，只调用 web）
-agent（独立）── skill / prompt / 工作流分发
-```
+~~~sh
+mkdir -p "$FERTILE_ROOT/config"
+# 仅在新测试实例上创建；已有配置请编辑并保留原设置。
+( set -C; printf '%s\n' FERTILE_MARKET_SOURCE=replay > "$FERTILE_ROOT/config/runtime.env" )
+scripts/fertile ensure-up
+scripts/fertile status --json
+curl -fsS http://127.0.0.1:8090/api/v1/system/status
+~~~
 
-## 目录说明
+本机入口为 http://127.0.0.1:8090。仪表盘展示服务和行情状态，回测页可以提交历史日线作业并查看审计，交易与博客保留入口。数据导入、提交和部署的命令见 [Ruler 手册](ops/ruler-runbook.md)。Ruler 通过既有 Cloudflare Tunnel 配置公网入口 https://fertile.viramoon.com。
 
-```text
-fertile/
-├── README.md / AGENTS.md / VERSION / RELEASES.md
-├── .gitmodules             finance / web / frontend，跟踪 main
-├── finance/ web/ frontend/ gitlink 锁定精确 commit
-├── .agents/skills/          本仓库专属 skill 约定
-├── contracts/              代码导出快照规则，当前无假快照
-├── deploy/                 唯一服务部署清单与 bootstrap 设计
-├── ops/                    健康、监控与 Maas · Ruler 手册
-├── scripts/                发版、子模块、契约脚本的设计，无实现
-├── docs/                   架构、拓扑、唯一发版规则与 ADR-001
-└── .github/                模板与文档检查
-```
+## 运维和开发
 
-目录中的 README 说明职责和边界。VERSION 与 .gitmodules、gitlink 是 v2 明确要求的版本和组织元数据，其他新增内容为 Markdown / YAML 文档与文档 CI。
+| 工作 | 入口 |
+| --- | --- |
+| 构建、部署、回滚、重启与应急 | [部署清单](deploy/service.yaml) · [Ruler 手册](ops/ruler-runbook.md) |
+| 本机与公网健康、备份、恢复和告警 | [运维索引](ops/README.md) |
+| OpenAPI 与生成客户端 | [契约快照与验证](contracts/README.md) |
+| 工具链、配置与密钥 | [开发环境](docs/dev-environment.md) · [配置](docs/configuration.md) |
+| 版本、子模块指针与脚本 | [发版规则](docs/release.md) · [脚本](scripts/README.md) |
+| 架构、部署边界与协作 | [架构](docs/architecture.md) · [ADR-001](docs/adr/ADR-001-cloud-box-network-constraints.md) · [AGENTS.md](AGENTS.md) |
 
-## 文档索引
-
-- [AGENTS.md](AGENTS.md)：开发流程与硬规则
-- [docs/README.md](docs/README.md)：知识放置、系统约定与文档索引
-- [系统架构](docs/architecture.md)
-- [部署与迁移边界](docs/deploy-topology.md)
-- [唯一发版规则](docs/release.md)
-- [环境与网络约束](docs/adr/ADR-001-cloud-box-network-constraints.md)
-- [唯一服务部署来源](deploy/README.md)
-- [聚合服务设计](deploy/service.yaml)
-- [重启重建](deploy/bootstrap.md)
-- [运维索引](ops/README.md)
-- [代码导出快照](contracts/README.md)
-- [未来脚本设计](scripts/README.md)
-- [自动发布记录说明](RELEASES.md)
-- [初始版本](VERSION)
-
-## 协作与检查
-
-一个任务对应一个 issue，使用 issue-<号>-<简述> 分支和 PR，CI 通过后合并，禁止直接推送 main。PR 需含 Closes #<号>、测试结果和逐条验收自检；开发问题在原分支解决，文档随行为在同一 PR 更新。文档 CI 检查必需文件、非空内容、YAML、相对链接及 PR 描述，不编译业务代码；这不代表已经完成运行或真实交易验证。
-
-## 环境与重启上手
-
-- [开发环境与工具链](docs/dev-environment.md)
-- [密钥与配置分层](docs/configuration.md)
-- [IBKR Gateway 部署方案（未安装、未登录）](docs/ibkr-gateway.md)
-- [初始化集成测试](tests/bootstrap-box.sh)
-
-当前工具链与 Postgres 引导已实现，系统发布 / 子模块检查 / 契约比对脚本仍由后续 issue 实现；VERSION 保持 0.0.0。
+三个服务仓库的精确版本由总仓库 gitlink 锁定。agent 独立分发知识；服务部署定义统一维护在 deploy/。本次联调使用 0.0.0，正式发版另行决定。
