@@ -1,4 +1,5 @@
 """Check the release/secret boundary without touching any persistent box files."""
+import configparser
 from contextlib import redirect_stdout
 from email.message import Message
 import importlib.util
@@ -6,6 +7,8 @@ from io import BytesIO, StringIO
 import json
 import os
 from pathlib import Path
+import shlex
+import subprocess
 from tempfile import TemporaryDirectory
 import sys
 import sqlite3
@@ -143,6 +146,18 @@ class RuntimePlan(unittest.TestCase):
         config.write_text("FERTILE_MARKET_SOURCE=live\n")
         with self.assertRaisesRegex(ValueError, "unsupported"):
             ctl.build_plan()
+
+    def test_rendered_launcher_runs_without_version_in_runtime_directory(self):
+        self.write(command=["/bin/echo", "launcher reached fixture"])
+        ctl.render(ctl.build_plan())
+        config = configparser.RawConfigParser()
+        config.read(self.run / "programs.conf")
+        command = shlex.split(config["program:test"]["command"])
+        self.assertFalse((self.run / "VERSION").exists())
+        result = subprocess.run(command, cwd=self.root, capture_output=True, text=True, timeout=5,
+                                env={**os.environ, "FERTILE_ROOT": str(self.root), "PYTHONDONTWRITEBYTECODE": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "launcher reached fixture\n")
 
     def test_data_root_command_matches_service_plan_and_honors_overrides(self):
         self.write()

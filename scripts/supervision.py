@@ -30,7 +30,6 @@ import yaml
 
 
 SCRIPTS = Path(__file__).resolve().parent
-USER_AGENT = "fertile-supervision/" + (SCRIPTS.parent / "VERSION").read_text(encoding="utf-8").strip()
 ROOT = Path(os.environ.get("FERTILE_ROOT", "/home/box/fertile")).resolve()
 RUN = ROOT / "run"
 LOGS = ROOT / "logs"
@@ -513,12 +512,12 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def http_status(url):
+def http_status(url, user_agent):
     if not url:
         return None
     try:
         # Probe exactly the configured endpoint and bypass ambient HTTP proxies.
-        request = Request(url, headers={"User-Agent": USER_AGENT})
+        request = Request(url, headers={"User-Agent": user_agent})
         with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=2) as response:
             return response.status
     except HTTPError as error:
@@ -529,6 +528,8 @@ def http_status(url):
 
 
 def report():
+    # Read the version in the controller. Rendered _exec launchers have no VERSION file.
+    user_agent = "fertile-supervision/" + (SCRIPTS.parent / "VERSION").read_text(encoding="utf-8").strip()
     if SNAPSHOT.exists():
         plan = json.loads(SNAPSHOT.read_text())
     elif not (ROOT / "current").exists() and not os.environ.get("FERTILE_SERVICE_MANIFEST"):
@@ -561,7 +562,7 @@ def report():
                     pass  # Process startup may precede the first published state.
             if not svc["skip"]:
                 for check in ("live", "ready"):
-                    pending[name,check] = pool.submit(http_status, svc[check+"_url"])
+                    pending[name,check] = pool.submit(http_status, svc[check+"_url"], user_agent)
         for (name, check), result in pending.items():
             services[name][check] = result.result()
     return dict(supervisor="RUNNING" if pid else "STOPPED", supervisor_pid=pid, services=services)
