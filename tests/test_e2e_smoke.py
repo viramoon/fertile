@@ -15,6 +15,7 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 import e2e_smoke as check
 
@@ -177,6 +178,24 @@ class SmokeTests(unittest.TestCase):
             self.http.read("https://other.invalid/a.js", asset=True)
 
 
+class HTTPOriginTests(unittest.TestCase):
+    def test_cross_origin_requests_are_rejected_before_opening(self):
+        with patch.object(check, "build_opener") as opener:
+            http = check.HTTP(check.PUBLIC_ORIGIN, local=False)
+            for url in (
+                "http://fertile.viramoon.com:443/a.js",
+                "https://fertile.viramoon.com:444/a.js",
+                "https://fertile.viramoon.com:0/a.js",
+                "https://other.invalid:443/a.js",
+                "https://user@fertile.viramoon.com:443/a.js",
+                "https://fertile.viramoon.com:invalid/a.js",
+            ):
+                with self.subTest(url=url):
+                    with self.assertRaisesRegex(check.SmokeError, "refusing a cross-origin request"):
+                        http.read(url, asset=True)
+            opener.return_value.open.assert_not_called()
+
+
 class PaperSmokeTests(unittest.TestCase):
     def setUp(self):
         self.services = {name: {"state": "RUNNING", "pid": 123} for name in
@@ -230,7 +249,7 @@ class PaperSmokeTests(unittest.TestCase):
         with self.assertRaisesRegex(check.SmokeError, "finance-collector=.*ready=500"):
             self.await_local(paper_only=True)
 
-    def exercise_cli(self, *args, detail_state="recovering"):
+    def exercise_cli(self, *args, detail_state="recovering", asset_responses=None):
         summary = {**check.JOB, "generated_at": check.JOB["end"], "run_id": "fixture", "total_orders": 0,
                    "total_positions": 0, "pnl": "0.00", "currency": "USD"}
         responses = {
@@ -250,6 +269,7 @@ class PaperSmokeTests(unittest.TestCase):
         }
         assets = {"/": ("text/html", b'<script type="module" src="/a.js"></script><link rel="stylesheet" href="/a.css">'),
                   "/a.js": ("text/javascript", b"export default 1"), "/a.css": ("text/css", b"body{}")}
+        assets.update(asset_responses or {})
         requests = []
         version = (Path(__file__).resolve().parents[1] / "VERSION").read_text().strip()
 
@@ -258,8 +278,10 @@ class PaperSmokeTests(unittest.TestCase):
             requests.append((request.host, request.selector, request.get_method()))
             if request.selector in assets:
                 media, body = assets[request.selector]
-            else:
+            elif request.selector in responses:
                 media, body = "application/json", json.dumps(responses[request.selector]).encode()
+            else:
+                raise HTTPError(request.full_url, 404, "Not Found", Message(), None)
             response = io.BytesIO(body)
             response.status = 202 if request.get_method() == "POST" else 200
             response.headers = Message()
@@ -283,6 +305,75 @@ class PaperSmokeTests(unittest.TestCase):
                 self.assertIn((host, "/api/v1/backtests", "POST"), requests)
                 self.assertIn((host, "/a.js", "GET"), requests)
                 self.assertIn((host, "/a.css", "GET"), requests)
+
+    def test_public_paper_smoke_skips_injected_cross_origin_assets(self):
+        html = (b'<script type="module" src="a.js"></script>'
+                b'<link rel="stylesheet" href="https://fertile.viramoon.com/a.css">'
+                b'<script type="module" src="https://static.cloudflareinsights.com/beacon.min.js"></script>'
+                b'<link rel="stylesheet" href="//cdn.invalid/a.css">')
+        requests = self.exercise_cli("public", check.PUBLIC_ORIGIN, "--paper-only",
+                                     asset_responses={"/": ("text/html", html)})
+        host = "fertile.viramoon.com"
+        self.assertEqual({request_host for request_host, _, _ in requests}, {host})
+        self.assertIn((host, "/a.js", "GET"), requests)
+        self.assertIn((host, "/a.css", "GET"), requests)
+        self.assertIn((host, "/api/v1/backtests", "POST"), requests)
+        check.log.assert_any_call("skipped cross-origin asset", kind="js", host="static.cloudflareinsights.com")
+        check.log.assert_any_call("skipped cross-origin asset", kind="css", host="cdn.invalid")
+
+    def test_public_paper_smoke_logs_cross_origin_scripts_of_any_type(self):
+        html = (b'<script type="module" src="/a.js"></script><link rel="stylesheet" href="/a.css">'
+                b'<script src="https://analytics.invalid/beacon.js"></script>'
+                b'<script type="text/javascript" src="//cdn.invalid/library.js"></script>')
+        requests = self.exercise_cli("public", check.PUBLIC_ORIGIN, "--paper-only",
+                                     asset_responses={"/": ("text/html", html)})
+        self.assertEqual({host for host, _, _ in requests}, {"fertile.viramoon.com"})
+        check.log.assert_any_call("skipped cross-origin asset", kind="js", host="analytics.invalid")
+        check.log.assert_any_call("skipped cross-origin asset", kind="js", host="cdn.invalid")
+
+    def test_public_paper_smoke_fetches_assets_with_explicit_https_default_port(self):
+        html = (b'<script type="module" src="https://fertile.viramoon.com:443/a.js"></script>'
+                b'<link rel="stylesheet" href="//FERTILE.VIRAMOON.COM:0443/a.css">')
+        requests = self.exercise_cli("public", check.PUBLIC_ORIGIN, "--paper-only",
+                                     asset_responses={"/": ("text/html", html)})
+        self.assertIn(("fertile.viramoon.com:443", "/a.js", "GET"), requests)
+        self.assertIn(("FERTILE.VIRAMOON.COM:0443", "/a.css", "GET"), requests)
+
+    def test_local_paper_smoke_fetches_assets_with_implicit_http_default_port(self):
+        host = "[::1]"
+        self.services["web"]["ready_url"] = f"http://{host}:80/healthz/ready"
+        html = (b'<script type="module" src="http://[::1]/a.js"></script>'
+                b'<link rel="stylesheet" href="/a.css">')
+        requests = self.exercise_cli("local", "--paper-only", asset_responses={"/": ("text/html", html)})
+        self.assertIn((host, "/a.js", "GET"), requests)
+        self.assertIn((f"{host}:80", "/a.css", "GET"), requests)
+
+    def test_public_paper_smoke_requires_same_origin_js_and_css(self):
+        for html in (
+            b'<script type="module" src="https://cdn.invalid/a.js"></script><link rel="stylesheet" href="/a.css">',
+            b'<script type="module" src="/a.js"></script><link rel="stylesheet" href="https://cdn.invalid/a.css">',
+            b'<script src="/a.js"></script><link rel="stylesheet" href="/a.css">',
+        ):
+            with self.subTest(html=html):
+                with self.assertRaisesRegex(check.SmokeError, "expected built Vite JavaScript and CSS from the same origin"):
+                    self.exercise_cli("public", check.PUBLIC_ORIGIN, "--paper-only",
+                                      asset_responses={"/": ("text/html", html)})
+
+    def test_public_paper_smoke_rejects_invalid_same_origin_assets(self):
+        for kind, asset, response in (
+            ("js", "/a.js", ("text/javascript", b"<html>fallback</html>")),
+            ("js", "/a.js", ("text/html", b"fallback")),
+            ("css", "/a.css", ("text/css", b"  ")),
+        ):
+            with self.subTest(asset=asset, response=response):
+                with self.assertRaisesRegex(check.SmokeError, f"invalid {kind} asset"):
+                    self.exercise_cli("public", check.PUBLIC_ORIGIN, "--paper-only", asset_responses={asset: response})
+
+    def test_public_paper_smoke_rejects_missing_same_origin_asset(self):
+        html = b'<script type="module" src="/missing.js"></script><link rel="stylesheet" href="/a.css">'
+        with self.assertRaisesRegex(check.SmokeError, r"GET /missing\.js returned HTTP 404"):
+            self.exercise_cli("public", check.PUBLIC_ORIGIN, "--paper-only",
+                              asset_responses={"/": ("text/html", html)})
 
     def test_strict_http_rejects_recovery_and_paper_rejects_disagreement(self):
         with self.assertRaisesRegex(check.SmokeError, "unhealthy system market summary"):
