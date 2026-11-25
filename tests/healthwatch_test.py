@@ -10,10 +10,42 @@ import unittest
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import healthwatch as watch
+
+
+class UserAgentTests(unittest.TestCase):
+    version = (Path(__file__).resolve().parents[1] / "VERSION").read_text().strip()
+
+    def test_public_probe_sends_versioned_user_agent(self):
+        response = BytesIO(b'{"status":"ready","checks":[{"ok":true,"required":true}]}')
+        response.status = 200
+        with patch.object(watch, "build_opener") as build_opener:
+            opener = build_opener.return_value
+            opener.open.return_value = response
+            self.assertEqual(watch.public_ready("https://fertile.viramoon.com", 1)["state"], "ok")
+            request = opener.open.call_args.args[0]
+            self.assertEqual(request.full_url, "https://fertile.viramoon.com/healthz/ready")
+            self.assertEqual(request.get_header("User-agent"), f"fertile-healthwatch/{self.version}")
+
+    def test_webhook_sends_versioned_user_agent(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "run").mkdir()
+            alerts = root / "alerts.jsonl"
+            alerts.touch()
+            delivery = watch.Delivery(root, alerts)
+            alerts.write_text('{"id":"event-id","check":"public:ready"}\n')
+            with patch.object(watch, "webhook_url", return_value="https://example.invalid/alerts"), \
+                 patch.object(watch, "build_opener") as build_opener:
+                delivery.drain(root, 1)
+                self.assertEqual(delivery.result["state"], "ok")
+                request = build_opener.return_value.open.call_args.args[0]
+                self.assertEqual(request.get_method(), "POST")
+                self.assertEqual(request.get_header("User-agent"), f"fertile-healthwatch/{self.version}")
 
 
 class ReusableServer(ThreadingHTTPServer):

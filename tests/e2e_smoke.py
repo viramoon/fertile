@@ -18,7 +18,9 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 from uuid import uuid4
 
 
-CLI = Path(__file__).resolve().parents[1] / "scripts/fertile"
+ROOT = Path(__file__).resolve().parents[1]
+CLI = ROOT / "scripts/fertile"
+USER_AGENT = "fertile-e2e-smoke/" + (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 PUBLIC_ORIGIN = "https://fertile.viramoon.com"
 CORE = {"postgres", "finance-api", "finance-collector", "finance-backtest-worker", "web", "healthwatch"}
 PAPER_SERVICES = {"xvfb", "ib-gateway"}
@@ -76,6 +78,7 @@ class HTTP:
         require(f"{parsed.scheme}://{parsed.netloc}" == self.origin, "refusing a cross-origin request")
         verb = "POST" if data is not None else "GET"
         req = Request(url, method=verb, headers=headers or {}, data=data)
+        req.add_header("User-Agent", USER_AGENT)
         started = time.monotonic()
         try:
             response = self.opener.open(req, timeout=10)
@@ -128,13 +131,14 @@ def require_fixture_environment(root, box):
     require_fixture_listener(int(os.environ.get("FERTILE_SMOKE_FIXTURE_PID", "0")))
 
 
-def await_stack(protocol_fixture=False):
+def await_stack(protocol_fixture=False, *, paper_only=False):
+    required = CORE - {"healthwatch"} if paper_only else CORE
     deadline = time.monotonic() + 60
     while True:
         result = subprocess.check_output([CLI, "status", "--json"], timeout=10)
         snapshot = json.loads(result)
         services = snapshot["services"]
-        require(CORE <= services.keys(), "local supervisor manifest is missing a required service")
+        require(required <= services.keys(), "local supervisor manifest is missing a required service")
         if protocol_fixture:
             require(PAPER_SERVICES <= services.keys() and all(
                 services[name]["state"] == "disabled" and services[name]["pid"] == 0 for name in PAPER_SERVICES),
@@ -143,11 +147,16 @@ def await_stack(protocol_fixture=False):
                     "protocol fixture must not manage external services")
         skipped, unhealthy = {}, []
         for name, svc in services.items():
+            if paper_only and (name == "healthwatch" or name in PAPER_SERVICES):
+                skipped[name] = svc["state"]
+                continue
             if name in PAPER_SERVICES and svc["state"] in {"disabled", "missing_binary", "needs_credentials"}:
                 skipped[name] = svc["state"]
                 continue
             running = svc["state"] == "RUNNING" and svc["pid"] > 1
-            endpoints_ok = all(svc.get(key + "_url") is None or svc[key] == 200 for key in ("live", "ready"))
+            ready_codes = (200, 503) if paper_only and name == "finance-collector" else (200,)
+            endpoints_ok = ((svc.get("live_url") is None or svc["live"] == 200)
+                            and (svc.get("ready_url") is None or svc["ready"] in ready_codes))
             gateway_ok = name != "ib-gateway" or svc.get("application_state") == "ready"
             if not (running and endpoints_ok and gateway_ok):
                 unhealthy.append(f"{name}={svc['state']} (live={svc.get('live')}, ready={svc.get('ready')})")
@@ -227,7 +236,7 @@ def check_market(market):
     log("market", source=market["source"], updated_at=market["updated_at"], instruments=market["instruments"])
 
 
-def smoke(http, secret, skipped, protocol_fixture=False):
+def smoke(http, secret, skipped, protocol_fixture=False, *, paper_only=False):
     require(http.read("/healthz/live").get("status") == "ok", "web is not live")
     ready = http.read("/healthz/ready")
     require(ready.get("status") == "ready" and ready.get("checks")
@@ -236,20 +245,35 @@ def smoke(http, secret, skipped, protocol_fixture=False):
     require(state["database"]["ok"] is True and state["finance"]["ok"] is True and state["finance"]["circuit"] == "closed",
             "database/finance/circuit unhealthy in web system status")
     require(state["web"].get("version") and state["web"].get("commit") not in (None,"","unknown"), "missing web build identity")
-    require(state["market"]["fresh"] is True and state["market"]["state"] == "ready"
-            and state["market"]["instrument_count"] > 0 and state["market"]["stale_count"] == 0, "unhealthy system market summary")
-    log("system", web=state["web"], database=state["database"], finance=state["finance"], market=state["market"])
+    system_market = state["market"]
+    recovering = paper_only and system_market["state"] == "recovering"
+    if recovering:
+        require(system_market["fresh"] is False and system_market["source"] in {"ib", "ib-realtime", "ib-delayed"},
+                "unhealthy recovering system market summary")
+    else:
+        require(system_market["fresh"] is True and system_market["state"] == "ready"
+                and system_market["instrument_count"] > 0 and system_market["stale_count"] == 0,
+                "unhealthy system market summary")
+    log("system", web=state["web"], database=state["database"], finance=state["finance"], market=system_market)
     log("sample", **summary(http.read("/api/v1/backtests/sample")))
     market = http.read("/api/v1/market/status")
-    check_market(market)
-    require(state["market"]["source"] == market["source"]
-            and state["market"]["instrument_count"] == len(market["instruments"]),
+    if recovering:
+        instruments = market.get("instruments")
+        require(market.get("state") == "recovering" and isinstance(instruments, list)
+                and all(isinstance(row, dict) and type(row.get("stale")) is bool for row in instruments)
+                and system_market["stale_count"] == sum(row["stale"] for row in instruments),
+                "inconsistent recovering market status")
+        log("paper market recovering", source=market["source"], stale_count=system_market["stale_count"])
+    else:
+        check_market(market)
+    require(system_market["source"] == market["source"]
+            and system_market["instrument_count"] == len(market["instruments"]),
             "market summaries disagree across status routes")
     if protocol_fixture:
         require(market["source"] in {"ib-realtime", "ib-delayed"}, "protocol fixture requires the IB collector")
         log("synthetic loopback IB protocol fixture", external_services=skipped,
             unverified=["IB Gateway login", "broker market data", "Cloudflare Tunnel", "public HTTPS"])
-    elif skipped:
+    elif skipped and not paper_only:
         require(market["source"] == "replay", "required external services are unavailable for paper acceptance")
         log("replay external services skipped", services=skipped)
     check_assets(http)
@@ -331,10 +355,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_subparsers(dest="mode", required=True)
     local = modes.add_parser("local")
-    local.add_argument("--protocol-fixture", action="store_true",
-                       help="isolated loopback IB wire test only; requires FERTILE_SMOKE_FIXTURE_PID")
+    local_profile = local.add_mutually_exclusive_group()
+    local_profile.add_argument("--protocol-fixture", action="store_true",
+                               help="isolated loopback IB wire test only; requires FERTILE_SMOKE_FIXTURE_PID")
     public = modes.add_parser("public")
     public.add_argument("origin", type=public_origin, help="explicitly confirmed HTTPS origin")
+    for profile in (local_profile, public):
+        profile.add_argument("--paper-only", action="store_true",
+                             help="allow an IB market in recovery; locally skip Gateway, xvfb and healthwatch readiness")
     for mode in (local, public):
         mode.add_argument("--timeout-seconds", type=int, default=240, metavar="N", help="total wall-clock deadline (1..1800)")
         mode.add_argument("--research-instrument", help="also submit a historical job for this exact imported instrument")
@@ -353,11 +381,11 @@ def main():
         fixture = args.mode == "local" and args.protocol_fixture
         if fixture:
             require_fixture_environment(root, box)
-        origin, skipped = await_stack(fixture) if args.mode == "local" else (args.origin, {})
+        origin, skipped = await_stack(fixture, paper_only=args.paper_only) if args.mode == "local" else (args.origin, {})
         secret = Path(os.environ.get("WEB_ADMIN_TOKEN_FILE", root / "secrets/web.env"))
-        log("smoke", mode=args.mode, origin=origin, timeout_seconds=args.timeout_seconds)
+        log("smoke", mode=args.mode, origin=origin, paper_only=args.paper_only, timeout_seconds=args.timeout_seconds)
         http = HTTP(origin, args.mode == "local")
-        smoke(http, secret, skipped, fixture)
+        smoke(http, secret, skipped, fixture, paper_only=args.paper_only)
         if args.research_instrument:
             research_smoke(http, secret, args.research_instrument, args.research_kind)
     finally:

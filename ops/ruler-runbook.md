@@ -112,6 +112,13 @@ tests/e2e-smoke.sh local
 tests/e2e-smoke.sh public https://fertile.viramoon.com
 ~~~
 
+只验收未接入 IB 行情的 paper 部署时，为本机或公网冒烟显式添加 `--paper-only`。本机跳过 healthwatch、xvfb 和 ib-gateway 的就绪要求，仍要求其余核心进程运行、collector live 为 200，并额外接受 collector ready 为 503。两个入口都接受 `system/status` 与 `market/status` 一致的 IB `recovering` 状态，此时暂免行情新鲜度检查。Web 就绪、数据库、finance API、前端资源和回测提交仍需通过。公网与本机请求都发送 `fertile-e2e-smoke/<VERSION>` User-Agent。
+
+~~~sh
+tests/e2e-smoke.sh local --paper-only
+tests/e2e-smoke.sh public https://fertile.viramoon.com --paper-only
+~~~
+
 在维护窗口逐项执行，确保每个场景结束后恢复业务再进入下一项。进程测试只向已核对父进程和 PID 身份的本实例服务发信号。停库场景同时检查 web 和 finance PID。
 
 ~~~sh
