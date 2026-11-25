@@ -67,13 +67,29 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
+def origin_key(parsed):
+    port = parsed.port
+    # Keep userinfo and brackets in the authority so only the configured host can match.
+    host = parsed.netloc
+    if port is None:
+        host = host.removesuffix(":")
+        port = {"http": 80, "https": 443}.get(parsed.scheme)
+    else:
+        host = host.rsplit(":", 1)[0]
+    return parsed.scheme, host.lower(), port
+
+
 class HTTP:
     def __init__(self, origin, local):
         self.origin = origin
+        self._origin_key = origin_key(urlsplit(origin))
         self.opener = build_opener(NoRedirect(), *([ProxyHandler({})] if local else []))
 
     def is_same_origin(self, parsed):
-        return f"{parsed.scheme}://{parsed.netloc}" == self.origin
+        try:
+            return origin_key(parsed) == self._origin_key
+        except ValueError:  # Invalid port.
+            return False
 
     def read(self, path, *, data=None, headers=None, expected=200, json_body=True, asset=False):
         url = urljoin(self.origin + "/", path)
@@ -186,10 +202,10 @@ class Assets(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         fields = dict(attrs)
-        if tag == "script" and fields.get("type") == "module" and fields.get("src"):
-            self.entries.append(("js", fields["src"]))
+        if tag == "script" and fields.get("src"):
+            self.entries.append(("js", fields["src"], fields.get("type") == "module"))
         if tag == "link" and "stylesheet" in (fields.get("rel") or "").lower().split() and fields.get("href"):
-            self.entries.append(("css", fields["href"]))
+            self.entries.append(("css", fields["href"], True))
 
 
 def check_assets(http):
@@ -198,13 +214,13 @@ def check_assets(http):
     page = Assets()
     page.feed(body.decode("utf-8"))
     same_origin = []
-    for kind, href in sorted(set(page.entries)):
+    for kind, href, check_content in sorted(set(page.entries)):
         url = urljoin(http.origin + "/", href)
         parsed = urlsplit(url)
-        if http.is_same_origin(parsed):
-            same_origin.append((kind, url))
-        else:
+        if not http.is_same_origin(parsed):
             log("skipped cross-origin asset", kind=kind, host=parsed.hostname)
+        elif check_content:
+            same_origin.append((kind, url))
     require({kind for kind, _ in same_origin} == {"js", "css"},
             "expected built Vite JavaScript and CSS from the same origin")
     for kind, url in same_origin:
