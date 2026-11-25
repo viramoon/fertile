@@ -78,7 +78,78 @@ scripts/fertile ensure-up
 scripts/fertile rollback <previous-fertile-commit>
 ```
 
-rollback 的参数为已经构建并验证的 fertile 提交。先核对迁移、队列和 catalog 格式，必要时先备份，再切换到匹配的服务与静态资源。旧版不能读取含历史作业的队列，即使作业已经结束。控制器会拒绝该组合。跨此边界回滚由 Ruler 先暂停接单、完成并备份当前队列，再选择旧版能读的独立持久数据根或受控恢复到升级前快照。记录当前和旧数据根，恢复制品时把它们与对应提交一起切换。使用本批控制器执行回滚以保留 8090 和外部隧道边界。若私有 supervisor 已管理正在运行的共享服务，操作会停在所有权检查，交由 Ruler 处理。部署记录包括当前/上次提交、三个 gitlink、迁移状态、操作开始和恢复时间。
+普通 `rollback` 适用于两版共享兼容的数据和配置。传入已构建的 fertile 提交，控制器验证制品后切换服务与静态资源。旧版无法读取新版队列或摘要时，按下方步骤切换独立数据。若私有 supervisor 仍管理正在运行的共享服务，先由 Ruler 处理所有权。部署记录包括两版提交、三个 gitlink、数据根、库名、快照路径、迁移状态和操作时间。
+
+### 从升级前快照回滚并切回新版
+
+使用包含本节脚本的源码检出执行整套步骤。示例针对本机受管 PostgreSQL、`data-paper` 和已经构建的 `7f88ba4`，工作路径以现场记录为准。若 web 使用 `secrets/web-database.env` 中的外部 `DATABASE_URL`，应由数据库管理员先安排独立的连接配置和切换步骤。本节的 `FERTILE_WEB_DATABASE` 适用于本机连接。
+
+1. 暂停接单，等运行中的作业结束，记录新版和升级前快照。载入工具环境，确认当前数据根、库名和 PostgreSQL 端口。先把旧快照保存在自动轮转目录外，避免保全新版时触发清理。以下各段在同一个 Bash 会话逐段执行，每条命令成功后再继续。
+
+   ```bash
+   source /home/box/fertile/env.sh
+   new_sha=$(basename -- "$(readlink -f -- "$FERTILE_ROOT/current")")
+   new_data=$(scripts/fertile data-root)
+   new_db=web  # 现场若配置了 FERTILE_WEB_DATABASE，填对应库名
+   export FERTILE_POSTGRES_PORT=5432  # 现场若配置了其他端口，填对应端口
+   old_sha=7f88ba4
+   old_data="$FERTILE_ROOT/data-paper-rollback-$old_sha"
+   old_db="web_rollback_$old_sha"
+   archive=$(mktemp -d "$FERTILE_ROOT/rollback-archives.XXXXXXXX")
+   cp -a -- "$FERTILE_ROOT/backups/20261125T180713.484833Z" "$archive/before-upgrade"
+   pre_upgrade="$archive/before-upgrade"
+   scripts/fertile status --json
+   ```
+
+2. 用 supervisor 停业务。`down` 会一并停 PostgreSQL，随后单独启动 PostgreSQL，整个备份和恢复期间保持它可用。备份新版数据和队列，并把快照保存到轮转目录外。确认 `snapshot.json` 记录的库名和来源符合切换计划，升级前快照应有 `postgres.dump`。
+
+   ```bash
+   scripts/fertile down
+   scripts/postgres.sh start
+   new_snapshot=$(FERTILE_DATA_ROOT="$new_data" PGDATABASE="$new_db" scripts/backup.sh)
+   cp -a -- "$new_snapshot" "$archive/new-version"
+   ```
+
+3. 验证升级前快照再恢复到新目录和新库。首次恢复使用空目录或尚未创建的目录，以及空库或不存在的库。
+
+   ```bash
+   scripts/restore.sh "$pre_upgrade" --dry-run --target-data-root "$old_data" --target-database "$old_db"
+   (cd "$pre_upgrade" && sha256sum --check SHA256SUMS)
+   scripts/restore.sh "$pre_upgrade" --target-data-root "$old_data" --target-database "$old_db"
+   scripts/postgres.sh stop
+   ```
+
+4. 用同一份新版控制器验证并切换 `current`，再由 supervisor 启动旧版。这里通过命令环境覆盖 `$FERTILE_ROOT/config/runtime.env` 中的三条运行指针。保留该文件、新版数据根和库名，也保留 `env.sh` 的工具链配置。快照的 `config/runtime.env` 可供核对，勿复制到持久配置目录。回滚期间手工执行 `ensure-up` 或主机重启后重新拉起 supervisor 时，沿用下列 `old_env`。
+
+   ```bash
+   old_env=(env "FERTILE_DATA_ROOT=$old_data" "FERTILE_RESEARCH_ROOT=$old_data/research" "FERTILE_WEB_DATABASE=$old_db")
+   "${old_env[@]}" scripts/fertile rollback --switch-only "$old_sha"
+   "${old_env[@]}" scripts/fertile ensure-up
+   ```
+
+5. 核对 `current`、数据根、旧库连接和服务状态。确认 web、finance API 就绪，查询一条升级前已有的作业，再运行 `--paper-only` 冒烟。冒烟会在当前队列提交作业，需在核对指针后执行。公网入口验收按维护窗口要求执行，通过后再恢复接单。
+
+   ```bash
+   readlink -f -- "$FERTILE_ROOT/current"
+   "${old_env[@]}" scripts/fertile data-root
+   scripts/fertile status --json
+   curl -fsS http://127.0.0.1:8090/api/v1/system/status
+   psql -X -h "$FERTILE_ROOT/run/postgres" -p "$FERTILE_POSTGRES_PORT" -d "$old_db" \
+     -c "SELECT datname, count(*) FROM pg_stat_activity WHERE datname=current_database() AND usename='fertile_web' GROUP BY datname"
+   "${old_env[@]}" tests/e2e-smoke.sh local --paper-only
+   "${old_env[@]}" tests/e2e-smoke.sh public https://fertile.viramoon.com --paper-only
+   ```
+
+6. 切回新版时，暂停接单并让旧版作业结束。需要保留窗口内的新写入时，依照第 2 步停业务并单独启动 PG，执行 `"${old_env[@]}" PGDATABASE="$old_db" scripts/backup.sh`，记录快照路径后执行 `scripts/postgres.sh stop`。通过原先记录的新版指针启动新版，研究目录继续使用原配置。确认新版作业可查，再重复运行状态检查和 paper-only 冒烟。
+
+   ```bash
+   scripts/fertile down
+   new_env=(env "FERTILE_DATA_ROOT=$new_data" "FERTILE_WEB_DATABASE=$new_db")
+   "${new_env[@]}" scripts/fertile rollback --switch-only "$new_sha"
+   "${new_env[@]}" scripts/fertile ensure-up
+   scripts/fertile status --json
+   "${new_env[@]}" tests/e2e-smoke.sh local --paper-only
+   ```
 
 ## 重启与外部入口
 
@@ -119,7 +190,7 @@ tests/simulate-reboot.sh
 
 ## 备份、恢复与账户运维
 
-执行 scripts/backup.sh 后记录其输出路径，先用 scripts/restore.sh --dry-run 检查所选快照。实际替换数据库前须让所有写入方退出，并让 PostgreSQL 保持可用。停机顺序、恢复前自动快照、中断后的重试和校验详见 [备份操作](backup.md)。默认保留 7 个每日和 4 个每周快照，仅保存在同一台盒子的备份无法应对整机丢失。
+执行 `scripts/backup.sh` 后记录输出的快照路径。先执行 `scripts/restore.sh --dry-run` 检查快照，实际写入时指定数据根和库名。数据库须在所有写入方退出后保持可用。默认保留 7 个每日和 4 个每周快照，整机恢复还需异机副本。[备份操作](backup.md)
 
 在运行时根检查 logs/alerts/alerts.jsonl 和 logs/healthwatch/samples.jsonl，把服务停用、恢复、公网探测和备份年龄分开阅读。通知默认写入本地，维护人员可按 [监控](monitoring.md) 配置独立 webhook。paper Gateway 的安装、登录失败预算、2FA、每日自动重启和健康检查见 [Gateway 运维](ibgateway.md)。不要在运行记录中复制凭据、完整账号或本机令牌。
 

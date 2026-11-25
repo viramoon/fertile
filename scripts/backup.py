@@ -31,6 +31,11 @@ def require(condition, message):
         raise ValueError(message)
 
 
+def valid_database(name):
+    return (isinstance(name, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", name)
+            and name not in {"postgres", "template0", "template1"})
+
+
 def sync_dir(path):
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -75,7 +80,7 @@ def runtime_settings(path):
 
 
 class Box:
-    def __init__(self, interrupted=None):
+    def __init__(self, interrupted=None, *, restoring=False):
         self.root = Path(os.getenv("FERTILE_ROOT", "/home/box/fertile")).resolve(strict=True)
         self.config = self.root / "config"
         overrides = runtime_settings(self.config / "backup.conf")
@@ -90,12 +95,13 @@ class Box:
         require(self.source in {"ib", "replay"}, "invalid FERTILE_MARKET_SOURCE")
         default = self.root / ("data/replay" if self.source == "replay" else "data")
         self.data = Path(settings.get("FERTILE_DATA_ROOT", default))
-        require(self.data.is_absolute() and self.data.is_dir(), "active data root is missing")
-        self.data = self.data.resolve(strict=True)
+        require(self.data.is_absolute() and (restoring or self.data.is_dir()), "active data root is missing")
+        self.data = self.data.resolve()
         self.catalog = Path(settings.get("FERTILE_BACKUP_CATALOG", self.data / "catalog"))
         research_base = self.root / "data/research"
         self.research = Path(settings.get("FERTILE_RESEARCH_ROOT", research_base))
-        require(self.research.is_relative_to(research_base), "research catalog must be within fertile data/research")
+        require(self.research.is_relative_to(research_base) or self.research == self.data / "research",
+                "research catalog must be within fertile data/research or at FERTILE_DATA_ROOT/research")
         self.backups = self.root / "backups"
         self.run = self.root / "run"
         self.trees = {"finance-state": self.data / "finance-state", "catalog": self.catalog,
@@ -105,9 +111,9 @@ class Box:
             require(path.is_absolute() and path == path.resolve(), f"unsafe directory: {path}")
             require(all(not q.is_relative_to(path) for q in roots if q != path)
                     and roots.count(path) == 1, "overlapping application and backup directories")
-        self.db = settings.get("PGDATABASE", "web")
-        require(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", self.db)
-                and self.db not in {"postgres", "template0", "template1"}, "invalid application database")
+        self.db = settings.get("PGDATABASE", settings.get("FERTILE_WEB_DATABASE", "web"))
+        if not restoring or interrupted is not None:
+            require(valid_database(self.db), "invalid application database")
         self.pg = dict(os.environ, LC_ALL="C", PGHOST=settings.get("PGHOST", str(self.run / "postgres")),
                        PGPORT=settings.get("PGPORT", settings.get("FERTILE_POSTGRES_PORT", "5432")),
                        PGCONNECT_TIMEOUT=settings.get("PGCONNECT_TIMEOUT", "5"))
@@ -120,12 +126,48 @@ class Box:
         return subprocess.run(args, input=sql, env=self.pg, check=True,
                               stdout=subprocess.PIPE, text=True, pass_fds=self.fds).stdout.strip()
 
-    def sql(self, sql):
+    def sql(self, sql, database="postgres"):
         return self.command("psql", "-XqAt", "--set", "ON_ERROR_STOP=1",
-                            "--dbname", "postgres", sql=sql)
+                            "--dbname", database, sql=sql)
 
     def exists(self, db):
         return self.sql(f"SELECT EXISTS(SELECT FROM pg_database WHERE datname='{db}')") == "t"
+
+    def select_targets(self, data, database, research):
+        require(valid_database(database), "invalid --target-database")
+        require(data.is_absolute() and data == data.resolve() and data.parent.is_dir()
+                and (not data.exists() or data.is_dir()),
+                "--target-data-root must be an absolute concrete directory with an existing parent")
+        require(not self.root.is_relative_to(data), "restore target overlaps FERTILE_ROOT")
+        protected = [(self.root / name).resolve() for name in ("config", "secrets", "run", "backups", "releases",
+                                                              "current", "tools", "logs", "data/postgres", "data/ibgateway")]
+        require(all(not data.is_relative_to(path) for path in protected), "restore target is a protected directory")
+        active = (self.data, self.catalog, self.research)
+        if data != self.data:
+            require(all(not overlaps(data, path) for path in [*protected, *active]),
+                    "restore target overlaps an active or protected directory")
+        if research is not None:
+            require(research.is_relative_to(self.root / "data/research") and research.parent.is_dir(),
+                    "--target-research-root must be within fertile data/research with an existing parent")
+            require(not overlaps(research, self.research) or data == self.data and research == self.research,
+                    "restore research target overlaps the active research catalog")
+            if data != self.data:
+                require(all(not overlaps(research, path) for path in active),
+                        "restore research target overlaps an active directory")
+        self.data = data
+        self.catalog = data / "catalog"
+        self.research = research if research is not None else data / "research"
+        self.db = database
+        self.trees = {"finance-state": data / "finance-state", "catalog": self.catalog, "research": self.research}
+        for key, path in self.trees.items():
+            require(path == path.resolve() and (not path.exists() or path.is_dir())
+                    and all(not overlaps(path, other) for other in protected)
+                    and all(not overlaps(path, other) for name, other in self.trees.items() if name != key),
+                    f"unsafe restore destination: {path}")
+
+
+def overlaps(path, other):
+    return path.is_relative_to(other) or other.is_relative_to(path)
 
 
 @contextmanager
@@ -149,7 +191,7 @@ def secret_name(name):
 
 
 def payload_files(tree, kind):
-    if not tree.exists():
+    if tree is None or not tree.exists():
         return
     require(tree.is_dir() and not tree.is_symlink(), f"invalid {kind} root")
     for folder, dirs, names in os.walk(tree):
@@ -225,29 +267,6 @@ def check_provenance(snapshot):
                 "collector checkpoint is missing or invalid")
 
 
-def keep_local_private_config(current, stage):
-    # Keep locally managed private overrides in place during restore. They
-    # never enter the backup tree and symlinks are never followed.
-    for base, dirs, files in os.walk(current):
-        base = Path(base)
-        for name in dirs.copy() + files:
-            if not secret_name(name):
-                continue
-            if name in dirs:
-                dirs.remove(name)
-            src = base / name
-            dst = stage / src.relative_to(current)
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            require(not dst.exists() and not dst.is_symlink(), "private config path present in backup")
-            if src.is_symlink():
-                dst.symlink_to(os.readlink(src))
-            elif src.is_dir():
-                shutil.copytree(src, dst, symlinks=True, copy_function=os.link)
-            else:
-                require(src.is_file(), "private config must be a regular file or symlink")
-                os.link(src, dst)
-
-
 def members(snapshot):
     for parent, dirs, names in os.walk(snapshot):
         base = Path(parent)
@@ -281,7 +300,8 @@ def verify(snapshot):
             all(type(present) is bool for present in meta["trees"].values()), "unknown snapshot format")
     require(all((snapshot / key).is_dir() for key in declared)
             and (not (snapshot / "research").exists() or "research" in declared), "snapshot tree mismatch")
-    require(meta["has_database"] == (snapshot / "postgres.dump").is_file(), "database dump missing")
+    require(type(meta["has_database"]) is bool and meta["has_database"] == (snapshot / "postgres.dump").is_file(),
+            "snapshot database dump does not match manifest")
     check_provenance(snapshot)
     return meta
 
@@ -316,11 +336,11 @@ def backup(box, recovery=False):
         require(has_db or recovery, "application DB missing")
         if has_db:
             box.command("pg_dump", "--format=custom", "--create", "--dbname", box.db, "--file", stage / "postgres.dump")
-        trees = {name: path.is_dir() for name, path in box.trees.items()}
+        trees = {name: name in box.trees and box.trees[name].is_dir() for name in ALLOWED_TREES}
         # Copy the atomic checkpoint first. Immutable catalog files enumerated
         # later can only be newer; the collector recomputes its watermark at open.
         for name in ("finance-state", "catalog", "config", "research"):
-            copy_tree_payload(box.trees[name], stage / name, name, previous)
+            copy_tree_payload(box.trees.get(name), stage / name, name, previous)
         check_provenance(stage)
         stamp = utc_stamp()
         atomic_json(stage / "snapshot.json", dict(format=1, stamp=stamp, source=box.source, database=box.db,
@@ -406,32 +426,66 @@ def rollback_or_finish(box, journal):
         elif not row["had"] and row["install"] and not stage.exists():
             remove_tree(path)
         remove_tree(stage)
+    if not committed and info.get("created_data"):
+        data = Path(info["created_data"])
+        if data.is_dir():
+            data.rmdir()
+            sync_dir(data.parent)
     journal.unlink()
     sync_dir(journal.parent)
 
 
-def restore(box, snapshot, dry_run):
+def verify_restore(box, snapshot, targets):
     meta = verify(snapshot)
-    require(meta["database"] == box.db and meta["source"] == box.source,
-            "snapshot database or source differs from selected target")
+    require(valid_database(meta["database"]), "invalid database in snapshot manifest")
+    require(meta["source"] == box.source, "snapshot source differs from selected target")
     if meta["has_database"]:
         toc = box.command("pg_restore", "--list", snapshot / "postgres.dump")
-        archive_db = re.search(r"^;\s+dbname:\s+(\S+)\s*$", toc, re.MULTILINE)
-        require(archive_db and archive_db[1] == box.db, "archive database differs from selected target")
-    print(f"SHA256 verified: {snapshot.name}, database={box.db}, source={box.source}, "
+        archive_db = re.search(r"^;[ \t]+dbname:[ \t]+(\S+)[ \t]*$", toc, re.MULTILINE)
+        require(re.search(r"^;[ \t]+Format: CUSTOM[ \t]*$", toc, re.MULTILINE), "expected a custom PostgreSQL archive")
+        require(archive_db and archive_db[1] == meta["database"], "archive database differs from snapshot manifest")
+    if targets is not None:
+        box.select_targets(*targets)
+        require(all(not overlaps(snapshot.resolve(), path) for path in (box.data, *box.trees.values())),
+                "snapshot overlaps the restore destination")
+    target = f", target_database={box.db}, target_data_root={box.data}" if targets is not None else ""
+    print(f"SHA256 verified: {snapshot.name}, database={meta['database']}, source={box.source}{target}, "
           f"has_database={meta['has_database']}", flush=True)
-    if dry_run:
-        return
+    return meta
+
+
+def database_empty(box):
+    # Use pg_dump's object selection to distinguish application objects from the
+    # built-in schemas, including empty application schemas and database extensions.
+    if box.sql("SELECT EXISTS (SELECT FROM pg_largeobject_metadata)", box.db) != "f":
+        return False
+    with tempfile.TemporaryDirectory(prefix="fertile-empty-") as directory:
+        archive = Path(directory) / "schema.dump"
+        box.command("pg_dump", "--schema-only", "--no-comments", "--no-privileges", "--format=custom",
+                    "--dbname", box.db, "--file", archive)
+        toc = box.command("pg_restore", "--list", archive)
+    standard = re.compile(r"\d+; (?:2615 2200 SCHEMA - public \S+|0 0 (?:ENCODING|STDSTRINGS|SEARCHPATH) - .*)")
+    return not any(re.match(r"^\d+;", line) and not standard.fullmatch(line) for line in toc.splitlines())
+
+
+def restore(box, snapshot, meta, overwrite, targets):
     with locked(box.run / "control.lock") as control_fd:
         box.fds.append(control_fd)
         quiescent(box)
+        had_db = box.exists(box.db)
+        if not overwrite:
+            for path in {box.data, *box.trees.values()}:
+                require(not path.exists() or not any(path.iterdir()), f"non-empty restore directory: {path}; use --overwrite")
+            require(not had_db or database_empty(box), f"non-empty target database: {box.db}; use --overwrite")
         journal = box.run / "restore-journal.json"
         before = backup(box, recovery=True)
         print(f"Before-restore snapshot: {before}", flush=True)
         token = uuid.uuid4().hex
         old_db = "fertile_old_" + token
-        plan = dict(phase="preparing", db=box.db, old_db=old_db, had_db=box.exists(box.db),
+        plan = dict(phase="preparing", db=box.db, old_db=old_db, had_db=had_db,
                     restore_db=meta["has_database"], trees=[],
+                    targets=[str(value) if value is not None else None for value in targets],
+                    created_data=str(box.data) if not box.data.exists() else None,
                     location=dict(PGHOST=box.pg["PGHOST"], PGPORT=box.pg["PGPORT"], PGDATABASE=box.db,
                                   FERTILE_DATA_ROOT=str(box.data), FERTILE_MARKET_SOURCE=box.source,
                                   FERTILE_BACKUP_CATALOG=str(box.catalog),
@@ -439,24 +493,28 @@ def restore(box, snapshot, dry_run):
         for key, path in box.trees.items():
             if key not in meta["trees"]:  # Snapshots taken before research must leave its catalog intact.
                 continue
-            plan["trees"].append(dict(key=key, path=str(path), had=path.is_dir(), install=meta["trees"][key] or key == "config" and path.is_dir()))
+            plan["trees"].append(dict(key=key, path=str(path), had=path.is_dir(), install=meta["trees"][key]))
         atomic_json(journal, plan)
         try:
+            if plan["created_data"]:
+                box.data.mkdir()
+                sync_dir(box.data.parent)
             for row in plan["trees"]:
                 if row["install"]:
                     path = Path(row["path"])
                     stage = path.parent / (".fertile-restore-" + token + "-" + path.name + ".new")
                     shutil.copytree(snapshot / row["key"], stage)
                     sync_tree(stage)
-                    if row["key"] == "config" and row["had"]:
-                        keep_local_private_config(path, stage)
             if meta["has_database"]:
                 if plan["had_db"]:
                     box.sql(f'ALTER DATABASE "{box.db}" RENAME TO "{old_db}"')
-                # --create preserves database locale, ACLs, comments and role
-                # settings. Applications stay stopped until PG + all dirs are restored.
-                box.command("pg_restore", "--create", "--exit-on-error", "--dbname=postgres", snapshot / "postgres.dump")
-                require(box.exists(box.db), "archive did not recreate the expected database")
+                if meta["database"] == box.db:
+                    # Keep database-level metadata when the archive name is usable.
+                    box.command("pg_restore", "--create", "--exit-on-error", "--dbname=postgres", snapshot / "postgres.dump")
+                    require(box.exists(box.db), "archive did not recreate the expected database")
+                else:
+                    box.command("createdb", "--maintenance-db=postgres", "--template=template0", box.db)
+                    box.command("pg_restore", "--exit-on-error", "--dbname", box.db, snapshot / "postgres.dump")
             for row in plan["trees"]:
                 path = Path(row["path"])
                 stem = ".fertile-restore-" + token + "-" + path.name
@@ -476,33 +534,47 @@ def main():
     parser = argparse.ArgumentParser()
     actions = parser.add_subparsers(dest="action", required=True)
     actions.add_parser("backup")
-    sub = actions.add_parser("restore")
+    sub = actions.add_parser("restore", prog="scripts/restore.sh")
     sub.add_argument("snapshot", type=Path)
-    sub.add_argument("--dry-run", action="store_true")
+    sub.add_argument("--target-data-root", type=Path, help="absolute destination for finance-state, catalog and research")
+    sub.add_argument("--target-database", help="destination PostgreSQL database name on the configured server")
+    sub.add_argument("--target-research-root", type=Path, help="explicit research destination under FERTILE_ROOT/data/research")
+    sub.add_argument("--overwrite", action="store_true", help="allow replacing payload in non-empty destinations")
+    sub.add_argument("--dry-run", action="store_true", help="verify SHA256, format and explicit target paths without writes")
     args = parser.parse_args()
+    targets = None
+    if args.action == "restore":
+        if args.target_data_root is not None and args.target_database is not None:
+            targets = (args.target_data_root, args.target_database, args.target_research_root)
+        elif not args.dry_run or any(value is not None for value in
+                                     (args.target_data_root, args.target_database, args.target_research_root)):
+            sub.error("specify both --target-data-root and --target-database")
     os.umask(0o077)
     root = Path(os.getenv("FERTILE_ROOT", "/home/box/fertile")).resolve(strict=True)
     journal = root / "run/restore-journal.json"
     if args.action == "restore" and args.dry_run:
-        box = Box()
-        restore(box, args.snapshot, True)
+        verify_restore(Box(restoring=True), args.snapshot, targets)
         return
     with locked(root / "run/backup.lock") as backup_fd:
         if journal.exists():
             require(args.action == "restore", "interrupted restore must be reconciled first")
             saved = json.loads(journal.read_bytes())
-            interrupted = Box(saved)
+            expected = saved.get("targets", [saved["location"]["FERTILE_DATA_ROOT"], saved["db"], None])
+            require([str(path) if path is not None else None for path in targets] == expected,
+                    "interrupted restore must be reconciled using its original explicit targets")
+            interrupted = Box(saved, restoring=True)
             with locked(interrupted.run / "control.lock") as control_fd:
                 interrupted.fds = [backup_fd, control_fd]
                 quiescent(interrupted)
                 rollback_or_finish(interrupted, journal)
                 print("Interrupted restore reconciled.", flush=True)
-        box = Box()
+        box = Box(restoring=args.action == "restore")
         box.fds = [backup_fd]
         if args.action == "backup":
             print(backup(box))
         else:
-            return restore(box, args.snapshot, False)
+            meta = verify_restore(box, args.snapshot, targets)
+            restore(box, args.snapshot, meta, args.overwrite, targets)
 
 
 if __name__ == "__main__":

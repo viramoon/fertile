@@ -41,7 +41,7 @@ SETTING = re.compile(r"[A-Z_][A-Z_0-9]*\Z")
 EXTERNAL_PROGRAMS = {"cloudflared", "tunnel", "viramoon-site", "watchdog", "viramoon-watchdog"}
 SUPPORTED = {
     "FERTILE_PROFILE", "FERTILE_MARKET_SOURCE", "FERTILE_DATA_ROOT", "FERTILE_POSTGRES_PORT",
-    "FERTILE_RESEARCH_ROOT",
+    "FERTILE_RESEARCH_ROOT", "FERTILE_WEB_DATABASE",
     "FINANCE_API_PORT", "FINANCE_COLLECTOR_PORT", "WEB_PORT", "IB_GATEWAY_ADDRESS",
     "FINANCE_COLLECTOR_CONFIG", "WEB_REQUIRE_FINANCE", "FERTILE_HEALTH_CONFIG", "FERTILE_PUBLIC_ORIGIN",
     "FERTILE_BACKUP_DAYS", "FERTILE_BACKUP_WEEKS", "FERTILE_BACKUP_REMOTE",
@@ -130,6 +130,11 @@ def port(value):
     return str(n)
 
 
+def validate_web_database(name):
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", name) or name in {"postgres", "template0", "template1"}:
+        raise ValueError("invalid FERTILE_WEB_DATABASE")
+
+
 def active_programs(api):
     rows = api.getAllProcessInfo()
     if any({row["name"], row["group"]} & EXTERNAL_PROGRAMS
@@ -171,15 +176,18 @@ def build_plan():
     source, data = market_data(settings)
     research_base = ROOT / "data/research"
     research = Path(settings.get("FERTILE_RESEARCH_ROOT", research_base))
-    if not research.is_relative_to(research_base) or research.resolve() != research:
-        raise ValueError("FERTILE_RESEARCH_ROOT must be a concrete path within the fertile data/research directory")
+    if (not (research.is_relative_to(research_base) or research == data / "research")
+            or research.resolve() != research):
+        raise ValueError("FERTILE_RESEARCH_ROOT must be a concrete path within fertile data/research or at FERTILE_DATA_ROOT/research")
+    web_db = settings.get("FERTILE_WEB_DATABASE", "web")
+    validate_web_database(web_db)
     fields = dict(root=str(ROOT), release=str(release), finance_port=port(settings.get("FINANCE_API_PORT", 8081)),
                   collector_port=port(settings.get("FINANCE_COLLECTOR_PORT", 8082)), web_port=port(settings.get("WEB_PORT", 8090)))
     if "8080" in (fields["finance_port"], fields["collector_port"], fields["web_port"]):
         raise ValueError("port 8080 belongs to the existing Ruler-managed website")
     common = dict(PYTHONDONTWRITEBYTECODE="1", FERTILE_ROOT=str(ROOT), FERTILE_PROFILE=profile, FERTILE_MARKET_SOURCE=source,
                   FERTILE_DATA_ROOT=str(data), FERTILE_RESEARCH_ROOT=str(research), PGHOST=str(RUN / "postgres"),
-                  PGPORT=port(settings.get("FERTILE_POSTGRES_PORT", 5432)), PGDATABASE="web")
+                  PGPORT=port(settings.get("FERTILE_POSTGRES_PORT", 5432)), PGDATABASE=web_db)
     common.update({key: val for key, val in settings.items() if key not in common})
     common["FERTILE_POSTGRES_PORT"] = common["PGPORT"]
     base = {k: os.environ[k] for k in INHERIT if k in os.environ}
@@ -197,6 +205,12 @@ def build_plan():
                 continue
             raise ValueError(f"{name} is external to the fertile supervisor")
         cmd = [expand(s) for s in row["command"]]
+        # These helpers must understand mapped databases and restored research
+        # when the controller starts a release that predates either setting.
+        if not custom and name == "postgres" and web_db != "web":
+            cmd[0] = str(SCRIPTS / "postgres.sh")
+        if not custom and name == "healthwatch" and research == data / "research" and research != research_base:
+            cmd[0] = str(SCRIPTS / "healthwatch")
         directory = expand(row.get("directory", str(release)))
         env = {**base, **common}
         if name.startswith("finance-") or name == "healthwatch":
@@ -217,7 +231,7 @@ def build_plan():
             authority = "fertile_web@localhost" if database == "managed" else "localhost"
             env.update(WEB_PORT=fields["web_port"], WEB_CONFIG_DIR=str(release / "web/config"),
                        WEB_STATIC_ROOT=str(release / "static"), WEB_ADMIN_TOKEN_FILE=str(ROOT / "secrets/web.env"),
-                       DATABASE_URL=f"postgresql://{authority}/web?host={quote(common['PGHOST'], safe='')}&port={common['PGPORT']}",
+                       DATABASE_URL=f"postgresql://{authority}/{web_db}?host={quote(common['PGHOST'], safe='')}&port={common['PGPORT']}",
                        FINANCE_BASE_URL=f"http://127.0.0.1:{fields['finance_port']}")
         env.update({k: expand(v) for k, v in row.get("environment", {}).items()})
         skip = "" if row.get("enabled", True) else "disabled"
@@ -253,6 +267,8 @@ def build_plan():
         file = web["env_file"]
         external = file and "DATABASE_URL" in read_env(ROOT / "secrets" / file, secret=True)
         if external:
+            if web_db != "web":
+                raise ValueError("FERTILE_WEB_DATABASE cannot be combined with an external DATABASE_URL")
             database = "external"
         elif database == "managed":
             services["postgres"]["env"]["FERTILE_WEB_PEER"] = "1"
@@ -407,23 +423,33 @@ def prepare_web(plan):
         database = "managed" if (release / "fertile/scripts/prepare-web-db.sql").is_file() else "legacy"
     if database == "external":
         return
+    web_db = web["env"].get("FERTILE_WEB_DATABASE", "web")
+    validate_web_database(web_db)
     admin = {**pg["env"], "PGUSER": getpwuid(os.getuid()).pw_name, "PGDATABASE": "postgres"}
     for _ in range(50):
         if subprocess.run(["pg_isready", "-q"], env=admin).returncode == 0:
             break
         time.sleep(.1)
+    if web_db != "web":
+        exists = subprocess.check_output(["psql", "-XAt", "-v", "ON_ERROR_STOP=1", "-c",
+            f"SELECT 1 FROM pg_database WHERE datname='{web_db}'"], env=admin, text=True)
+        if exists.strip() != "1":
+            raise ValueError("restore the configured FERTILE_WEB_DATABASE before starting web")
     if database == "legacy":
+        if web_db != "web":
+            return
         exists = subprocess.check_output(["psql", "-XAt", "-v", "ON_ERROR_STOP=1", "-c",
             "SELECT 1 FROM pg_database WHERE datname='web'"], env=admin, text=True)
         if exists.strip() != "1":
             subprocess.run(["createdb", "web"], env=admin, check=True)
         return
-    subprocess.run(["psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-f",
-                    release / "fertile/scripts/prepare-web-db.sql"], env=admin, check=True)
-    admin["PGDATABASE"] = "web"
+    provision = (release / "fertile/scripts/prepare-web-db.sql" if web_db == "web" else SCRIPTS / "prepare-web-db.sql")
+    subprocess.run(["psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-v", f"web_database={web_db}", "-f",
+                    provision], env=admin, check=True)
+    admin["PGDATABASE"] = web_db
     # The initial web migration creates app and blog. Permission is limited to this
     # database and ends before the API starts. A retried ensure recovers an interrupted grant.
-    revoke = ["psql", "-Xq", "-v", "ON_ERROR_STOP=1", "-c", "REVOKE CREATE ON DATABASE web FROM fertile_web"]
+    revoke = ["psql", "-Xq", "-v", "ON_ERROR_STOP=1", "-c", f'REVOKE CREATE ON DATABASE "{web_db}" FROM fertile_web']
     subprocess.run(revoke, env=admin, check=True)
     initial = subprocess.check_output(
         ["psql", "-XAt", "-c", "SELECT to_regnamespace('app') IS NULL AND to_regnamespace('blog') IS NULL"],
@@ -431,13 +457,13 @@ def prepare_web(plan):
     try:
         if initial:
             subprocess.run(["psql", "-Xq", "-v", "ON_ERROR_STOP=1", "-c",
-                            "GRANT CREATE ON DATABASE web TO fertile_web"], env=admin, check=True)
+                            f'GRANT CREATE ON DATABASE "{web_db}" TO fertile_web'], env=admin, check=True)
         subprocess.run([release / "bin/web", "migrate"], cwd=web["directory"], env=web["env"], check=True)
     finally:
         if initial:
             subprocess.run(revoke, env=admin, check=True)
     subprocess.run(["psql", "-Xq", "-v", "ON_ERROR_STOP=1", "-v", "finish=1", "-f",
-                    release / "fertile/scripts/prepare-web-db.sql"], env=admin, check=True)
+                    provision], env=admin, check=True)
 
 
 def check_queue_compatibility(plan):
@@ -575,7 +601,9 @@ def switch(link, target):
         os.replace(temp, link)
 
 
-def rollback(ref):
+def rollback(ref, switch_only=False):
+    if switch_only and daemon_pid():
+        raise RuntimeError("stop supervisord with fertile down before switching a release")
     if not re.fullmatch("[0-9a-f]{7,40}", ref):
         raise ValueError("expected a built commit")
     matches = [p for p in (ROOT/"releases").glob(ref+"*")
@@ -591,11 +619,14 @@ def rollback(ref):
     subprocess.run([sys.executable, SCRIPTS / "release-manifest.py", "verify", target, target.name,
                     *(components[k] for k in ("finance", "web", "frontend"))], check=True)
     if target == previous:
-        ensure()
+        if not switch_only:
+            ensure()
         return
     check_queue_compatibility({**build_plan(), "release": str(target)})
     # Reconcile only changed groups, including when reversing a failed switch.
     switch(ROOT/"current", target)
+    if switch_only:
+        return
     try:
         ensure()
     except Exception:
@@ -622,7 +653,9 @@ def main():
     sub.add_parser("data-root", help="print the effective finance data root for this environment")
     for action in ("logs", "restart", "stop"):
         sub.add_parser(action).add_argument("name")
-    sub.add_parser("rollback").add_argument("ref")
+    rollback_cmd = sub.add_parser("rollback")
+    rollback_cmd.add_argument("ref")
+    rollback_cmd.add_argument("--switch-only", action="store_true", help="switch the verified release with supervisord stopped")
     args = parser.parse_args()
     if args.action == "data-root":
         _, data = market_data(runtime_settings())
@@ -652,7 +685,7 @@ def main():
         elif args.action == "rollback":
             if daemon_pid():
                 active_programs(connection())
-            rollback(args.ref)
+            rollback(args.ref, args.switch_only)
         else:
             if args.name in EXTERNAL_PROGRAMS:
                 raise ValueError(f"{args.name} is external to the fertile supervisor")
