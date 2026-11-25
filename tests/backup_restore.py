@@ -38,6 +38,15 @@ def write_checksums(snapshot):
         f"{backup.digest(snapshot / path)}  {path}\n" for path in sorted(backup.members(snapshot))))
 
 
+def filesystem_state(root):
+    state = {}
+    for path in (root, *root.rglob("*")):
+        stat = path.stat()
+        state[path.relative_to(root)] = (stat.st_ino, stat.st_mode, stat.st_mtime_ns,
+                                         path.read_bytes() if path.is_file() else None)
+    return state
+
+
 class Snapshots(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -46,7 +55,7 @@ class Snapshots(unittest.TestCase):
 
     def test_explicit_targets_and_dry_run_offline(self):
         root = self.root / "box"
-        live = root / "data"
+        live = root / "data-paper"
         live.mkdir(parents=True)
         (live / "active").write_text("new version")
         snapshot = self.root / "snapshot"
@@ -60,12 +69,26 @@ class Snapshots(unittest.TestCase):
         }))
         write_checksums(snapshot)
         target = root / "isolated"
-        env = {"PATH": os.environ["PATH"], "FERTILE_ROOT": str(root), "PGDATABASE": "postgres"}
+        env = {"PATH": os.environ["PATH"], "FERTILE_ROOT": str(root), "PGDATABASE": "postgres",
+               "FERTILE_DATA_ROOT": str(live), "FERTILE_RESEARCH_ROOT": str(root / "data/research/active"),
+               "PGHOST": str(self.root / "missing-socket"), "PGPASSFILE": str(self.root / "missing-passfile"),
+               "TMPDIR": str(self.root)}
+        commands = self.root / "commands"
+        commands.mkdir()
+        psql = commands / "psql"
+        psql.write_text("#!/bin/sh\n"
+                        "test \"$*\" = '-XqAt --set ON_ERROR_STOP=1 --dbname postgres' || exit 9\n"
+                        "test \"$(cat)\" = \"SELECT EXISTS(SELECT FROM pg_database WHERE datname='isolated_web')\" || exit 9\n"
+                        "printf 'f\\n'\n")
+        psql.chmod(0o700)
 
-        def run(*args):
-            return subprocess.run([RESTORE, snapshot, *args], env=env, capture_output=True, text=True, timeout=10)
+        def run(*args, stub_postgres=True):
+            path = f"{commands}:{env['PATH']}" if stub_postgres else env["PATH"]
+            return subprocess.run([RESTORE, snapshot, *args], env={**env, "PATH": path},
+                                  capture_output=True, text=True, timeout=10)
 
         flags = ("--target-data-root", target, "--target-database", "isolated_web")
+        original = filesystem_state(self.root)
         for args in ((), flags[:2], flags[2:], ("--dry-run", *flags[:2])):
             result = run(*args)
             self.assertNotEqual(result.returncode, 0)
@@ -75,6 +98,57 @@ class Snapshots(unittest.TestCase):
         self.assertIn("SHA256 verified", result.stdout)
         self.assertIn("target_database=isolated_web", result.stdout)
         self.assertIn("SHA256 verified", run("--dry-run").stdout)
+        self.assertFalse(target.exists())
+        for overwrite in ((), ("--overwrite",)):
+            with self.subTest(overwrite=overwrite):
+                result = run("--dry-run", *flags, *overwrite, stub_postgres=False)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("cannot check occupancy of target database isolated_web", result.stderr)
+        self.assertEqual(run("--dry-run", stub_postgres=False).returncode, 0)
+        self.assertEqual(filesystem_state(self.root), original)
+
+        target.mkdir()
+        empty = filesystem_state(self.root)
+        for overwrite in ((), ("--overwrite",)):
+            with self.subTest(overwrite=overwrite):
+                result = run("--dry-run", *flags, *overwrite)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("SHA256 verified", result.stdout)
+                self.assertEqual(result.stderr, "")
+                self.assertEqual(filesystem_state(self.root), empty)
+
+        state = target / "finance-state"
+        state.mkdir()
+        marker = state / "version"
+        marker.write_text("existing target")
+        occupied = filesystem_state(self.root)
+        result = run("--dry-run", *flags, stub_postgres=False)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(f"non-empty restore directory: {target}; use --overwrite", result.stderr)
+        self.assertEqual(filesystem_state(self.root), occupied)
+        result = run("--dry-run", *flags, "--overwrite")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"Warning: non-empty restore directory: {target}; restore will replace", result.stderr)
+        self.assertIn(f"Warning: non-empty restore directory: {state}; restore will replace this directory",
+                      result.stderr)
+        self.assertEqual(filesystem_state(self.root), occupied)
+        marker.unlink()
+        state.rmdir()
+        target.rmdir()
+
+        research = root / "data/research/isolated"
+        research.mkdir(parents=True)
+        (research / "existing").write_text("legacy snapshot leaves this in place")
+        occupied = filesystem_state(self.root)
+        result = run("--dry-run", *flags, "--target-research-root", research)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(f"non-empty restore directory: {research}; use --overwrite", result.stderr)
+        result = run("--dry-run", *flags, "--target-research-root", research, "--overwrite")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"Warning: non-empty restore directory: {research}; restore will keep this directory",
+                      result.stderr)
+        self.assertEqual(filesystem_state(self.root), occupied)
+
         for path in (root, root / "config", live / "nested"):
             result = run("--dry-run", "--target-data-root", path, *flags[2:])
             self.assertNotEqual(result.returncode, 0)
@@ -169,6 +243,8 @@ class Snapshots(unittest.TestCase):
         self.assertFalse(target.exists())
         self.assertEqual(sql("postgres", exists), "f")
         self.assertFalse((root / "run/restore-journal.json").exists())
+        offline = run(RESTORE, snapshot, "--dry-run", overrides={"PGHOST": str(self.root / "missing-socket")})
+        self.assertIn("SHA256 verified", offline.stdout)
 
         target.mkdir()
         blocker = target / "unexpected-file"
@@ -184,11 +260,34 @@ class Snapshots(unittest.TestCase):
         self.assertEqual(sql("restored_web", query), "before|t")
 
         empty_root = root / "another-rollback"
+        db_oid = "SELECT oid FROM pg_database WHERE datname='restored_web'"
+        old_oid = sql("postgres", db_oid)
+        before_dry_runs = filesystem_state(root)
+        dry_flags = ("--dry-run", "--target-data-root", empty_root, *flags[2:])
+        for overwrite in ((), ("--overwrite",)):
+            with self.subTest(overwrite=overwrite):
+                dry = run(RESTORE, snapshot, *dry_flags, *overwrite, check=False,
+                          overrides={"TMPDIR": str(root)})
+                if overwrite:
+                    self.assertEqual(dry.returncode, 0, dry.stderr)
+                    self.assertIn("Warning: non-empty target database: restored_web; restore will replace this database",
+                                  dry.stderr)
+                else:
+                    self.assertEqual(dry.returncode, 1, dry.stderr)
+                    self.assertIn("non-empty target database: restored_web; use --overwrite", dry.stderr)
+                self.assertEqual(sql("restored_web", query), "before|t")
+                self.assertEqual(sql("postgres", db_oid), old_oid)
+                self.assertEqual(filesystem_state(root), before_dry_runs)
+
         refused = run(RESTORE, snapshot, "--target-data-root", empty_root, *flags[2:], check=False)
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn("non-empty target database", refused.stderr)
         self.assertFalse(empty_root.exists())
         run("createdb", "empty_web")
+        dry = run(RESTORE, snapshot, "--dry-run", "--target-data-root", empty_root, "--target-database", "empty_web")
+        self.assertIn("SHA256 verified", dry.stdout)
+        self.assertEqual(dry.stderr, "")
+        self.assertFalse(empty_root.exists())
         run(RESTORE, snapshot, "--target-data-root", empty_root, "--target-database", "empty_web")
         self.assertEqual(sql("empty_web", query), "before|t")
         self.assertEqual((empty_root / "finance-state/version").read_text(), "before")
