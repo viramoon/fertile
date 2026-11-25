@@ -22,7 +22,7 @@ import tempfile
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
-from urllib.request import ProxyHandler, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from xmlrpc.client import Fault, ServerProxy
 
 from supervisor.xmlrpc import SupervisorTransport
@@ -30,6 +30,7 @@ import yaml
 
 
 SCRIPTS = Path(__file__).resolve().parent
+USER_AGENT = "fertile-supervision/" + (SCRIPTS.parent / "VERSION").read_text(encoding="utf-8").strip()
 ROOT = Path(os.environ.get("FERTILE_ROOT", "/home/box/fertile")).resolve()
 RUN = ROOT / "run"
 LOGS = ROOT / "logs"
@@ -507,15 +508,22 @@ def ensure():
         raise RuntimeError("; ".join(failures))
 
 
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *args):
+        return None
+
+
 def http_status(url):
     if not url:
         return None
     try:
-        # Probes use only configured local services and bypass ambient HTTP proxies.
-        with build_opener(ProxyHandler({})).open(url, timeout=2) as response:
+        # Probe exactly the configured endpoint and bypass ambient HTTP proxies.
+        request = Request(url, headers={"User-Agent": USER_AGENT})
+        with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=2) as response:
             return response.status
     except HTTPError as error:
-        return error.code
+        with error:
+            return error.code
     except (OSError, URLError):
         return 0
 

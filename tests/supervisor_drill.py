@@ -9,10 +9,13 @@ import signal
 import subprocess
 import sys
 import time
-from urllib.request import urlopen
+from urllib.error import HTTPError
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
-CLI = Path(__file__).resolve().parents[1] / "scripts/fertile"
+SOURCE = Path(__file__).resolve().parents[1]
+CLI = SOURCE / "scripts/fertile"
+USER_AGENT = "fertile-supervisor-drill/" + (SOURCE / "VERSION").read_text(encoding="utf-8").strip()
 ROOT = Path(os.environ.get("FERTILE_ROOT", Path(os.environ.get("FERTILE_BOX_HOME", "/home/box")) / "fertile")).resolve()
 SKIPPED = {"disabled", "missing_binary", "needs_credentials"}
 
@@ -84,6 +87,11 @@ def wait_status(deadline, accepts):
         time.sleep(min(.15, seconds_left(deadline)))
 
 
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *args):
+        return None
+
+
 def chaos():
     daemon, active, _ = running_initial()
     api = active.get("finance-api")
@@ -103,11 +111,17 @@ def chaos():
             return (state["supervisor_pid"] == daemon and svc["state"] == "RUNNING"
                     and svc["pid"] not in (0, api["pid"]) and svc["live"] == 200)
         new = wait_status(deadline, restarted)["services"]["finance-api"]
-        with urlopen(api["live_url"], timeout=seconds_left(deadline)) as response:
-            if response.status != 200:
-                raise RuntimeError(f"independent live GET returned {response.status}")
+        request = Request(api["live_url"], headers={"User-Agent": USER_AGENT})
+        try:
+            with build_opener(NoRedirect()).open(request, timeout=seconds_left(deadline)) as response:
+                code = response.status
+        except HTTPError as error:
+            with error:
+                code = error.code
+        if code != 200:
+            raise RuntimeError(f"independent live GET returned HTTP {code}")
         seconds_left(deadline)
-        report("finance-api automatically recovered", new_pid=new["pid"], http=response.status,
+        report("finance-api automatically recovered", new_pid=new["pid"], http=code,
                recovery_seconds=round(time.monotonic() - started, 3))
 
 

@@ -2,6 +2,8 @@
 
 从源码根运行 scripts/fertile status --json，记录部署提交、UTC 时间、进程 PID 与下面的业务探测。HTTP 状态为 200 表示对应探测通过，503 要结合响应里的 checks 定位。
 
+`scripts/fertile status --json` 仅请求清单中配置的探针 URL，发送 `fertile-supervision/<VERSION>` User-Agent，在报告中保留首跳 HTTP 状态码。`tests/chaos-restart.sh` 的独立存活探针发送 `fertile-supervisor-drill/<VERSION>`，同样以配置的 URL 的首跳结果为准，遇到 3xx 会报告失败。
+
 | 服务 | 存活检查 | 就绪或业务检查 |
 | --- | --- | --- |
 | postgres | supervisor 和 pg_isready | Unix socket 连接数据库 web，读取 app.schema_info |
