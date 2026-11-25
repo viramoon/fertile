@@ -7,6 +7,7 @@
 | scripts/fertile build [--ref SHA] | 从指定总仓提交的 gitlink 构建 finance、web、前端，校验产物并原子切换 current。 |
 | scripts/fertile up / ensure / down | 依序启动、重启后恢复、逆序优雅停止服务。 |
 | scripts/fertile status --json | 输出服务启用状态、进程以及可用的 live / ready 结果。 |
+| scripts/fertile data-root | 输出当前环境与 `config/runtime.env` 解析出的 finance 数据根。 |
 | scripts/fertile rollback SHA | 校验既有版本并切换，重新加载受影响服务。 |
 | scripts/check-submodules.sh [--ref BRANCH] | 检查三个 gitlink、干净的递归工作树、远端分支上已推送的提交，默认 main。 |
 | scripts/contract-diff.sh | 从两个生产者代码导出 OpenAPI，并重跑两端客户端生成检查。 |

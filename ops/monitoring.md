@@ -12,6 +12,8 @@
 
 ## 探针与状态变化
 
+healthwatch 的 HTTP 探针和 webhook 投递均发送 `fertile-healthwatch/<VERSION>` User-Agent。
+
 - finance-api、finance-collector、web 的本地 live 和 ready 各有单独探针。服务清单来自 `scripts/fertile status --json`，启用项另查 supervisor 进程状态；postgres、worker、IB Gateway 等没有 HTTP 端点的服务使用进程探针。手动禁用与 replay 隐含禁用写 skipped；已启用服务缺程序或缺登录凭据记录 failed。
 - 公网独立请求 https://fertile.viramoon.com 的 `/healthz/ready`，要求 HTTP 200 和有效的 web 就绪 JSON。必需依赖均健康时，web 对可选依赖的降级状态仍视为入口可达。跳转、非预期 HTML、TLS 错误及 Tunnel 502/530 使该探针失败。隔离实例显式设置 `public_origin: null` 后，该探针记录 skipped。检查从盒子访问公网入口；不同运营商与地域的可达性另需从相应地点测量。
 - `market:fresh` 从 finance `/api/v1/market/status` 读取业务状态、每个标的的年龄和陈旧标志。统计标的数、陈旧数、观测到的最大年龄及数据源；缺少行情或数据心跳过期标记失败。未启用采集或旧版接口返回 404 会记录 skipped。

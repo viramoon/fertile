@@ -21,6 +21,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 import yaml
 
 SCRIPTS = Path(__file__).resolve().parent
+USER_AGENT = "fertile-healthwatch/" + (SCRIPTS.parent / "VERSION").read_text(encoding="utf-8").strip()
 UTC = timezone.utc
 COOLDOWN = 15 * 60
 
@@ -94,8 +95,9 @@ class NoRedirect(HTTPRedirectHandler):
 
 def http_json(url, timeout, local=False):
     opener = build_opener(ProxyHandler({}), NoRedirect()) if local else build_opener(NoRedirect())
+    headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
     try:
-        with opener.open(Request(url, headers={"Accept": "application/json"}), timeout=timeout) as resp:
+        with opener.open(Request(url, headers=headers), timeout=timeout) as resp:
             payload = resp.read(262145)
             if len(payload) > 262144:
                 raise ValueError("oversized JSON")
@@ -295,8 +297,9 @@ class Delivery:
                         break
                     record = json.loads(line)
                     if record["check"] != "webhook:delivery":
-                        req = Request(url, data=line, headers={"Content-Type": "application/json",
-                                                              "Idempotency-Key": record["id"]}, method="POST")
+                        headers = {"Content-Type": "application/json", "User-Agent": USER_AGENT,
+                                   "Idempotency-Key": record["id"]}
+                        req = Request(url, data=line, headers=headers, method="POST")
                         with build_opener(NoRedirect()).open(req, timeout=timeout):
                             pass
                     self.offset = handle.tell()

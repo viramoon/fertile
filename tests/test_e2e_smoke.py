@@ -2,6 +2,7 @@
 import argparse
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
+from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
@@ -13,6 +14,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 import e2e_smoke as check
 
@@ -173,6 +175,120 @@ class SmokeTests(unittest.TestCase):
             check.token_from(self.secret)
         with self.assertRaisesRegex(check.SmokeError, "cross-origin"):
             self.http.read("https://other.invalid/a.js", asset=True)
+
+
+class PaperSmokeTests(unittest.TestCase):
+    def setUp(self):
+        self.services = {name: {"state": "RUNNING", "pid": 123} for name in
+                         ("postgres", "finance-api", "finance-collector", "finance-backtest-worker", "web")}
+        for name in ("finance-api", "finance-collector", "web"):
+            self.services[name].update(live_url="http://127.0.0.1:8090/healthz/live", live=200,
+                                       ready_url="http://127.0.0.1:8090/healthz/ready", ready=200)
+        self.services["finance-collector"]["ready"] = 503
+        logger = patch.object(check, "log")
+        logger.start()
+        self.addCleanup(logger.stop)
+
+    def snapshot(self):
+        return json.dumps({"supervisor": "RUNNING", "services": self.services})
+
+    def await_local(self, **options):
+        with patch.object(check.subprocess, "check_output", return_value=self.snapshot()), \
+             patch.object(check.time, "monotonic", side_effect=[0, 61]):
+            return check.await_stack(**options)
+
+    def test_paper_stack_accepts_collector_503_with_healthwatch_absent_or_stopped(self):
+        self.assertEqual(self.await_local(paper_only=True), ("http://127.0.0.1:8090", {}))
+        for name in ("healthwatch", "ib-gateway", "xvfb"):
+            self.services[name] = {"state": "STOPPED", "pid": 0}
+        _, skipped = self.await_local(paper_only=True)
+        self.assertEqual(skipped, dict.fromkeys(("healthwatch", "ib-gateway", "xvfb"), "STOPPED"))
+
+    def test_strict_stack_requires_healthwatch_and_collector_ready(self):
+        with self.assertRaisesRegex(check.SmokeError, "missing a required service"):
+            self.await_local()
+        self.services["healthwatch"] = {"state": "STOPPED", "pid": 0}
+        with self.assertRaisesRegex(check.SmokeError, "healthwatch=STOPPED"):
+            self.await_local()
+        self.services["healthwatch"].update(state="RUNNING", pid=123)
+        with self.assertRaisesRegex(check.SmokeError, "finance-collector=.*ready=503"):
+            self.await_local()
+        self.services["finance-collector"]["ready"] = 200
+        self.assertEqual(self.await_local(), ("http://127.0.0.1:8090", {}))
+
+    def test_paper_stack_still_requires_core_services_and_collector_live(self):
+        for name in ("finance-api", "web"):
+            with self.subTest(name=name):
+                service = self.services.pop(name)
+                with self.assertRaisesRegex(check.SmokeError, "missing a required service"):
+                    self.await_local(paper_only=True)
+                self.services[name] = service
+        self.services["finance-collector"]["live"] = 503
+        with self.assertRaisesRegex(check.SmokeError, "finance-collector=.*live=503"):
+            self.await_local(paper_only=True)
+        self.services["finance-collector"].update(live=200, ready=500)
+        with self.assertRaisesRegex(check.SmokeError, "finance-collector=.*ready=500"):
+            self.await_local(paper_only=True)
+
+    def exercise_cli(self, *args, detail_state="recovering"):
+        summary = {**check.JOB, "generated_at": check.JOB["end"], "run_id": "fixture", "total_orders": 0,
+                   "total_positions": 0, "pnl": "0.00", "currency": "USD"}
+        responses = {
+            "/healthz/live": {"status": "ok"},
+            "/healthz/ready": {"status": "ready", "checks": [{"ok": True}]},
+            "/api/v1/system/status": {
+                "web": {"version": "0.0.0", "commit": "c" * 40},
+                "database": {"ok": True}, "finance": {"ok": True, "circuit": "closed"},
+                "market": {"source": "ib", "state": "recovering", "fresh": False, "instrument_count": 1, "stale_count": 1},
+            },
+            "/api/v1/market/status": {"source": "ib", "state": detail_state, "instruments": [
+                {"instrument": "SPY.ARCA", "age_seconds": None, "last_bar_at": None, "stale": True},
+            ]},
+            "/api/v1/backtests/sample": summary,
+            "/api/v1/backtests": {"id": 5},
+            "/api/v1/backtests/5": {"id": 5, "request": check.JOB, "status": "succeeded", "summary": summary},
+        }
+        assets = {"/": ("text/html", b'<script type="module" src="/a.js"></script><link rel="stylesheet" href="/a.css">'),
+                  "/a.js": ("text/javascript", b"export default 1"), "/a.css": ("text/css", b"body{}")}
+        requests = []
+        version = (Path(__file__).resolve().parents[1] / "VERSION").read_text().strip()
+
+        def respond(request, *, timeout):
+            self.assertEqual(request.get_header("User-agent"), f"fertile-e2e-smoke/{version}")
+            requests.append((request.host, request.selector, request.get_method()))
+            if request.selector in assets:
+                media, body = assets[request.selector]
+            else:
+                media, body = "application/json", json.dumps(responses[request.selector]).encode()
+            response = io.BytesIO(body)
+            response.status = 202 if request.get_method() == "POST" else 200
+            response.headers = Message()
+            response.headers["Content-Type"] = media
+            return response
+
+        with patch.object(sys, "argv", [check.__file__, *args]), \
+             patch.object(check.subprocess, "check_output", return_value=self.snapshot()) as status, \
+             patch.object(check, "token_from", return_value="fixture"), \
+             patch.object(check, "build_opener") as build_opener:
+            build_opener.return_value.open.side_effect = respond
+            check.main()
+            if args[0] == "public":
+                status.assert_not_called()
+        return requests
+
+    def test_paper_local_and_public_run_the_full_smoke_with_user_agent(self):
+        for args, host in ((["local"], "127.0.0.1:8090"), (["public", check.PUBLIC_ORIGIN], "fertile.viramoon.com")):
+            with self.subTest(args=args):
+                requests = self.exercise_cli(*args, "--paper-only")
+                self.assertIn((host, "/api/v1/backtests", "POST"), requests)
+                self.assertIn((host, "/a.js", "GET"), requests)
+                self.assertIn((host, "/a.css", "GET"), requests)
+
+    def test_strict_http_rejects_recovery_and_paper_rejects_disagreement(self):
+        with self.assertRaisesRegex(check.SmokeError, "unhealthy system market summary"):
+            self.exercise_cli("public", check.PUBLIC_ORIGIN)
+        with self.assertRaisesRegex(check.SmokeError, "inconsistent recovering market status"):
+            self.exercise_cli("public", check.PUBLIC_ORIGIN, "--paper-only", detail_state="degraded")
 
 
 if __name__ == "__main__":

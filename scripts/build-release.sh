@@ -86,7 +86,7 @@ build_payload() {
   ln -s -- "$vendor_cache" "$finance/$vendor"
 
   mkdir -p "$output"/{bin,static,web,finance,runtime,fertile}
-  git -C "$repo" archive "$sha" scripts deploy | tar -x -C "$output/fertile"
+  git -C "$repo" archive "$sha" scripts deploy VERSION | tar -x -C "$output/fertile"
   # shellcheck source=/dev/null
   source "$output/fertile/deploy/toolchain.env"
   [[ $vendor_sha == "$NAUTILUS_COMMIT" && $(node --version) == "v$NODE_VERSION" && $(pnpm --version) == "$PNPM_VERSION" ]]

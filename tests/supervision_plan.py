@@ -1,16 +1,38 @@
 """Check the release/secret boundary without touching any persistent box files."""
+import configparser
+from contextlib import redirect_stdout
+from email.message import Message
 import importlib.util
+from io import BytesIO, StringIO
 import json
 import os
 from pathlib import Path
+import shlex
+import subprocess
 from tempfile import TemporaryDirectory
 import sys
 import sqlite3
 import unittest
 from unittest.mock import Mock, patch
+from urllib.request import AbstractHTTPHandler
+from urllib.response import addinfourl
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import supervision as ctl
+import supervisor_drill as drill
+
+
+PUBLIC_PROBE = "https://fertile.viramoon.com/healthz/live"
+LOCAL_PROBE = "http://127.0.0.1:8081/healthz/live"
+
+
+def probe_response(url, location=None):
+    headers = Message()
+    if location:
+        headers["Location"] = location
+    response = addinfourl(BytesIO(), headers, url, 302 if location else 200)
+    response.msg = "Found" if location else "OK"
+    return response
 
 
 class RuntimePlan(unittest.TestCase):
@@ -35,6 +57,45 @@ class RuntimePlan(unittest.TestCase):
     def write(self, **extras):
         svc = {"name": "test", "directory": str(self.root), "command": ["/bin/true"], **extras}
         self.manifest.write_text(json.dumps({"services": [svc]}))
+
+    def assert_probe(self, transport, url, agent):
+        self.assertEqual(transport.call_count, 1, "the probe must contact only the configured URL")
+        request = transport.call_args.args[1]
+        self.assertEqual(request.full_url, url)
+        version = Path(__file__).resolve().parents[1].joinpath("VERSION").read_text().strip()
+        self.assertEqual(request.get_header("User-agent"), f"{agent}/{version}")
+
+    def status_probe(self, url, responses):
+        self.write(live=url)
+        output = StringIO()
+        with (patch.object(sys, "argv", ["fertile", "status", "--json"]), redirect_stdout(output),
+              patch.object(ctl, "daemon_pid", return_value=0),
+              patch.object(AbstractHTTPHandler, "do_open", side_effect=responses) as transport):
+            ctl.main()
+        return json.loads(output.getvalue())["services"]["test"]["live"], transport
+
+    def test_status_public_probe_uses_versioned_user_agent(self):
+        code, transport = self.status_probe(PUBLIC_PROBE, [probe_response(PUBLIC_PROBE)])
+        self.assertEqual(code, 200)
+        self.assert_probe(transport, PUBLIC_PROBE, "fertile-supervision")
+
+    def test_status_reports_redirect_without_contacting_public_target(self):
+        responses = [probe_response(LOCAL_PROBE, PUBLIC_PROBE), probe_response(PUBLIC_PROBE)]
+        code, transport = self.status_probe(LOCAL_PROBE, responses)
+        self.assertEqual(code, 302)
+        self.assert_probe(transport, LOCAL_PROBE, "fertile-supervision")
+
+    def test_drill_probe_rejects_redirect_without_contacting_public_target(self):
+        api = {"live_url": LOCAL_PROBE, "live": 200, "pid": 12}
+        responses = [probe_response(LOCAL_PROBE, PUBLIC_PROBE), probe_response(PUBLIC_PROBE)]
+        with (patch.object(drill, "running_initial", return_value=(10, {"finance-api": api}, {})),
+              patch.object(drill, "identity", side_effect=[10, 12]), patch.object(drill, "os"),
+              patch.object(drill.signal, "pidfd_send_signal"), patch.object(drill, "report"),
+              patch.object(drill, "wait_status", return_value={"services": {"finance-api": {"pid": 13}}}),
+              patch.object(AbstractHTTPHandler, "do_open", side_effect=responses) as transport):
+            with self.assertRaisesRegex(RuntimeError, "independent live GET returned HTTP 302"):
+                drill.chaos()
+        self.assert_probe(transport, LOCAL_PROBE, "fertile-supervisor-drill")
 
     def test_secret_referenced_by_name_and_validated_at_use(self):
         self.write(env_file="test.env")
@@ -85,6 +146,36 @@ class RuntimePlan(unittest.TestCase):
         config.write_text("FERTILE_MARKET_SOURCE=live\n")
         with self.assertRaisesRegex(ValueError, "unsupported"):
             ctl.build_plan()
+
+    def test_rendered_launcher_runs_without_version_in_runtime_directory(self):
+        self.write(command=["/bin/echo", "launcher reached fixture"])
+        ctl.render(ctl.build_plan())
+        config = configparser.RawConfigParser()
+        config.read(self.run / "programs.conf")
+        command = shlex.split(config["program:test"]["command"])
+        self.assertFalse((self.run / "VERSION").exists())
+        result = subprocess.run(command, cwd=self.root, capture_output=True, text=True, timeout=5,
+                                env={**os.environ, "FERTILE_ROOT": str(self.root), "PYTHONDONTWRITEBYTECODE": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "launcher reached fixture\n")
+
+    def test_data_root_command_matches_service_plan_and_honors_overrides(self):
+        self.write()
+        config = self.root / "config/runtime.env"
+        paper = self.root / "data-paper"
+        override = self.root / "data-override"
+        cases = (("", {}, self.root / "data"),
+                 ("FERTILE_MARKET_SOURCE=replay\n", {}, self.root / "data/replay"),
+                 (f'FERTILE_DATA_ROOT="{paper}"\n', {}, paper),
+                 (f"FERTILE_DATA_ROOT={paper}\n", {"FERTILE_DATA_ROOT": str(override)}, override))
+        for contents, env, expected in cases:
+            with self.subTest(expected=expected), patch.dict(os.environ, env):
+                config.write_text(contents)
+                output = StringIO()
+                with patch.object(sys, "argv", ["fertile", "data-root"]), redirect_stdout(output):
+                    ctl.main()
+                self.assertEqual(output.getvalue(), f"{expected}\n")
+                self.assertEqual(ctl.build_plan()["data"], str(expected))
 
     def test_8080_reserved_and_research_paths_are_owned(self):
         self.write(name="web")
