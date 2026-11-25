@@ -34,3 +34,11 @@ finance 的 rust-toolchain.toml、.python-version、.uv-version、toolchain.env 
 finance CI 从上游源码构建 wheel，缓存以 source commit + 工具链 / lock / 构建脚本为依据，并运行上游离线最小示例。缓存只能加速，不能跳过来源校验与回测。部署与 CI 相互独立：CI 不访问 IBKR 账户、不登录 Gateway、不执行生产迁移。密钥与配置见 [configuration.md](configuration.md)，Gateway 方案见 [ibkr-gateway.md](ibkr-gateway.md)。
 
 总仓 Actions 先使用内置令牌检出 fertile。管理员在 fertile 的 Settings → Secrets and variables → Actions 新增仓库级 FERTILE_SUBMODULES_TOKEN，选择能够读取 finance、web、frontend 的细粒度凭据，三个仓库仅授予 Contents: Read 并按所属组织规则审批。重跑集成作业。诊断依次检查 secret 配置、仓库可读性和锁定提交可达性；Nautilus 源码来自公开上游。验证远端祖先、从源构建三组件、重导出两份契约及重跑两个客户端生成器后，在专用运行根启动 PostgreSQL、回放行情、finance 与 web，执行真实队列和页面冒烟。备份恢复、Gateway 离线保护、巡检与 supervisor 各自有独立作业；这些作业只需读取总仓。
+
+### 总仓集成作业的 Nautilus wheel 缓存
+
+[集成工作流](../.github/workflows/integration.yml) 先完成锁定工具链的安装和校验，再按精确 key 恢复 `$FINANCE_BUILD_ROOT/wheels`。该目录含源码构建的 wheel、`SHA256SUMS` 和 `source-commit`。key 将 finance gitlink（含构建脚本、锁文件、Nautilus gitlink）与总仓工具链配置、bootstrap 与发布构建脚本、工作流、runner 镜像版本、系统库版本绑定，并包含构建模式、精度、架构、Rust 和 Clang 版本输出及 Python SOABI。命中后，finance 仍按冻结锁文件同步环境，校验 wheel 的 SHA256 与源码提交，重新安装并导入原生扩展。发布构建也会验证 wheel 与发布目录。
+
+CI 在 bootstrap 后清理安装归档与 PostgreSQL 源码。构建成功后清理 Nautilus 专用的 Cargo 产物和源码工作树，记录缓存目录大小及 `df -h`，随后在契约比对和部署演练前保存本次新生成的 wheel。finance、web 二进制和前端仍按各自锁文件构建，契约重导出会复用同一作业的总仓 Cargo 目录。
+
+验证缓存时，先等首次作业的保存步骤记录成功和归档大小，再对同一个 PR 的同一提交重跑。用 `NATIVE_WHEEL_CACHE_HIT=true` 确认 Actions 恢复，用 `BUILD_CACHE_HIT=true` 确认 finance 复用，并对比 `BUILD_SECONDS`、`BOOTSTRAP_SECONDS` 和 `RELEASE_BUILD_SECONDS`。PR 写入的缓存属于该 PR 的合并引用。PR 也可以恢复默认分支和该 PR 基准分支的匹配条目。runner 镜像或锁定输入变更会生成新的 key。

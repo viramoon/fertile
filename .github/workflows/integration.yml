@@ -13,6 +13,8 @@ jobs:
   integration:
     runs-on: ubuntu-24.04
     timeout-minutes: 220
+    env:
+      BUILD_MODE: ci-pr
     steps:
       - name: Check out the fertile candidate
         uses: actions/checkout@v4
@@ -73,22 +75,70 @@ jobs:
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
           echo "FERTILE_BOX_HOME=$RUNNER_TEMP/box" >> "$GITHUB_ENV"
           echo "FERTILE_ROOT=$RUNNER_TEMP/box/fertile" >> "$GITHUB_ENV"
+          echo "FINANCE_BUILD_ROOT=$RUNNER_TEMP/box/fertile/cache/finance" >> "$GITHUB_ENV"
           echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
           echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
           df -h "$RUNNER_TEMP"
-      - name: Cache the pinned native build and system tools
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ runner.temp }}/box/fertile/cache/finance/wheels
-            ${{ runner.temp }}/box/fertile/cache/downloads
-          key: fertile-native-v1-${{ runner.arch }}-${{ hashFiles('deploy/toolchain.env','finance/toolchain.env','finance/uv.lock','finance/scripts/build.sh') }}
-      - name: Install the locked box environment and build the three components
+      - name: Install the locked box environment
         run: |
+          start=$SECONDS
           scripts/bootstrap-box.sh
           source "$FERTILE_ROOT/env.sh"
           rustup component add rustfmt
+          printf 'BOOTSTRAP_SECONDS=%s\n' "$((SECONDS-start))"
+          du -sh "$FERTILE_ROOT/cache/downloads" "$FERTILE_ROOT/cache/sources"
+          rm -rf -- "$FERTILE_ROOT/cache/downloads" "$FERTILE_ROOT/cache/sources"
+          df -h "$RUNNER_TEMP"
+      - name: Compute the Nautilus wheel cache key
+        id: wheel-key
+        shell: bash
+        run: |
+          source "$FERTILE_ROOT/env.sh"
+          {
+            # Finance fixes HIGH_PRECISION=true and uses BUILD_MODE in its wheel key.
+            printf '%s\n' "$RUNNER_OS" "$RUNNER_ARCH" "$ImageOS" "$ImageVersion" "$BUILD_MODE" true
+            # The gitlink binds the finance tree, including its locks and the Nautilus source pin.
+            git rev-parse HEAD:finance
+            sha256sum deploy/toolchain.env scripts/bootstrap-box.sh scripts/build-release.sh .github/workflows/integration.yml
+            cd finance
+            unset RUSTUP_TOOLCHAIN
+            uname -m
+            rustc -Vv
+            clang --version
+            python3 -c 'import sysconfig; print(sysconfig.get_config_var("SOABI"))'
+            dpkg-query --showformat='${Package}=${Version}\n' --show libc6 libc6-dev libssl-dev zlib1g-dev
+          } | sha256sum | awk '{print "key=fertile-native-wheel-v2-" $1}' >> "$GITHUB_OUTPUT"
+      - name: Restore the pinned Nautilus wheel
+        id: restore-wheel
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.FINANCE_BUILD_ROOT }}/wheels
+          key: ${{ steps.wheel-key.outputs.key }}
+      - name: Build the three components
+        env:
+          NATIVE_WHEEL_CACHE_HIT: ${{ steps.restore-wheel.outputs.cache-hit }}
+        run: |
+          source "$FERTILE_ROOT/env.sh"
+          printf 'NATIVE_WHEEL_CACHE_HIT=%s\n' "${NATIVE_WHEEL_CACHE_HIT:-false}"
+          start=$SECONDS
           scripts/fertile build --ref "$GITHUB_SHA"
+          printf 'RELEASE_BUILD_SECONDS=%s\n' "$((SECONDS-start))"
+      - name: Reclaim runner space for the wheel cache archive
+        run: |
+          df -h "$RUNNER_TEMP"
+          du -sh "$FINANCE_BUILD_ROOT/wheels"
+          # The separate release Cargo target is reused by contract export below.
+          for directory in "$FINANCE_BUILD_ROOT/cargo-target" "$FINANCE_BUILD_ROOT/sources"; do
+            if [[ -d "$directory" ]]; then du -sh "$directory"; fi
+          done
+          rm -rf -- "$FINANCE_BUILD_ROOT/cargo-target" "$FINANCE_BUILD_ROOT/sources"
+          df -h "$RUNNER_TEMP"
+      - name: Save the verified Nautilus wheel
+        if: steps.restore-wheel.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.FINANCE_BUILD_ROOT }}/wheels
+          key: ${{ steps.wheel-key.outputs.key }}
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
