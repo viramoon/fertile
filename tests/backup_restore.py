@@ -14,14 +14,28 @@ from contextlib import closing
 from datetime import date, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import patch
 
-import pyarrow as pa
-import pyarrow.parquet as parquet
+try:
+    import pyarrow as pa
+    import pyarrow.parquet as parquet
+except ModuleNotFoundError as error:
+    if error.name not in {"pyarrow", "pyarrow.parquet"}:
+        raise
+    pa = parquet = None
 
 REPO = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("backup", REPO / "scripts/backup.py")
 backup = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(backup)
+PG_TOOLS = ("initdb", "pg_ctl", "postgres", "psql", "createdb", "dropdb", "pg_dump", "pg_restore")
+MISSING_PG = [name for name in PG_TOOLS if shutil.which(name) is None]
+RESTORE = REPO / "scripts/restore.sh"
+
+
+def write_checksums(snapshot):
+    (snapshot / "SHA256SUMS").write_text("".join(
+        f"{backup.digest(snapshot / path)}  {path}\n" for path in sorted(backup.members(snapshot))))
 
 
 class Snapshots(unittest.TestCase):
@@ -29,6 +43,60 @@ class Snapshots(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+
+    def test_explicit_targets_and_dry_run_offline(self):
+        root = self.root / "box"
+        live = root / "data"
+        live.mkdir(parents=True)
+        (live / "active").write_text("new version")
+        snapshot = self.root / "snapshot"
+        for tree in backup.BASE_TREES:
+            (snapshot / tree).mkdir(parents=True)
+        payload = snapshot / "config/runtime.env"
+        payload.write_text("FERTILE_MARKET_SOURCE=ib\n")
+        (snapshot / "snapshot.json").write_text(json.dumps({
+            "format": 1, "source": "ib", "database": "web", "has_database": False,
+            "trees": dict.fromkeys(backup.BASE_TREES, True),
+        }))
+        write_checksums(snapshot)
+        target = root / "isolated"
+        env = {"PATH": os.environ["PATH"], "FERTILE_ROOT": str(root), "PGDATABASE": "postgres"}
+
+        def run(*args):
+            return subprocess.run([RESTORE, snapshot, *args], env=env, capture_output=True, text=True, timeout=10)
+
+        flags = ("--target-data-root", target, "--target-database", "isolated_web")
+        for args in ((), flags[:2], flags[2:], ("--dry-run", *flags[:2])):
+            result = run(*args)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("specify both --target-data-root and --target-database", result.stderr)
+        result = run("--dry-run", *flags)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SHA256 verified", result.stdout)
+        self.assertIn("target_database=isolated_web", result.stdout)
+        self.assertIn("SHA256 verified", run("--dry-run").stdout)
+        for path in (root, root / "config", live / "nested"):
+            result = run("--dry-run", "--target-data-root", path, *flags[2:])
+            self.assertNotEqual(result.returncode, 0)
+        payload.write_text("corrupted")
+        result = run("--dry-run", *flags)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SHA256SUMS mismatch", result.stderr)
+        self.assertFalse(target.exists())
+        self.assertFalse((root / "run").exists())
+        self.assertFalse((root / "config").exists())
+        self.assertEqual((live / "active").read_text(), "new version")
+
+    def test_archive_manifest_and_format_checked_before_mapping(self):
+        box = SimpleNamespace(source="ib", db="mapped", data=self.root, trees={})
+        metadata = dict(source="ib", database="original", has_database=True)
+        with patch.object(backup, "verify", return_value=metadata):
+            box.command = lambda *_: ";     dbname: original\n;     Format: TAR"
+            with self.assertRaisesRegex(ValueError, "custom PostgreSQL archive"):
+                backup.verify_restore(box, self.root / "snapshot", None)
+            box.command = lambda *_: ";     dbname: mapped\n;     Format: CUSTOM"
+            with self.assertRaisesRegex(ValueError, "archive database differs from snapshot manifest"):
+                backup.verify_restore(box, self.root / "snapshot", None)
 
     def test_daily_weekly_retention(self):
         last = date(2026, 11, 22)
@@ -50,6 +118,106 @@ class Snapshots(unittest.TestCase):
         self.assertTrue(unrelated.exists())
         print(f"Retention: {len(snapshots)} snapshots -> {len(keep)}, 7 days + 4 ISO weeks; unrelated dir intact")
 
+    @unittest.skipIf(MISSING_PG, "PostgreSQL tools missing: " + ", ".join(MISSING_PG))
+    def test_restore_to_independent_targets(self):
+        root = self.root / "box"
+        live = root / "data-paper"
+        state = live / "finance-state"
+        socket = root / "run/postgres"
+        for path in (state, socket, root / "config"):
+            path.mkdir(parents=True)
+        cfg = root / "config/runtime.env"
+        cfg.write_text(f"FERTILE_DATA_ROOT={live}\nFERTILE_WEB_DATABASE=source_web\nFERTILE_POSTGRES_PORT=55462\n")
+        pgdata = self.root / "pgdata"
+        env = {"PATH": os.environ["PATH"], "FERTILE_ROOT": str(root),
+               "PGHOST": str(socket), "PGPORT": "55462", "PGUSER": "drill"}
+
+        def run(*args, check=True, overrides=None):
+            result = subprocess.run(args, env={**env, **(overrides or {})}, text=True, capture_output=True, timeout=40)
+            if check:
+                self.assertEqual(result.returncode, 0, f"{args}: {result.stdout}\n{result.stderr}")
+            return result
+
+        def sql(database, statement):
+            return run("psql", "-XAt", "-v", "ON_ERROR_STOP=1", "-d", database, "-c", statement).stdout.strip()
+
+        run("initdb", "--auth-local=trust", "--auth-host=reject", "--no-locale", "--encoding=UTF8",
+            "--no-sync", "--username=drill", "-D", pgdata)
+        run("pg_ctl", "-D", pgdata, "-l", self.root / "pg.log", "-w", "start",
+            "-o", f"-h '' -k '{socket}' -p 55462")
+        self.addCleanup(run, "pg_ctl", "-D", pgdata, "-m", "immediate", "-w", "stop", check=False)
+        self.assertEqual(Path(sql("postgres", "SHOW data_directory")).resolve(), pgdata.resolve())
+        run("createdb", "source_web")
+        sql("source_web", "CREATE ROLE drill_reader; CREATE SCHEMA app; CREATE TABLE app.jobs (version text); "
+            "INSERT INTO app.jobs VALUES ('before'); GRANT SELECT ON app.jobs TO drill_reader;")
+        marker = state / "version"
+        marker.write_text("before")
+        snapshot = Path(run(REPO / "scripts/backup.sh").stdout.strip())
+        marker.write_text("after")
+        sql("source_web", "UPDATE app.jobs SET version='after'")
+        cfg.write_text(cfg.read_text() + "# Newer runtime settings\n")
+        expected_config = cfg.read_bytes()
+        target = root / "data-rollback"
+        flags = ("--target-data-root", target, "--target-database", "restored_web")
+        exists = "SELECT EXISTS (SELECT FROM pg_database WHERE datname='restored_web')"
+        query = "SELECT version, has_table_privilege('drill_reader','app.jobs','SELECT') FROM app.jobs"
+
+        dry = run(RESTORE, snapshot, "--dry-run", *flags)
+        self.assertIn("SHA256 verified", dry.stdout)
+        self.assertIn("database=source_web", dry.stdout)
+        self.assertIn("target_database=restored_web", dry.stdout)
+        self.assertFalse(target.exists())
+        self.assertEqual(sql("postgres", exists), "f")
+        self.assertFalse((root / "run/restore-journal.json").exists())
+
+        target.mkdir()
+        blocker = target / "unexpected-file"
+        blocker.write_text("keep")
+        refused = run(RESTORE, snapshot, *flags, check=False)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("non-empty restore directory", refused.stderr)
+        self.assertEqual(blocker.read_text(), "keep")
+        self.assertEqual(sql("postgres", exists), "f")
+        blocker.unlink()
+        run(RESTORE, snapshot, *flags)
+        self.assertEqual((target / "finance-state/version").read_text(), "before")
+        self.assertEqual(sql("restored_web", query), "before|t")
+
+        empty_root = root / "another-rollback"
+        refused = run(RESTORE, snapshot, "--target-data-root", empty_root, *flags[2:], check=False)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("non-empty target database", refused.stderr)
+        self.assertFalse(empty_root.exists())
+        run("createdb", "empty_web")
+        run(RESTORE, snapshot, "--target-data-root", empty_root, "--target-database", "empty_web")
+        self.assertEqual(sql("empty_web", query), "before|t")
+        self.assertEqual((empty_root / "finance-state/version").read_text(), "before")
+
+        (target / "finance-state/version").write_text("replace this target")
+        sql("restored_web", "UPDATE app.jobs SET version='replace this target'")
+        shim_dir = self.root / "commands"
+        shim_dir.mkdir()
+        shim = shim_dir / "pg_restore"
+        shim.write_text('#!/bin/sh\nif test "$1" = --exit-on-error; then exit 75; fi\nexec "$REAL_RESTORE" "$@"\n')
+        shim.chmod(0o700)
+        failed = run(RESTORE, snapshot, *flags, "--overwrite", check=False,
+                     overrides={"PATH": f"{shim_dir}:{env['PATH']}", "REAL_RESTORE": shutil.which("pg_restore")})
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("75", failed.stderr)
+        self.assertEqual(sql("restored_web", query), "replace this target|t")
+        self.assertEqual((target / "finance-state/version").read_text(), "replace this target")
+        self.assertFalse((root / "run/restore-journal.json").exists())
+
+        run(RESTORE, snapshot, *flags, "--overwrite")
+        self.assertEqual((target / "finance-state/version").read_text(), "before")
+        self.assertEqual(sql("restored_web", query), "before|t")
+        self.assertEqual(marker.read_text(), "after")
+        self.assertEqual(sql("source_web", query), "after|t")
+        self.assertEqual(cfg.read_bytes(), expected_config)
+        self.assertFalse((target / "config").exists())
+
+    @unittest.skipIf(MISSING_PG, "PostgreSQL tools missing: " + ", ".join(MISSING_PG))
+    @unittest.skipIf(pa is None, "PyArrow missing for the Parquet recovery drill")
     def test_restore(self):
         root = self.root / "box"
         data = root / "data/replay"
@@ -92,6 +260,8 @@ class Snapshots(unittest.TestCase):
         env.update(FERTILE_ROOT=str(root), PGHOST=str(socket), PGPORT="55461", PGDATABASE="web_drill", PGUSER="drill")
         for name in ["FERTILE_DATA_ROOT", "FERTILE_RESEARCH_ROOT", "FERTILE_MARKET_SOURCE", "FERTILE_BACKUP_REMOTE", "PGSERVICE"]:
             env.pop(name, None)
+        targets = ("--target-data-root", data, "--target-database", "web_drill",
+                   "--target-research-root", research, "--overwrite")
 
         def run(*args, check=True):
             result = subprocess.run(args, env=env, text=True, stdout=subprocess.PIPE,
@@ -151,7 +321,7 @@ class Snapshots(unittest.TestCase):
         broken = self.root / "broken"
         shutil.copytree(snapshot, broken)
         (broken / "config/runtime.env").write_text("corrupted")
-        refused = run(REPO / "scripts/restore.sh", broken, check=False)
+        refused = run(REPO / "scripts/restore.sh", broken, *targets, check=False)
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn("SHA256SUMS mismatch", refused.stderr)
         self.assertEqual(sql(query), expected)
@@ -160,7 +330,7 @@ class Snapshots(unittest.TestCase):
         shutil.rmtree(state)
         shutil.rmtree(catalog)
         shutil.rmtree(research)
-        result = run(REPO / "scripts/restore.sh", snapshot)
+        result = run(REPO / "scripts/restore.sh", snapshot, *targets)
         self.assertIn("Before-restore snapshot:", result.stdout)
         self.assertEqual(sql(query), expected)
         self.assertEqual(parquet.read_table(catalog / rel), table)
@@ -184,7 +354,7 @@ class Snapshots(unittest.TestCase):
         shim.chmod(0o700)
         interrupted_env = dict(env, PATH=str(guard_dir) + ":" + env["PATH"], DRILL_GATE=str(gate),
                                REAL_RESTORE=shutil.which("pg_restore"))
-        with subprocess.Popen([REPO / "scripts/restore.sh", snapshot], start_new_session=True,
+        with subprocess.Popen([REPO / "scripts/restore.sh", snapshot, *targets], start_new_session=True,
                               env=interrupted_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as restore:
             try:
                 deadline = time.monotonic() + 20
@@ -198,7 +368,7 @@ class Snapshots(unittest.TestCase):
                     os.killpg(restore.pid, signal.SIGKILL)
                 restore.wait()
             self.assertEqual(restore.returncode, -signal.SIGKILL)
-        result = run(REPO / "scripts/restore.sh", snapshot)
+        result = run(REPO / "scripts/restore.sh", snapshot, *targets)
         self.assertIn("Interrupted restore reconciled.", result.stdout)
         self.assertFalse((root / "run/restore-journal.json").exists())
         self.assertEqual(sql("SELECT to_regclass('app.post_restore_only') IS NULL"), "t")
@@ -217,10 +387,10 @@ class Snapshots(unittest.TestCase):
         manifest.write_text(json.dumps(meta_without_research))
         (legacy / "SHA256SUMS").write_text("".join(
             f"{backup.digest(legacy / path)}  {path}\n" for path in sorted(backup.members(legacy))))
-        run(REPO / "scripts/restore.sh", legacy)
+        run(REPO / "scripts/restore.sh", legacy, *targets)
         self.assertEqual(parquet.read_table(research / research_rel), table)
         self.assertTrue(dataset.exists())
-        print(run("pg_config", "--version").stdout.strip())
+        print(run("postgres", "--version").stdout.strip())
         print(result.stdout.strip())
         print(expected)
         print("Checksum mismatch refused before writes; restore twice, secrets unchanged; "

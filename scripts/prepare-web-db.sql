@@ -26,8 +26,13 @@ BEGIN
     END IF;
 END
 $provision$;
-SELECT 'CREATE DATABASE web' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'web') \gexec
-\connect web
+\if :{?web_database}
+\else
+\set web_database web
+\endif
+SELECT format('CREATE DATABASE %I', :'web_database')
+ WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = :'web_database') \gexec
+\connect :web_database
 BEGIN;
 DO $bootstrap$
 DECLARE
@@ -80,7 +85,7 @@ BEGIN
     END IF;
 END
 $bootstrap$;
-GRANT CONNECT ON DATABASE web TO fertile_web;
+GRANT CONNECT ON DATABASE :"web_database" TO fertile_web;
 -- Explicit primary schema also covers clusters where the default search path was customized.
-ALTER ROLE fertile_web IN DATABASE web SET search_path TO fertile_web, public;
+ALTER ROLE fertile_web IN DATABASE :"web_database" SET search_path TO fertile_web, public;
 COMMIT;

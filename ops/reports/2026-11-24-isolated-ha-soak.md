@@ -112,7 +112,7 @@ python3 "$soak_root/current/fertile/scripts/soak_report.py" \
 
 ## 备份核验与前序演练
 
-- 窗前 `2026-11-23T05:04:21.429Z` 巡检报告尚无完整备份。启动阶段的快照 `20261123T050438.714866Z` 随后落盘并通过 `scripts/restore.sh --dry-run`，在窗口起点 `2026-11-23T05:04:51.397Z` 观测到恢复。两个观测点相隔 29.968 秒。
+- 窗前 `2026-11-23T05:04:21.429Z` 巡检报告尚无完整备份。启动阶段的快照 `20261123T050438.714866Z` 随后落盘并通过 `scripts/restore.sh "$FERTILE_ROOT/backups/20261123T050438.714866Z" --dry-run` 校验，在窗口起点 `2026-11-23T05:04:51.397Z` 观测到恢复。两个观测点相隔 29.968 秒。
 - 窗内的 `logs/healthwatch/backup.log` 记录了 `20261124T030023.938563Z` 快照，源为 replay，数据库为 web。对启动快照与该窗口内快照分别执行 `sha256sum --strict --check --quiet SHA256SUMS`，两次均退出 0，分别验证 18 和 1,334 项。清单包含 PostgreSQL 归档、作业 SQLite 和行情、研究目录。
 - 更早的 `e9f25ad` 隔离候选另做了真实 PostgreSQL 17.12、SQLite、Parquet 备份恢复，以及协议夹具断网回补。其过程和较早隔离阶段记录的告警保留在原交付记录。本报告的窗口统计全部来自上文标记的 `afc4a5c` ReplaySource 实例。[历史回测与恢复演练](2026-11-23-historical-backtest.md) · [PR 中的早期磁盘告警](https://github.com/viramoon/fertile/pull/12)
 

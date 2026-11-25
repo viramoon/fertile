@@ -28,6 +28,8 @@ case "${1:-}" in
     mkdir -p "$socket"; chmod 700 "$socket"
     extra=()
     if [[ ${FERTILE_WEB_PEER:-0} == 1 ]]; then
+      database=${FERTILE_WEB_DATABASE:-web}
+      [[ "$database" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,62}$ && "$database" != postgres && "$database" != template0 && "$database" != template1 ]] || exit 2
       # Keep the cluster's real authentication files untouched. PG17 supports include in both.
       umask 077
       for setting in hba ident; do
@@ -36,7 +38,7 @@ case "${1:-}" in
         [[ -f "$original" && "$original" != *$'\n'* && "$original" != *'"'* && "$original" != *\\* ]] || exit 2
         generated=$(mktemp "$socket/.${setting}-XXXXXXXX")
         if [[ $setting == hba ]]; then
-          printf '%s\n' 'local web fertile_web peer map=fertile_managed_web' 'local all fertile_web reject' > "$generated"
+          printf 'local "%s" fertile_web peer map=fertile_managed_web\nlocal all fertile_web reject\n' "$database" > "$generated"
         else
           user=$(id -un)
           [[ $user =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$ ]] || exit 2

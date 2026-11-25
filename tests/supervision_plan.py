@@ -209,6 +209,63 @@ class RuntimePlan(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "fertile data/research"):
                     ctl.build_plan()
 
+    def test_controller_routes_a_legacy_release_to_restored_local_targets(self):
+        release = self.root / "releases" / ("a" * 40)
+        deployment = release / "fertile/deploy"
+        deployment.mkdir(parents=True)
+        (release / "fertile/scripts").mkdir()
+        (release / "fertile/scripts/prepare-web-db.sql").touch()
+        (self.root / "current").symlink_to(release)
+        (deployment / "services.yaml").write_text(json.dumps({"services": [
+            {"name": "postgres", "command": ["${release}/fertile/scripts/postgres.sh", "foreground"]},
+            {"name": "web", "command": ["${release}/bin/web"]},
+            {"name": "healthwatch", "command": ["${release}/fertile/scripts/healthwatch"]},
+        ]}))
+        data = self.root / "restored"
+        env = {"PATH": os.defpath, "FERTILE_DATA_ROOT": str(data), "FERTILE_WEB_DATABASE": "web_rollback",
+               "FERTILE_RESEARCH_ROOT": str(data / "research")}
+        with patch.dict(os.environ, env, clear=True), patch.object(ctl.shutil, "which", return_value="/bin/true"):
+            plan = ctl.build_plan()
+        pg, web, healthwatch = (plan["services"][name] for name in ("postgres", "web", "healthwatch"))
+        self.assertEqual(pg["command"], [str(ctl.SCRIPTS / "postgres.sh"), "foreground"])
+        self.assertEqual(pg["env"]["FERTILE_WEB_PEER"], "1")
+        self.assertEqual(web["command"], [str(release / "bin/web")])
+        self.assertIn("fertile_web@localhost/web_rollback?", web["env"]["DATABASE_URL"])
+        self.assertEqual(healthwatch["command"], [str(ctl.SCRIPTS / "healthwatch")])
+        self.assertEqual(healthwatch["env"]["FERTILE_RESEARCH_ROOT"], str(data / "research"))
+        self.assertEqual(healthwatch["env"]["PGDATABASE"], "web_rollback")
+        with (patch.object(ctl.subprocess, "run", return_value=Mock(returncode=0)) as run,
+              patch.object(ctl.subprocess, "check_output", side_effect=["1\n", "f\n"])):
+            ctl.prepare_web(plan)
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertIn("web_database=web_rollback", commands[1])
+        self.assertEqual(commands[1][-1], ctl.SCRIPTS / "prepare-web-db.sql")
+        self.assertIn('REVOKE CREATE ON DATABASE "web_rollback" FROM fertile_web', commands[2])
+        self.assertEqual(commands[3], [release / "bin/web", "migrate"])
+
+    def test_switch_only_checks_the_release_and_keeps_services_stopped(self):
+        active, target = (self.root / "releases" / (char * 40) for char in ("a", "b"))
+        active.mkdir(parents=True)
+        (self.root / "current").symlink_to(active)
+        for item in ("fertile/scripts/fertile", "fertile/deploy/services.yaml", "bin/web", "bin/finance-api"):
+            file = target / item
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.touch()
+        components = dict.fromkeys(("finance", "web", "frontend"), "c" * 40)
+        (target / "manifest.json").write_text(json.dumps({"components": components}))
+        with (patch.object(ctl, "daemon_pid", return_value=0), patch.object(ctl, "ensure") as ensure,
+              patch.object(ctl, "build_plan", return_value={"default": True, "data": str(self.root / "restored")}),
+              patch.object(ctl.subprocess, "run") as verify):
+            ctl.rollback(target.name, switch_only=True)
+        self.assertEqual((self.root / "current").resolve(), target)
+        self.assertEqual(verify.call_args.args[0][2:5], ["verify", target, target.name])
+        ensure.assert_not_called()
+
+        with patch.object(ctl, "daemon_pid", return_value=42):
+            with self.assertRaisesRegex(RuntimeError, "stop supervisord"):
+                ctl.rollback(active.name, switch_only=True)
+        self.assertEqual((self.root / "current").resolve(), target)
+
     def test_database_audit_rebases_inherited_data_roots(self):
         spec = importlib.util.spec_from_file_location("web_database", Path(__file__).with_name("web-database.py"))
         database = importlib.util.module_from_spec(spec)
