@@ -111,6 +111,8 @@ tests/simulate-reboot.sh
 
 先生成示例回测，再用持久目录的 web 管理令牌运行冒烟。脚本检查系统分项、市场数据年龄、首页 JS/CSS，并实际提交一个幂等回测，直到取得带精确数值的成功摘要。公开入口只填写用户已确认、由其控制且确实路由到本机 web 的 HTTPS origin。
 
+首页必须至少声明一个同源 JavaScript 模块和一个同源样式表，并且所有同源候选资源都要通过 HTTP 状态、媒体类型和响应内容检查。脚本跳过 Cloudflare Insights 等跨域模块脚本和样式表，并写入 `event` 为 `skipped cross-origin asset` 的 JSON 日志，包含资源类型 `kind`（`js` 或 `css`）和主机名 `host`。
+
 ~~~sh
 tests/e2e-smoke.sh local
 tests/e2e-smoke.sh public https://fertile.viramoon.com
