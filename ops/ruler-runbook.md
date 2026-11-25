@@ -34,6 +34,20 @@ source "${FERTILE_ROOT:-${FERTILE_BOX_HOME:-/home/box}/fertile}/env.sh"
 curl -fsS http://127.0.0.1:8090/api/v1/backtests/sample
 ~~~
 
+## finance 7600be4 升级
+
+| 再部署项目 | 操作 |
+| --- | --- |
+| 新增服务环境变量 | 无。继续使用现有 `runtime.env` 和整栈工具链。 |
+| 新增必需数据 | 无。保留现有实时 catalog、回测队列和 `FERTILE_RESEARCH_ROOT` 下经审核的日线快照。 |
+| 必需数据迁移 | 无。finance 队列 schema 和 web SQLx 迁移文件未变。保留升级前的备份，再按集成版本部署 finance、web 和前端。 |
+
+部署后提交一个新的历史日线作业并核对成交审计。finance 与 web 的结果依序包含 `50y`、`10y`、`5y`、`longest_sample` 四个窗口，最长样本的 `requested_years` 为 `null`。有值的窗口绩效字段使用十进制字符串。旧 finance API 的字段类型无法读取新版写入的四窗口摘要。回滚到升级前版本时，暂停接单并保全升级后的队列，再为旧版选用兼容的独立数据根或恢复升级前的备份。
+
+如需使用公开历史研究数据，为人工命令设置原始文件目录 `FINANCE_HISTORY_ARCHIVE` 与 Yahoo 观测截止日 `FINANCE_YAHOO_AS_OF`，按手册保存经许可的 Yahoo、Ken French、FRED 原始文件，记录获取日期、来源和实际覆盖范围。给归档命令单独设置 `FERTILE_DATA_ROOT`，使用与在线采集及官方回测隔离的持久目录。公开历史版本保存在该数据根的 `catalog/historical`。fertile 的采集 catalog 备份会拒绝该归档中的 `current` 符号链接，因此请暂停归档写入，独立备份原始文件、`current` 和它指向的版本目录。[finance 手工归档步骤](https://github.com/viramoon/finance/blob/7600be468541d381cb9014ae7d01237f499c0db5/RUNBOOK.md#手工保存公开历史数据)
+
+有旧 SPY 固定 21:00 UTC 日线且要切换到新归档时，先用 XNYS 会话表核对标准时、夏令时和半日市，备份旧 catalog，并记录来源、日期区间和价格口径。再在独立数据根用经许可的源 OHLCV、调整收盘价和公司行为重新导入。核对覆盖区间、条数、会话收盘时间、源价精度、复权因子和公司行为之后，只切换研究读取路径，并保留旧数据供复现与回退。[finance SPY 迁移说明](https://github.com/viramoon/finance/blob/7600be468541d381cb9014ae7d01237f499c0db5/catalog/README.md#既有-spy-固定-2100-utc-数据)
+
 ## 导入历史日线
 
 选择经许可的原始 OHLCV，确认标的是 NYSE 上市的 USD 股票或 ETF，并核对区间内无拆股。价格使用美分、成交量使用整股，UTC 收盘时间由日历生成。生产不随包附带行情。将批准的 CSV 从独立路径导入，持久配置的 FERTILE_RESEARCH_ROOT 可选择 fertile 的 data/research 下的具体目录。默认命令如下。[finance 历史回测手册](https://github.com/viramoon/finance/blob/main/docs/historical-backtest.md)

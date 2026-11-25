@@ -364,8 +364,10 @@ def research_smoke(http, secret, instrument, kind):
                     "research summary did not match the job")
             require(report["dataset"] == dataset and report["observations"] >= 21,
                     "invalid catalog provenance or insufficient samples")
-            require([row["requested_years"] for row in report["windows"]] == [50, 10, 5]
-                    and all(row["coverage"] == "full" or row["metrics"] is None for row in report["windows"]),
+            windows = report["windows"]
+            require([row["window"] for row in windows] == ["50y", "10y", "5y", "longest_sample"]
+                    and [row["requested_years"] for row in windows] == [50, 10, 5, None]
+                    and all(row["coverage"] == "full" or row["metrics"] is None for row in windows),
                     "invalid historical window coverage")
             require(audit["fills"] == result["total_orders"] and
                     all(fill["signal_session"] < fill["execution_session"] for fill in audit["recent_fills"]),
