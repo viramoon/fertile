@@ -32,6 +32,12 @@ git -C "$target" restore contracts/finance.openapi.json
 printf '%040d\n' 0 > "$target/frontend/openapi/web.commit"
 expect_failure 'wrong producer revision' 'web.commit'
 git -C "$target/frontend" restore openapi/web.commit
+empty_tree=$(git -C "$target/web" mktree </dev/null)
+wrong_tree_commit=$(git -C "$target/web" -c user.name='Contract test' -c user.email='contract-test@example.invalid' \
+    commit-tree "$empty_tree" -m 'Fixture with different producer source')
+printf '%s\n' "$wrong_tree_commit" > "$target/frontend/openapi/web.commit"
+expect_failure 'different producer tree' 'has a different tree from gitlink'
+git -C "$target/frontend" restore openapi/web.commit
 printf '\n// deliberate Rust client drift\n' >> "$target/web/crates/finance-client/src/lib.rs"
 expect_failure 'generated Rust client drift' 'deliberate Rust client drift'
 git -C "$target/web" restore crates/finance-client/src/lib.rs

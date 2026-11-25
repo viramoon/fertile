@@ -8,7 +8,7 @@ Ruler 负责目标盒子部署、现有网站、Cloudflare 隧道、DNS 和线�
 
 1. 用 box 用户将源码 checkout 到 /home/box/fertile-source。初始化三个私有子模块及 Nautilus 源码。核对目标提交和 profile。
 2. 按 [bootstrap](../deploy/bootstrap.md) 安装锁定的工具，执行 source /home/box/fertile/env.sh。确认磁盘剩余足以构建 Rust、Python wheel、前端与备份。
-3. 按 web 手册确认静态目录、数据库角色和管理令牌。凭据文件只允许属主读写。[web RUNBOOK](https://github.com/viramoon/web/blob/ha-runthrough/RUNBOOK.md)
+3. 按 web 手册确认静态目录、数据库角色和管理令牌。凭据文件只允许属主读写。[web RUNBOOK](https://github.com/viramoon/web/blob/main/RUNBOOK.md)
 4. 在本机 Gateway 完成 paper 登录前，公网可达性、paper 账号和行情连续性独立记录。开发演练可显式选 replay，并为回放与真实行情分别安排持久数据根。
 
 ```sh
@@ -32,7 +32,7 @@ curl -fsS http://127.0.0.1:8090/api/v1/backtests/sample
 
 ## 导入历史日线
 
-选择经许可的原始 OHLCV，确认标的是 NYSE 上市的 USD 股票或 ETF，并核对区间内无拆股。价格使用美分、成交量使用整股，UTC 收盘时间由日历生成。生产不随包附带行情。将批准的 CSV 从独立路径导入，持久配置的 FERTILE_RESEARCH_ROOT 可选择 fertile 的 data/research 下的具体目录。默认命令如下。[finance 历史回测手册](https://github.com/viramoon/finance/blob/ha-runthrough/docs/historical-backtest.md)
+选择经许可的原始 OHLCV，确认标的是 NYSE 上市的 USD 股票或 ETF，并核对区间内无拆股。价格使用美分、成交量使用整股，UTC 收盘时间由日历生成。生产不随包附带行情。将批准的 CSV 从独立路径导入，持久配置的 FERTILE_RESEARCH_ROOT 可选择 fertile 的 data/research 下的具体目录。默认命令如下。[finance 历史回测手册](https://github.com/viramoon/finance/blob/main/docs/historical-backtest.md)
 
 ~~~sh
 export FERTILE_RESEARCH_ROOT="$FERTILE_ROOT/data/research"

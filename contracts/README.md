@@ -18,9 +18,9 @@ bash scripts/contract-diff.sh
 bash tests/contract-drift.sh
 ```
 
-检查将三个子模块的 HEAD 与 fertile 的 Git 索引逐一核对，并检查消费者记录的生产者提交号。两个原有生成器分别重新生成客户端，与已检出的代码逐字节比对。两份 OpenAPI 由生产者锁定提交的临时 Git 归档重新导出，再与快照比对。可指定 `CARGO_TARGET_DIR` 复用 Cargo 编译缓存；已有固定版本的 OpenAPI Generator JAR 时，可设置 `OPENAPI_GENERATOR_JAR`，web 仍会校验 SHA256。
+检查将三个子模块的 HEAD 与 fertile 的 Git 索引逐一核对，并检查消费者记录的生产者提交号。若 squash merge 改变提交号，须在生产者仓库中取得消费者记录的提交，且其完整 Git 树须与 gitlink 完全相同。两个原有生成器分别重新生成客户端，与已检出的代码逐字节比对。两份 OpenAPI 由生产者锁定提交的临时 Git 归档重新导出，再与快照比对。可指定 `CARGO_TARGET_DIR` 复用 Cargo 编译缓存。已有固定版本的 OpenAPI Generator JAR 时，可设置 `OPENAPI_GENERATOR_JAR`，web 仍会校验 SHA256。
 
-负向演练在一次性克隆中分别改动快照格式、生产者提交号、Rust 和 TypeScript 生成代码，四次检查都须因对应差异失败。
+负向演练在一次性克隆中分别改动快照格式、生产者提交号、Rust 和 TypeScript 生成代码。生产者提交号用例涵盖找不到提交和提交存在但 Git 树不同，五次检查都须因对应差异失败。
 
 ## 更新
 

@@ -42,17 +42,29 @@ jobs:
           gh auth setup-git --hostname github.com
           git submodule sync --recursive
           git submodule update --init --recursive
+          fetch_contract_source() {
+            local producer=$1 marker="$2/openapi/$1.commit" recorded
+            recorded=$(cat "$marker")
+            if [[ ! $recorded =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::Expected a full producer commit in $marker."
+              return 1
+            fi
+            if [[ $(git -C "$producer" cat-file -t "$recorded" 2>/dev/null) != commit ]]; then
+              if ! git -C "$producer" fetch --no-tags origin "$recorded"; then
+                echo "::error::Cannot fetch the producer commit recorded in $marker."
+                return 1
+              fi
+            fi
+          }
+          fetch_contract_source finance web
+          fetch_contract_source web frontend
           git config --global --remove-section credential.https://github.com
       - name: Verify published gitlinks and their working trees
         env:
           GH_TOKEN: ${{ secrets.FERTILE_SUBMODULES_TOKEN }}
         run: |
           gh auth setup-git --hostname github.com
-          if [[ "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" == ha-runthrough ]]; then
-            scripts/check-submodules.sh --ref ha-runthrough
-          else
-            scripts/check-submodules.sh
-          fi
+          scripts/check-submodules.sh
           source deploy/toolchain.env
           test "$(git -C finance/vendor/nautilus_trader rev-parse HEAD)" = "$NAUTILUS_COMMIT"
           git config --global --remove-section credential.https://github.com

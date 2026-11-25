@@ -4,16 +4,16 @@
 
 ## 验证固定提交
 
-先推送子仓库提交，再更新总仓的三个 gitlink。常规发版以各自远端 main 为准。本次跨仓联调使用用户授权的各子仓 ha-runthrough；合并进主线后重新校验 main。
+先将子仓库提交合并到各自的远端 main，再更新总仓的三个 gitlink。fertile 的 ha-runthrough 分支与主线均按子仓库 main 验证锁定提交。
 
 ~~~sh
 git submodule update --init --recursive
-scripts/check-submodules.sh --ref ha-runthrough
+scripts/check-submodules.sh
 scripts/contract-diff.sh
 scripts/release.sh --dry-run
 ~~~
 
-默认运行 scripts/check-submodules.sh 会从 GitHub 查询各 main，验证所锁定的提交属于该分支历史。脚本也会检查嵌套 Nautilus checkout 与子模块工作树。托管 CI 递归读取私仓需提供 Actions secret FERTILE_SUBMODULES_TOKEN，最小权限为四仓库 Contents 只读。
+默认运行 `scripts/check-submodules.sh` 会从 GitHub 查询各 main，验证锁定的提交属于该分支历史。脚本也会检查嵌套 Nautilus checkout 与子模块工作树。托管 CI 递归读取私仓需提供 Actions secret `FERTILE_SUBMODULES_TOKEN`，最小权限为四仓库 Contents 只读。CI 使用同一权限补取本地缺失的契约来源提交，供[契约检查](../contracts/README.md)核对。
 
 ## 发布预览
 

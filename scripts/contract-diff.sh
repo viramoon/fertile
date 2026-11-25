@@ -23,8 +23,32 @@ for repo in finance web frontend; do
     echo "$repo: checkout differs from gitlink $pin" >&2; exit 1; }
   printf '%s\n' "$pin" > "$work/$repo.commit"
 done
-cmp "$work/finance.commit" "$root/web/openapi/finance.commit"
-cmp "$work/web.commit" "$root/frontend/openapi/web.commit"
+
+check_producer_revision() {
+  local producer=$1 marker=$2 recorded pin recorded_tree pin_tree
+  if cmp -s "$work/$producer.commit" "$marker"; then return; fi
+  if ! IFS= read -r recorded < "$marker" || [[ ! $recorded =~ ^[0-9a-f]{40}$ ]] ||
+    ! printf '%s\n' "$recorded" | cmp -s - "$marker"; then
+    printf '%s: expected one full producer commit SHA\n' "$marker" >&2
+    return 1
+  fi
+  if [[ $(git -C "$root/$producer" rev-parse --verify --quiet --end-of-options "$recorded^{commit}") != "$recorded" ]]; then
+    printf '%s: recorded %s commit %s is unavailable\n' "$marker" "$producer" "$recorded" >&2
+    return 1
+  fi
+  # A squash merge can record a new commit for the exact same producer source.
+  pin=$(cat "$work/$producer.commit")
+  recorded_tree=$(git -C "$root/$producer" rev-parse --verify "$recorded^{tree}")
+  pin_tree=$(git -C "$root/$producer" rev-parse --verify "$pin^{tree}")
+  if [[ $recorded_tree != "$pin_tree" ]]; then
+    printf '%s: recorded %s commit %s has a different tree from gitlink %s\n' "$marker" "$producer" "$recorded" "$pin" >&2
+    return 1
+  fi
+  printf '%s: recorded %s and gitlink %s share tree %s\n' "$producer" "$recorded" "$pin" "$pin_tree"
+}
+
+check_producer_revision finance "$root/web/openapi/finance.commit"
+check_producer_revision web "$root/frontend/openapi/web.commit"
 
 check_clients() {
   local snapshots=$1
