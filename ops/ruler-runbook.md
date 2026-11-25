@@ -22,11 +22,15 @@ curl -fsS http://127.0.0.1:8090/api/v1/system/status
 
 当前版本目录的 bin/ 下放编译产物，static/ 存放同一批次的 Vite dist。finance 与 web 各自读取版本目录内的配置，PostgreSQL、队列和 catalog 保留于持久数据目录。首次准备示例摘要时，加载同一个环境与数据根，再从当前 release 中执行以下命令。
 
+`scripts/fertile data-root` 使用与 supervisor 相同的解析规则。已导出的 `FERTILE_DATA_ROOT` 优先，其次读取 `$FERTILE_ROOT/config/runtime.env`。例如在文件中填写 `FERTILE_DATA_ROOT=/home/box/fertile/data-paper` 即可使用独立的 paper 数据根。两处都未设置时，IB 使用 `$FERTILE_ROOT/data`，replay 使用 `$FERTILE_ROOT/data/replay`。
+
 ~~~sh
-source /home/box/fertile/env.sh
-# paper 默认 data；回放实例设置为 "$FERTILE_ROOT/data/replay"。
-export FERTILE_DATA_ROOT="$FERTILE_ROOT/data" FINANCE_BUILD_ROOT="$FERTILE_ROOT/current/runtime"
-(cd "$FERTILE_ROOT/current/finance" && PYTHONDONTWRITEBYTECODE=1 bash scripts/backtest-sample.sh)
+source "${FERTILE_ROOT:-${FERTILE_BOX_HOME:-/home/box}/fertile}/env.sh"
+(
+  FERTILE_DATA_ROOT=$(scripts/fertile data-root) || exit
+  export FERTILE_DATA_ROOT FINANCE_BUILD_ROOT="$FERTILE_ROOT/current/runtime"
+  cd "$FERTILE_ROOT/current/finance" && PYTHONDONTWRITEBYTECODE=1 bash scripts/backtest-sample.sh
+)
 curl -fsS http://127.0.0.1:8090/api/v1/backtests/sample
 ~~~
 

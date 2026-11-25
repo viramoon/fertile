@@ -4,7 +4,7 @@
 
 ## 安装和持久化
 
-版本和两个 SHA256 固定在 [toolchain.env](../deploy/toolchain.env)。[安装器](../scripts/install-ibgateway.sh) 下载指定版本的 gnzsnz/ib-gateway-docker 安装包归档与 IbcAlpha 的 IBC zip，逐个校验后先在同一文件系统解包，再安装到 `tools/ibgateway/<版本>` 及 `tools/ibc/<版本>`。默认根目录为 `/home/box/fertile`。Gateway 使用安装包自带的 JRE。bootstrap 在 Ubuntu 24.04 x86-64 重装可丢弃的 Xvfb、X11、字体及 AWT 依赖。
+版本和两个 SHA256 固定在 [toolchain.env](../deploy/toolchain.env)。[安装器](../scripts/install-ibgateway.sh) 下载指定版本的 gnzsnz/ib-gateway-docker 安装包归档与 IbcAlpha 的 IBC zip，逐个校验后先在同一文件系统解包，再安装到 `tools/ibgateway/<版本>` 及 `tools/ibc/<版本>`。默认根目录为 `/home/box/fertile`。Gateway 使用安装包自带的 JRE。[bootstrap](../deploy/bootstrap.md) 负责重装可丢弃的 Xvfb、X11、字体及 AWT 依赖。
 
 Jts 设置、IB 自身保存的认证状态位于 `data/ibgateway`，限次重试与进程身份位于 `run/ibgateway`，脱敏事件位于 `logs/ibgateway/events.jsonl`。以上状态由运行用户拥有。用于 IBC 的 0600 配置仅在启动与运行期间存在。应排除整个凭据目录、IB 登录状态及运行时配置的备份和上传。
 

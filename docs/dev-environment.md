@@ -4,7 +4,7 @@
 
 ## 新盒子与重启后
 
-当前支持 Ubuntu 24.04、Linux x86_64，Bash 与 sudo 可用。只有 /home/box 按持久处理；PID 1 是 tini，不依赖 systemd。
+当前支持 Debian 和 Ubuntu 24.04 的 x86_64 盒子，需要 Bash 和 sudo。只有 /home/box 按持久处理；PID 1 是 tini，不依赖 systemd。
 
 ```sh
 git clone --recurse-submodules https://github.com/viramoon/fertile.git /home/box/fertile-source
@@ -18,6 +18,8 @@ bash scripts/postgres.sh status
 ```
 
 停止数据库用 `bash scripts/postgres.sh stop`。初始化、启动和停止允许重复执行；已有数据主版本不匹配时拒绝自动迁移。默认仅监听 127.0.0.1:5432；本地 Unix socket 在持久根的 run/postgres，CI 使用 55432。
+
+PostgreSQL 首次初始化时采用系统时区。持久集群的显式设置与验证步骤见 [PostgreSQL 时区](../deploy/bootstrap.md#postgresql-时区)。
 
 安装器以 FERTILE_BOX_HOME 覆盖 /home/box，例如 `FERTILE_BOX_HOME=/tmp/ci-box bash scripts/bootstrap-box.sh`；后续命令也使用相同变量。它必须是无空格的绝对路径。不修改 HOME / 用户 shell 配置；env.sh 不含密钥。Rustup / Cargo、uv / Python、Node、pnpm、LLVM、PostgreSQL 二进制、缓存和数据都在此根下，系统目录没有这些工具的唯一副本。
 

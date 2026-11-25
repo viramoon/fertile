@@ -4,7 +4,7 @@ fertile 将 finance 的行情与回测、web 的 HTTP 网关和前端看板部�
 
 ## 如何使用
 
-使用可读取三个私有子仓库的身份，在 Ubuntu 24.04 x86_64 盒子上以 box 用户运行。检出待部署的总仓库提交后，gitlink 会确定各组件版本。开发联调从 ha-runthrough 分支取得提交。
+使用可读取三个私有子仓库的身份，在 Debian 或 Ubuntu 24.04 的 x86_64 盒子上以 box 用户运行。检出待部署的总仓库提交后，gitlink 会确定各组件版本。开发联调从 ha-runthrough 分支取得提交。
 
 ~~~sh
 git clone --branch ha-runthrough https://github.com/viramoon/fertile.git /home/box/fertile-source

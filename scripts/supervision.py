@@ -139,24 +139,36 @@ def active_programs(api):
     return rows
 
 
-def build_plan():
-    release = release_path()
-    custom = os.environ.get("FERTILE_SERVICE_MANIFEST")
-    manifest = Path(custom) if custom else release / "fertile/deploy/services.yaml"
-    rows = yaml.safe_load(manifest.read_text())["services"]
+def runtime_settings():
     runtime = ROOT / "config/runtime.env"
     settings = read_env(runtime) if runtime.exists() else {}
     if settings.keys() - SUPPORTED:
         raise ValueError("unknown key in config/runtime.env: " + ", ".join(sorted(settings.keys() - SUPPORTED)))
     settings.update({k: os.environ[k] for k in SUPPORTED if k in os.environ})
+    return settings
+
+
+def market_data(settings):
     source = settings.get("FERTILE_MARKET_SOURCE", "ib")
-    profile = settings.get("FERTILE_PROFILE", "cloudbox")
-    if source not in ("ib", "replay") or profile not in ("cloudbox", "stable"):
-        raise ValueError("unsupported profile or market source")
+    if source not in ("ib", "replay"):
+        raise ValueError("unsupported market source")
     default_data = ROOT / ("data/replay" if source == "replay" else "data")
     data = Path(settings.get("FERTILE_DATA_ROOT", default_data))
     if not data.is_absolute():
         raise ValueError("FERTILE_DATA_ROOT must be absolute")
+    return source, data
+
+
+def build_plan():
+    release = release_path()
+    custom = os.environ.get("FERTILE_SERVICE_MANIFEST")
+    manifest = Path(custom) if custom else release / "fertile/deploy/services.yaml"
+    rows = yaml.safe_load(manifest.read_text())["services"]
+    settings = runtime_settings()
+    profile = settings.get("FERTILE_PROFILE", "cloudbox")
+    if profile not in ("cloudbox", "stable"):
+        raise ValueError("unsupported profile")
+    source, data = market_data(settings)
     research_base = ROOT / "data/research"
     research = Path(settings.get("FERTILE_RESEARCH_ROOT", research_base))
     if not research.is_relative_to(research_base) or research.resolve() != research:
@@ -598,10 +610,15 @@ def main():
     for action in ("up", "down", "ensure", "ensure-up"):
         sub.add_parser(action)
     sub.add_parser("status").add_argument("--json", action="store_true")
+    sub.add_parser("data-root", help="print the effective finance data root for this environment")
     for action in ("logs", "restart", "stop"):
         sub.add_parser(action).add_argument("name")
     sub.add_parser("rollback").add_argument("ref")
     args = parser.parse_args()
+    if args.action == "data-root":
+        _, data = market_data(runtime_settings())
+        print(data)
+        return
     if args.action == "status":
         data = report()
         if args.json:

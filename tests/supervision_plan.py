@@ -1,5 +1,7 @@
 """Check the release/secret boundary without touching any persistent box files."""
+from contextlib import redirect_stdout
 import importlib.util
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -85,6 +87,24 @@ class RuntimePlan(unittest.TestCase):
         config.write_text("FERTILE_MARKET_SOURCE=live\n")
         with self.assertRaisesRegex(ValueError, "unsupported"):
             ctl.build_plan()
+
+    def test_data_root_command_matches_service_plan_and_honors_overrides(self):
+        self.write()
+        config = self.root / "config/runtime.env"
+        paper = self.root / "data-paper"
+        override = self.root / "data-override"
+        cases = (("", {}, self.root / "data"),
+                 ("FERTILE_MARKET_SOURCE=replay\n", {}, self.root / "data/replay"),
+                 (f'FERTILE_DATA_ROOT="{paper}"\n', {}, paper),
+                 (f"FERTILE_DATA_ROOT={paper}\n", {"FERTILE_DATA_ROOT": str(override)}, override))
+        for contents, env, expected in cases:
+            with self.subTest(expected=expected), patch.dict(os.environ, env):
+                config.write_text(contents)
+                output = StringIO()
+                with patch.object(sys, "argv", ["fertile", "data-root"]), redirect_stdout(output):
+                    ctl.main()
+                self.assertEqual(output.getvalue(), f"{expected}\n")
+                self.assertEqual(ctl.build_plan()["data"], str(expected))
 
     def test_8080_reserved_and_research_paths_are_owned(self):
         self.write(name="web")
