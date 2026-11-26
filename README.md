@@ -6,7 +6,7 @@ fertile 将 finance 的行情与回测、web 的 HTTP 网关和前端看板部�
 
 Ubuntu 24.04 和 Debian 12（x86_64）的普通服务器按[部署指南](deploy/linux-server.md)准备运行账户、构建并安装 systemd 服务。没有 systemd 时可以使用 supervisord。本地压测盒子继续用 supervisord，部署与恢复由 Ruler 管理。
 
-开发联调可在有权限读取三个私有子模块的 checkout 中选择一个明确提交。以下命令适用于新建的独立开发实例。
+总仓库 `fertile` 及其子模块 `finance`、`web`、`frontend` 均为公开仓库。开发联调可在初始化子模块前检出指定提交。以下命令适用于新建的独立开发实例。
 
 ~~~sh
 git clone https://github.com/viramoon/fertile.git

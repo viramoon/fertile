@@ -6,7 +6,7 @@
 
 使用一个普通 Linux 账户构建和运行服务。本例中的 `$USER` 和 `$(id -gn)` 分别是该账户和主组。拥有管理员权限的运维人员负责 apt、systemd 与反向代理操作。初始系统至少需要 Bash、Git、CA 证书和 curl。systemd 安装入口还需要发行版提供的 `python3`。
 
-使用能读取总仓与 `finance`、`web`、`frontend` 三个私有子仓库的 Git 身份检出。根据站点的 Git 凭据管理方式授权读取，勿把令牌放入 clone URL。确定部署 commit 或 tag 后再初始化子模块，递归初始化也会取回 finance 的 Nautilus 源码。
+总仓库 `fertile` 及其子模块 `finance`、`web`、`frontend` 均为公开仓库。勿把令牌放入 clone URL。确定部署 commit 或 tag 后再初始化子模块，递归初始化也会取回 finance 的 Nautilus 源码。
 
 ```bash
 git clone https://github.com/viramoon/fertile.git

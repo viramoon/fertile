@@ -1,6 +1,6 @@
 # 工具链引导与云盒子恢复
 
-支持 Debian 12 和 Ubuntu 24.04（x86_64），从有权读取三个私有子模块的 checkout 开始，以实际运行账户操作。源码目录与运行根分开。bootstrap 按 `FERTILE_ROOT`、`$FERTILE_BOX_HOME/fertile`、profile 默认值的顺序选根。普通 Linux 服务器使用 `stable`，默认 `/var/lib/fertile`，安装与启动见 [普通服务器部署指南](linux-server.md)。云盒子使用 `cloudbox`，默认 `/home/box/fertile`。
+支持 Debian 12 和 Ubuntu 24.04（x86_64），从公开的 fertile 仓库检出源码，以实际运行账户操作。源码目录与运行根分开。bootstrap 按 `FERTILE_ROOT`、`$FERTILE_BOX_HOME/fertile`、profile 默认值的顺序选根。普通 Linux 服务器使用 `stable`，默认 `/var/lib/fertile`，安装与启动见 [普通服务器部署指南](linux-server.md)。云盒子使用 `cloudbox`，默认 `/home/box/fertile`。
 
 以下命令从云盒子上的源码目录执行，已有自定义路径时继续使用该实例的设置。未设置 `FERTILE_ROOT` 时，bootstrap 会在最后一行报告 `env.sh` 的实际路径。
 
