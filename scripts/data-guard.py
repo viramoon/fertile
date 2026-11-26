@@ -11,9 +11,10 @@ import subprocess
 import sys
 
 
-RULES = Path(__file__).resolve().parents[1] / "policy/data-guard.json"
+RULES = "policy/data-guard.json"
 LICENSES = "policy/market-data-licenses.json"
 APPROVALS = "policy/market-data-approvals.json"
+REGULAR_FILE_MODES = {"100644", "100755"}
 USES = {"display_live", "record_local", "derive_non_display", "backup_personal_drive"}
 OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
@@ -27,6 +28,8 @@ MAGIC = (
     b"\xfd7zXZ\0", b"7z\xbc\xaf\x27\x1c", b"Rar!\x1a\x07", b"\x28\xb5\x2f\xfd",
     b"\x7fELF", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",
 )
+CREDENTIAL_TOKEN_PATTERN = r"(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|AKIA[A-Z0-9]{16})"
+PATH_TOKEN = re.compile(CREDENTIAL_TOKEN_PATTERN, re.IGNORECASE)
 TEXT_RULES = {
     "lfs-pointer": r"(?im)^\s*version\s+https://git-lfs\.github\.com/spec/v1\s*$",
     "attachment": (
@@ -42,7 +45,7 @@ TEXT_RULES = {
     ),
     "credential": (
         r"(?im)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"
-        r"|(?<![\w])(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|AKIA[A-Z0-9]{16})(?![\w])"
+        rf"|(?<!\w){CREDENTIAL_TOKEN_PATTERN}(?!\w)"
         r"|^[ \t]*(?:export[ \t]+)?(?:WEB_ADMIN_TOKEN|IBKR_PASSWORD|IBKR_USERNAME|DATABASE_URL|AWS_SECRET_ACCESS_KEY)"
         r"[ \t]*=[ \t]*['\"]?[A-Za-z0-9_@.:/+\-=!%?&*#\[\]]{8,}['\"]?[ \t]*(?:\#[^\r\n]*)?$"
     ),
@@ -64,11 +67,17 @@ MARKET_ROW = re.compile(
     r"\d{4}-\d\d-\d\d(?:[T ][\d:.+Z-]+)?[ \t]*[,;\t|][ \t]*"
     r"-?\d+(?:\.\d+)?[ \t]*[,;\t|][ \t]*-?\d+(?:\.\d+)?"
 )
+MARKDOWN_QUOTE = re.compile(r"(?m)^(?:[ \t]*>[ \t]*)+")
+MARKDOWN_SEPARATOR = re.compile(r"\|?[ \t]*:?-+:?(?:[ \t]*\|[ \t]*:?-+:?)+[ \t]*\|?")
+MARKET_TABLE_KEYS = {"symbol", "ticker", "instrument", "instrument_id", "timestamp", "ts", "ts_event", "date",
+                     "标的", "合约", "时间戳", "日期"}
+MARKET_TABLE_VALUES = {"price", "size", "quantity", "bid", "ask", "bid_price", "ask_price",
+                       "open", "high", "low", "close", "volume", "价格", "数量", "成交量"}
 GIT_ENV = {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_NO_LAZY_FETCH": "1"}
 
 
 class Rejected(Exception):
-    """Only fixed reason codes and escaped locations may reach the diagnostic."""
+    """Report a fixed reason and an input category or Git object ID."""
 
     def __init__(self, reason, location=None):
         super().__init__(reason, location)
@@ -95,6 +104,33 @@ def unique_object(pairs):
     return result
 
 
+def git_blob(oid, limit):
+    if int(git("cat-file", "-s", oid)) > limit:
+        raise Rejected("blob-too-large")
+    return git("cat-file", "blob", oid)
+
+
+def read_rules(entries, required=True):
+    entry = entries.get(RULES)
+    if entry is None:
+        if required:
+            raise Rejected("missing-rule-file")
+        return None
+    mode, oid = entry
+    try:
+        if mode not in REGULAR_FILE_MODES:
+            raise ValueError("rule file must be regular")
+        rules = json.loads(git_blob(oid, 1048576), object_pairs_hook=unique_object)
+        if not isinstance(rules, dict):
+            raise ValueError("rules must be an object")
+    except (Rejected, ValueError, RecursionError):
+        raise Rejected("invalid-rule-file") from None
+    version = rules.get("schema_version")
+    if type(version) is not int or version != 1:
+        raise Rejected("unsupported-rule-version")
+    return rules
+
+
 def schema(data, collection):
     obj = json.loads(data, object_pairs_hook=unique_object)
     if (not isinstance(obj, dict) or set(obj) != {"schema_version", collection}
@@ -111,13 +147,47 @@ def repo_path(path):
                for part in path.split("/"))
 
 
+def contains_market_data(text):
+    text = MARKDOWN_QUOTE.sub("", text)
+    if (MARKET_HEADER.search(text) or MARKET_ROW.search(text)
+            or (MARKET_JSON.search(text) and MARKET_CONTEXT.search(text))):
+        return True
+    previous = ""
+    for line in text.splitlines():
+        if "|" in line and MARKDOWN_SEPARATOR.fullmatch(line.strip()):
+            columns = {cell.strip(" \t`*_").casefold() for cell in previous.split("|")}
+            if columns & MARKET_TABLE_KEYS and columns & MARKET_TABLE_VALUES:
+                return True
+        previous = line
+    return False
+
+
 def text_findings(text, market=True):
     for reason, rule in TEXT_RULES.items():
         if rule.search(text):
             yield reason
-    if market and (MARKET_HEADER.search(text) or MARKET_ROW.search(text)
-                   or (MARKET_JSON.search(text) and MARKET_CONTEXT.search(text))):
+    if market and contains_market_data(text):
         yield "market-data-shape"
+
+
+def index_entries():
+    entries = {}
+    for row in filter(None, git("ls-files", "--stage", "-z").split(b"\0")):
+        fields, name = row.split(b"\t", 1)
+        mode, oid, stage = fields.decode("ascii").split()
+        if stage != "0":
+            raise Rejected("unmerged-path", oid)
+        entries[os.fsdecode(name)] = (mode, oid)
+    return entries
+
+
+def tree_entries(oid):
+    entries = {}
+    for row in filter(None, git("ls-tree", "-r", "-z", oid).split(b"\0")):
+        fields, name = row.split(b"\t", 1)
+        mode, _, blob = fields.decode("ascii").split()
+        entries[os.fsdecode(name)] = (mode, blob)
+    return entries
 
 
 class Guard:
@@ -131,10 +201,7 @@ class Guard:
         self.checked_commits = set()
 
     def blob(self, oid):
-        size = int(git("cat-file", "-s", oid))
-        if size > self.limit:
-            raise Rejected("blob-too-large")
-        return git("cat-file", "blob", oid)
+        return git_blob(oid, self.limit)
 
     def path_findings(self, path, fixture):
         if not repo_path(path):
@@ -148,6 +215,8 @@ class Guard:
             yield "private-filename"
         if posix.suffix in self.blocked_extensions:
             yield "blocked-extension"
+        if PATH_TOKEN.search(path) or any(TEXT_RULES["credential"].search(part) for part in path.split("/")):
+            yield "credential"
         if (posix.suffix in self.safe_fixtures - {".json"}
                 or (posix.suffix in self.safe_fixtures
                     and path.startswith(self.rules["fixture_root"]))) and not fixture:
@@ -181,7 +250,7 @@ class Guard:
             for path, entry in fixtures.items():
                 if (not repo_path(path) or not path.startswith(self.rules["fixture_root"])
                         or PurePosixPath(path).suffix.lower() not in self.safe_fixtures
-                        or path not in entries or entries[path][0] not in {"100644", "100755"}
+                        or path not in entries or entries[path][0] not in REGULAR_FILE_MODES
                         or not isinstance(entry, dict)
                         or set(entry) != {"source", "generator", "seed", "sha256"}
                         or entry["source"] != "synthetic"
@@ -192,13 +261,13 @@ class Guard:
                     raise ValueError("invalid fixture")
                 generator = entry["generator"]
                 if (not repo_path(generator) or generator not in entries
-                        or entries[generator][0] not in {"100644", "100755"}
+                        or entries[generator][0] not in REGULAR_FILE_MODES
                         or PurePosixPath(generator).suffix not in self.rules["generator_extensions"]
                         or any(self.path_findings(generator, False))):
                     raise ValueError("invalid generator")
             return fixtures
         except (Rejected, ValueError, UnicodeError, RecursionError):
-            raise Rejected("invalid-fixture-manifest", manifest) from None
+            raise Rejected("invalid-fixture-manifest") from None
 
     def check_license_records(self, entries, require_policy):
         if not require_policy and LICENSES not in entries and APPROVALS not in entries:
@@ -240,14 +309,12 @@ class Guard:
     def check_tree(self, entries, require_policy=False):
         manifest = self.rules["fixture_manifest"]
         if require_policy and manifest not in entries:
-            raise Rejected("missing-fixture-manifest", manifest)
+            raise Rejected("missing-fixture-manifest")
         fixtures = self.fixture_entries(entries)
         self.check_license_records(entries, require_policy)
         for path, (mode, oid) in entries.items():
-            if mode == "160000":
-                continue   # A gitlink publishes a revision reference; the subrepo checks its blobs.
-            if mode not in {"100644", "100755"}:
-                raise Rejected("non-regular-file", path)
+            if mode != "160000" and mode not in REGULAR_FILE_MODES:
+                raise Rejected("non-regular-file", oid)
             fixture = fixtures.get(path)
             key = (path, oid, fixture["sha256"] if fixture else None)
             if key in self.checked_blobs:
@@ -255,37 +322,23 @@ class Guard:
             try:
                 for reason in self.path_findings(path, fixture):
                     raise Rejected(reason)
+                if mode == "160000":
+                    continue  # The subrepo checks the blobs behind its linked revision.
                 data = self.blob(oid)
                 if fixture and hashlib.sha256(data).hexdigest() != fixture["sha256"]:
                     raise Rejected("synthetic-digest-mismatch")
                 for reason in self.blob_findings(path, data, fixture):
                     raise Rejected(reason)
             except Rejected as error:
-                raise Rejected(error.reason, path) from None
+                raise Rejected(error.reason, oid) from None
             self.checked_blobs.add(key)
-
-    def index(self):
-        entries = {}
-        for row in git("ls-files", "--stage", "-z").split(b"\0"):
-            if row:
-                fields, name = row.split(b"\t", 1)
-                mode, oid, stage = fields.decode("ascii").split()
-                path = os.fsdecode(name)
-                if stage != "0":
-                    raise Rejected("unmerged-path", path)
-                entries[path] = (mode, oid)
-        self.check_tree(entries, require_policy=True)
 
     def commit(self, oid, require_policy=False):
         key = (oid, require_policy)
         if key in self.checked_commits:
             return
-        entries = {}
-        for row in git("ls-tree", "-r", "-z", oid).split(b"\0"):
-            if row:
-                fields, name = row.split(b"\t", 1)
-                mode, _, blob = fields.decode("ascii").split()
-                entries[os.fsdecode(name)] = (mode, blob)
+        entries = tree_entries(oid)
+        read_rules(entries, required=require_policy)
         self.check_tree(entries, require_policy)
         self.message(git("show", "--no-notes", "--format=%B", "--no-patch", oid), "commit-message")
         self.checked_commits.add(key)
@@ -304,26 +357,29 @@ class Guard:
         if base:
             args.append("^" + base)
         for oid in git("rev-list", *args).decode("ascii").splitlines():
-            self.commit(oid)
+            if oid != head:
+                self.commit(oid)
 
-    def pre_push(self, changes):
-        for row in changes:
-            fields = row.split()
-            if len(fields) != 4 or not all(OID.fullmatch(fields[i]) for i in (1, 3)):
-                raise Rejected("invalid-push-record")
-            _, local, _, remote = fields
-            if set(local) == {"0"}:
-                continue
-            head = commit_oid(local)
-            while local != head:
-                tag = git("cat-file", "tag", local)
-                self.message(tag, "tag-annotation")
-                target = tag.partition(b"\n")[0].removeprefix(b"object ").decode("ascii")
-                if not OID.fullmatch(target):
-                    raise Rejected("invalid-tag-target")
-                local = target
-            base = commit_oid(remote, missing_ok=True) if set(remote) != {"0"} else None
-            self.range(head, base)
+
+def pre_push(changes):
+    for row in changes:
+        fields = row.split()
+        if len(fields) != 4 or not all(OID.fullmatch(fields[i]) for i in (1, 3)):
+            raise Rejected("invalid-push-record")
+        _, local, _, remote = fields
+        if set(local) == {"0"}:
+            continue
+        head = commit_oid(local)
+        guard = Guard(read_rules(tree_entries(head)))
+        while local != head:
+            tag = git("cat-file", "tag", local)
+            guard.message(tag, "tag-annotation")
+            target = tag.partition(b"\n")[0].removeprefix(b"object ").decode("ascii")
+            if not OID.fullmatch(target):
+                raise Rejected("invalid-tag-target")
+            local = target
+        base = commit_oid(remote, missing_ok=True) if set(remote) != {"0"} else None
+        guard.range(head, base)
 
 
 def commit_oid(ref, missing_ok=False):
@@ -397,24 +453,22 @@ def main():
             check_private_roots(args.paths)
         elif args.command == "artifact":
             artifact(args.profile, args.output, args.timing)
+        elif args.command == "index":
+            entries = index_entries()
+            Guard(read_rules(entries)).check_tree(entries, require_policy=True)
+        elif args.command == "pre-push":
+            pre_push(sys.stdin)
         else:
-            rules = json.loads(RULES.read_bytes(), object_pairs_hook=unique_object)
-            if type(rules["schema_version"]) is not int or rules["schema_version"] != 1:
-                raise Rejected("unsupported-rule-version")
-            guard = Guard(rules)
-            if args.command == "index":
-                guard.index()
-            elif args.command == "pre-push":
-                guard.pre_push(sys.stdin)
-            else:
-                if args.pr_event:
-                    guard.message(pr_metadata(args.pr_event), "pr-metadata")
-                guard.range(commit_oid(args.head), commit_oid(args.base))
+            head = commit_oid(args.head)
+            guard = Guard(read_rules(tree_entries(head)))
+            if args.pr_event:
+                guard.message(pr_metadata(args.pr_event), "pr-metadata")
+            guard.range(head, commit_oid(args.base))
     except Rejected as error:
         location = f" at {json.dumps(error.location)}" if error.location else ""
         print(f"data-guard: {error.reason}{location}", file=sys.stderr)
         return 1
-    except (KeyError, OSError, TypeError, ValueError, RuntimeError):
+    except (KeyError, OSError, TypeError, ValueError, RuntimeError, re.error):
         print("data-guard: invalid or unavailable input", file=sys.stderr)
         return 1
     print(f"data-guard: {args.command} passed")

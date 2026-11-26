@@ -16,6 +16,7 @@ MARKER = "TG-SYNTHETIC-DO-NOT-ECHO"
 FIXTURE = "tests/fixtures/quotes.csv"
 GENERATOR = "tests/make-quotes.py"
 MANIFEST = "policy/synthetic-fixtures.json"
+RULES = "policy/data-guard.json"
 LICENSES = "policy/market-data-licenses.json"
 APPROVALS = "policy/market-data-approvals.json"
 
@@ -96,6 +97,33 @@ class PublicationPolicy(unittest.TestCase):
         self.write("README.md", b"PG" + b"DMP" + MARKER.encode())
         self.commit("Reviewable staged documentation")
 
+    def test_pre_commit_uses_staged_rule_version_and_values(self):
+        original = (self.repo / RULES).read_bytes()
+        rules = json.loads(original)
+        self.stage_json(RULES, dict(rules, schema_version=2))
+        self.write(RULES, original)
+        result = self.git("commit", "-qm", "Unsupported staged rules", check=False)
+        self.assert_rejected(result, "unsupported-rule-version")
+
+        self.stage_json(RULES, dict(rules, blocked_extensions=rules["blocked_extensions"] + [".txt"]))
+        self.write(RULES, original)
+        self.stage("note.txt", "Ordinary text\n")
+        self.assert_rejected(self.guard("index"), "blocked-extension")
+        self.git("rm", "--cached", "note.txt")
+        self.write(RULES, '{"schema_version":2}')
+        self.commit("Use valid staged rules despite uncommitted changes")
+
+    def test_published_history_validates_candidate_rules(self):
+        original = (self.repo / RULES).read_bytes()
+        self.stage_json(RULES, dict(json.loads(original), schema_version=2))
+        bad = self.commit("Introduce unsupported rules", unchecked=True)
+        self.stage(RULES, original)
+        head = self.commit("Restore supported rules")
+        for candidate in (bad, head):
+            with self.subTest(candidate=candidate):
+                self.assert_rejected(self.guard("range", self.base, candidate), "unsupported-rule-version")
+                self.assert_rejected(self.push_hook(candidate, self.base), "unsupported-rule-version")
+
     def test_paths_and_masquerading_file_signatures(self):
         cases = [
             ("notes/Data-Paper/part.txt", MARKER, "private-directory"),
@@ -135,6 +163,47 @@ class PublicationPolicy(unittest.TestCase):
             with self.subTest(reason=reason):
                 self.stage("README.md", content)
                 self.assert_rejected(self.guard("index"), reason)
+
+    def test_markdown_market_tables_and_quoted_csv_in_docs_and_prs(self):
+        cells = sample_rows().decode().splitlines()[1].split(",")
+        header = ("Symbol", "Price", "Size")
+        columns = " | ".join(header)
+        row = " | ".join(cells)
+        table = f"{columns}\n:--- | ---: | ---:\n{row}\n"
+        pipe_table = "\n".join(
+            f"| {line} |" for line in table.splitlines()
+        )
+        quoted_csv = "\n".join("> > " + line for line in sample_rows().decode().splitlines())
+        head = self.commit_clean_change()
+        event = self.parent / "event.json"
+        ordinary = "| Topic | Notes |\n| --- | --- |\n| Format | Record capability only |\n"
+        for body, reason in ((table, "market-data-shape"), (pipe_table, "market-data-shape"),
+                             (quoted_csv, "market-data-shape"), (ordinary, None)):
+            with self.subTest(reason=reason, body_type=len(body)):
+                self.stage("README.md", f"## Summary\n\n{body}\n")
+                event.write_text(json.dumps({"pull_request": {"title": "Review change", "body": body}}))
+                results = (self.guard("index"), self.guard("range", self.base, head, "--pr-event", event))
+                for result in results:
+                    if reason:
+                        self.assert_rejected(result, reason)
+                    else:
+                        self.assert_passed(result)
+
+    def test_path_credentials_are_rejected_and_diagnostics_hide_filenames(self):
+        credential = "gh" + "p_" + "TgDemo" * 6
+        for suffix, reason in ((".md", "credential"), (".log", "blocked-extension")):
+            with self.subTest(suffix=suffix):
+                name = f"notes/export_{credential}{suffix}"
+                self.stage(name, "Harmless text\n")
+                result = self.guard("index")
+                self.assert_rejected(result, reason)
+                oid = self.git("rev-parse", f":{name}").stdout.strip()
+                self.assertIn(oid, result.stderr)
+                self.assertNotIn(credential, result.stdout + result.stderr)
+                self.assertNotIn("notes/export_", result.stdout + result.stderr)
+                self.git("rm", "--cached", name)
+        self.stage(f"notes/{MARKER}.log", "Harmless text\n")
+        self.assert_rejected(self.guard("index"), "blocked-extension")
 
     def test_lfs_is_blocked_even_if_the_payload_is_not_in_git(self):
         pointer = "version https://" + "git-lfs.github.com/spec/v1\n"

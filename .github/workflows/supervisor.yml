@@ -41,8 +41,11 @@ jobs:
           "$FERTILE_CONTROL_PYTHON" -B tests/test_e2e_smoke.py
       - name: Exercise rendering, restarts and whole-stack recovery
         run: |
-          "$RUNNER_TEMP/fertile-supervisor/bin/python" tests/supervision_plan.py
-          "$RUNNER_TEMP/fertile-supervisor/bin/python" -u tests/supervisor_ci.py
+          umask 077
+          {
+            "$RUNNER_TEMP/fertile-supervisor/bin/python" tests/supervision_plan.py
+            "$RUNNER_TEMP/fertile-supervisor/bin/python" -u tests/supervisor_ci.py
+          } >"$RUNNER_TEMP/fertile-supervisor.log" 2>&1
       - name: Prepare the public drill result
         run: python3 -B scripts/data-guard.py artifact supervisor "$RUNNER_TEMP/supervisor-drill.json"
       - name: Save the drill result

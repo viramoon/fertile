@@ -24,10 +24,11 @@ jobs:
         run: bash tests/bootstrap-packages.sh
       - name: 首次安装、二次跳过、版本与 Postgres
         run: |
+          umask 077
           chmod -R a+rX "$GITHUB_WORKSPACE"
           runuser -u box -- env FERTILE_BOX_HOME=/home/box/ci-persistent \
             FERTILE_TEST_LOGS=/home/box/test-logs \
-            bash "$GITHUB_WORKSPACE/tests/bootstrap-box.sh"
+            bash "$GITHUB_WORKSPACE/tests/bootstrap-box.sh" >"$RUNNER_TEMP/fertile-bootstrap.log" 2>&1
       - name: 生成可公开的安装耗时报告
         run: python3 -B scripts/data-guard.py artifact bootstrap "$RUNNER_TEMP/bootstrap-timing.json" --timing /home/box/test-logs/timing.env
       - name: 保存安装耗时报告
