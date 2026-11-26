@@ -10,6 +10,27 @@
 - 保存持久目录 `$FERTILE_ROOT/config/` 中的非机密配置。部署代码、锁定依赖和默认配置由 release/gitlink 提供。密钥须放在 `$FERTILE_ROOT/secrets/` 或对应的密钥目录。这些目录、Cloudflare 凭据、Gateway 登录状态均在备份范围之外。配置中的私有密钥文件名和额外的 `.env` 被排除，唯一公开环境配置是 `config/runtime.env`。该文件及普通 YAML 不应包含密钥。
 - PG 的逻辑快照与 finance 的快照各自一致，对账时应保留原作业 ID 和幂等键。快照没有跨两个存储的共同事务时点。仅保留本机备份时，整机或整块持久盘丢失就无法恢复。
 
+## 非活动旧 SPY catalog 的单独备份
+
+日常 `scripts/backup.sh` 的行情与队列备份以当前活动 `FERTILE_DATA_ROOT` 为准。本机活动根是 `data-paper`，因此日常快照不包含非活动 catalog 下 `/home/box/fertile/data/catalog/data/bar/SPY.XNAS-1-DAY-LAST-EXTERNAL` 的固定 21:00 UTC 日线及同一 catalog 下的 `data/equity/SPY.XNAS`。
+
+迁移前确认旧 catalog 已无写入方，以下命令将日线和 equity 元数据复制到日常备份轮转之外的新目录，保留 Nautilus catalog 目录结构。可将 `legacy_backup_parent` 改为另一个独立的持久绝对路径。两次复制都成功后才会打印备份 catalog 路径。复制失败时保留原件，排查原因后用新目录重新复制。
+
+```bash
+legacy_catalog=/home/box/fertile/data/catalog
+legacy_backup_parent="$HOME/fertile-legacy-spy-backups"
+legacy_backup=$(
+  mkdir -p -- "$legacy_backup_parent" &&
+  copy_dir=$(mktemp -d "$legacy_backup_parent/spy-21utc.XXXXXXXX") &&
+  mkdir -p -- "$copy_dir/catalog/data/bar" "$copy_dir/catalog/data/equity" &&
+  cp -a -- "$legacy_catalog/data/bar/SPY.XNAS-1-DAY-LAST-EXTERNAL" "$copy_dir/catalog/data/bar/" &&
+  cp -a -- "$legacy_catalog/data/equity/SPY.XNAS" "$copy_dir/catalog/data/equity/" &&
+  printf '%s\n' "$copy_dir"
+) && printf '%s\n' "$legacy_backup/catalog"
+```
+
+在 `$legacy_backup` 下记录备份时间、源目录和文件、提供方及原消费方、标的 `SPY.XNAS`、实际首尾日期和条数、固定 21:00 UTC 时间口径、OHLCV 和复权口径。后续迁移将这份副本作为 `--source-catalog`，原件保持只读。
+
 ## 配置
 
 默认持久根为 `/home/box/fertile`。手工操作先加载引导环境，并使用与 supervisor 相同的 `config/runtime.env`。备份要求活动数据根已挂载，路径遵循 `FERTILE_DATA_ROOT` 及 `FERTILE_MARKET_SOURCE`。IB 默认为 `data/`，回放默认为 `data/replay/`。PG 默认连接 `$FERTILE_ROOT/run/postgres`，端口来自 `FERTILE_POSTGRES_PORT`。备份库名依序取 `PGDATABASE`、`FERTILE_WEB_DATABASE`、`web`。恢复库名由 `--target-database` 指定。若 web 使用外部 PG，备份和恢复需提供对应的 libpq `PGHOST`、`PGPORT` 与角色认证，备份另传 `PGDATABASE`。

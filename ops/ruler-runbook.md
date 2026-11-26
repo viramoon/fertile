@@ -4,6 +4,8 @@
 
 Ruler 负责目标盒子部署、现有网站、Cloudflare 隧道、DNS 和线上恢复。现网站使用 127.0.0.1:8080。fertile 的独立源站为 127.0.0.1:8090，目标域名为 https://fertile.viramoon.com。fertile 的脚本只管理本项目进程和持久目录。部署不安装开机钩子、shell 启动项或主机定时任务。
 
+在本机执行官方历史日线验收时，直接使用[部署后的隔离历史日线验收](#部署后的隔离历史日线验收)。
+
 ## 首次启动
 
 1. 用 box 用户将源码 checkout 到 /home/box/fertile-source。初始化三个私有子模块及 Nautilus 源码。核对目标提交和 profile。
@@ -34,7 +36,7 @@ source "${FERTILE_ROOT:-${FERTILE_BOX_HOME:-/home/box}/fertile}/env.sh"
 curl -fsS http://127.0.0.1:8090/api/v1/backtests/sample
 ~~~
 
-## finance 7600be4 升级
+## finance 327bae28 升级
 
 | 再部署项目 | 操作 |
 | --- | --- |
@@ -42,29 +44,187 @@ curl -fsS http://127.0.0.1:8090/api/v1/backtests/sample
 | 新增必需数据 | 无。保留现有实时 catalog、回测队列和 `FERTILE_RESEARCH_ROOT` 下经审核的日线快照。 |
 | 必需数据迁移 | 无。finance 队列 schema 和 web SQLx 迁移文件未变。保留升级前的备份，再按集成版本部署 finance、web 和前端。 |
 
-部署后提交一个新的历史日线作业并核对成交审计。finance 与 web 的结果依序包含 `50y`、`10y`、`5y`、`longest_sample` 四个窗口，最长样本的 `requested_years` 为 `null`。有值的窗口绩效字段使用十进制字符串。在 `/backtests` 确认新作业显示「最长样本」，覆盖不足或缺少指标的窗口将净值变动显示为「不可用」。再打开一条已有历史作业，确认仍能查看固定窗口。
+部署后按下节在隔离队列提交历史日线作业并核对成交审计。若正式回滚跨越首次引入四窗口摘要的 `7600be4` 升级，旧 finance API 的字段类型无法读取四窗口摘要。暂停接单并保全新版队列，再为旧版选用兼容的独立数据根或恢复升级前的备份。
 
-旧 finance API 的字段类型无法读取新版写入的四窗口摘要。回滚到升级前版本时，暂停接单并保全升级后的队列，再为旧版选用兼容的独立数据根或恢复升级前的备份。
+## 部署后的隔离历史日线验收
 
-如需使用公开历史研究数据，为人工命令设置原始文件目录 `FINANCE_HISTORY_ARCHIVE` 与 Yahoo 观测截止日 `FINANCE_YAHOO_AS_OF`，按手册保存经许可的 Yahoo、Ken French、FRED 原始文件，记录获取日期、来源和实际覆盖范围。给归档命令单独设置 `FERTILE_DATA_ROOT`，使用与在线采集及官方回测隔离的持久目录。公开历史版本保存在该数据根的 `catalog/historical`。fertile 的采集 catalog 备份会拒绝该归档中的 `current` 符号链接，因此请暂停归档写入，独立备份原始文件、`current` 和它指向的版本目录。[finance 手工归档步骤](https://github.com/viramoon/finance/blob/7600be468541d381cb9014ae7d01237f499c0db5/RUNBOOK.md#手工保存公开历史数据)
+**本机验收禁令。** 不修改 `runtime.env` 或 `env.sh`，不重启或重指 live API / worker，不对 `data-paper` 或 live 库 `web` 做正式 restore。本机不要运行 `scripts/fertile up`、`ensure`、`ensure-up`、`down` 或 `rollback`，这些入口会调用 ensure、启动 healthwatch 或改变 live 服务状态。不要通过 `/backtests` 页面或 8090 提交，也不要执行 `tests/e2e-smoke.sh local --research-instrument …`。这些入口写入 live 队列 `data-paper/finance-state/backtests/jobs.sqlite3`，冒烟还会先提交示例作业。
 
-有旧 SPY 固定 21:00 UTC 日线且要切换到新归档时，先用 XNYS 会话表核对标准时、夏令时和半日市，备份旧 catalog，并记录来源、日期区间和价格口径。再在独立数据根用经许可的源 OHLCV、调整收盘价和公司行为重新导入。核对覆盖区间、条数、会话收盘时间、源价精度、复权因子和公司行为之后，只切换研究读取路径，并保留旧数据供复现与回退。[finance SPY 迁移说明](https://github.com/viramoon/finance/blob/7600be468541d381cb9014ae7d01237f499c0db5/catalog/README.md#既有-spy-固定-2100-utc-数据)
+**默认研究根属于 live。** `runtime.env` 未设置 `FERTILE_RESEARCH_ROOT` 时，`export FERTILE_RESEARCH_ROOT="$FERTILE_ROOT/data/research"` 指向 live API / worker 的默认研究根，往该路径或其下写入的验收数据会被现网作业看见。验收导入只用本次新建的独立绝对路径。[运行配置](../docs/configuration.md)
 
-## 导入历史日线
+### 1. 确认部署版本并建立独立目录
 
-选择经许可的原始 OHLCV，确认标的是 NYSE 上市的 USD 股票或 ETF，并核对区间内无拆股。价格使用美分、成交量使用整股，UTC 收盘时间由日历生成。生产不随包附带行情。将批准的 CSV 从独立路径导入，持久配置的 FERTILE_RESEARCH_ROOT 可选择 fertile 的 data/research 下的具体目录。默认命令如下。[finance 历史回测手册](https://github.com/viramoon/finance/blob/main/docs/historical-backtest.md)
+在专门的 Bash 会话中逐段执行，每条命令成功后再继续。以下示例使用已部署且 manifest 锁定目标 finance 提交的制品。若校验失败，停止并请 Ruler 提供对应制品。源码构建方式见 finance 原手册。两个隔离根都要存在、互不包含，路径各级使用实体目录。[finance 隔离入口](https://github.com/viramoon/finance/blob/327bae28fd8c1f56c44bdcfb086589eaea9583b2/RUNBOOK.md#隔离验收官方历史作业) [finance 作业说明](https://github.com/viramoon/finance/blob/327bae28fd8c1f56c44bdcfb086589eaea9583b2/docs/backtest-jobs.md#隔离运行官方历史作业)
 
-~~~sh
-export FERTILE_RESEARCH_ROOT="$FERTILE_ROOT/data/research"
-PYTHONPATH="$FERTILE_ROOT/current/finance/python" \
-  "$FERTILE_ROOT/current/runtime/venv/bin/python" -m fertile_finance.research_catalog \
-  /path/to/approved.csv --instrument IBM.XNYS --asset-type stock \
-  --kind historical --source "Approved provider IBM" --raw-split-free-reviewed
-curl -fsS http://127.0.0.1:8090/api/v1/backtests/datasets
-tests/e2e-smoke.sh local --research-instrument IBM.XNYS --research-kind historical
-~~~
+```bash
+umask 077
+FERTILE_ROOT=/home/box/fertile
+release=$(readlink -f -- "$FERTILE_ROOT/current") || exit
+grep -F '"finance": "327bae28fd8c1f56c44bdcfb086589eaea9583b2"' "$release/manifest.json" || exit
+cd "$release/finance" || exit
+export FINANCE_PYTHON="$release/runtime/venv/bin/python"
+export PYTHONPATH=python PYTHONDONTWRITEBYTECODE=1
+acceptance_root=$(mktemp -d /tmp/fertile-historical.XXXXXXXX) || exit
+export FINANCE_ISOLATED_DATA="$acceptance_root/job-data"
+export FERTILE_RESEARCH_ROOT="$acceptance_root/research"
+export FINANCE_HISTORY_ARCHIVE="$acceptance_root/archive"
+mkdir -p -- "$FINANCE_ISOLATED_DATA" "$FERTILE_RESEARCH_ROOT" "$FINANCE_HISTORY_ARCHIVE" || exit
+```
 
-打开 /backtests 填写均线天数与目标股数，临时输入 web 提交令牌。结果应显示作业状态、来源、可用窗口和成交审计。提交超时先查询原幂等键，收到 404 后才用同一键和参数重试。样本缺口按失败处理，数据更新和回滚按 catalog 快照进行。
+### 2. 下载并记录公开历史数据
+
+确认来源允许下载、使用和本地归档。Yahoo 使用 finance 的 `download_yahoo_daily`，默认提供明确的 User-Agent。遇到 429、408、5xx 或连接失败时，按退避策略在 query1 和 query2 间切换并遵守 `Retry-After` 的等待预算。失败时保留脱敏错误，按供应商要求稍后重试。下面的 IBM 日期仅供演示，旧 SPY 的下载参数见下一节。记录获取日期、来源、实际首尾、条数和缺口。Ken French（含 FF5 下载示例）、FRED 及公开历史 catalog 导入命令见原手册。[finance 手工归档步骤](https://github.com/viramoon/finance/blob/327bae28fd8c1f56c44bdcfb086589eaea9583b2/RUNBOOK.md#手工保存公开历史数据)
+
+```bash
+"$FINANCE_PYTHON" -m fertile_finance.download_yahoo_daily \
+  --symbol IBM --start 2024-01-01 --end 2024-12-31 \
+  --output "$FINANCE_HISTORY_ARCHIVE/yahoo-IBM.json"
+```
+
+如需保留公开历史 Parquet，先为原手册的归档导入块设置 `export FERTILE_DATA_ROOT="$acceptance_root/history-data"`，并将 `FINANCE_YAHOO_AS_OF` 设为 Yahoo 存档实际观测截止日。公开历史版本写入该数据根的 `catalog/historical`。采集 catalog 备份会拒绝其中的 `current` 符号链接。确认归档停写后，单独备份原始文件、`current` 和它指向的版本目录。
+
+### 3. 单独备份并迁移旧 SPY
+
+本机 `scripts/backup.sh` 的行情与队列备份范围为活动 `FERTILE_DATA_ROOT`（`data-paper`）。旧 SPY 固定 21:00 UTC 日线在非活动 `/home/box/fertile/data/catalog/data/bar/SPY.XNAS-1-DAY-LAST-EXTERNAL`，对应 equity 在同一 catalog 的 `data/equity/SPY.XNAS`，两者均不在日常快照内。确认旧 catalog 已无写入方后，先将日线和 equity 复制到独立持久目录，再对副本迁移。原件保留并保持只读。[单独备份说明](backup.md#非活动旧-spy-catalog-的单独备份)
+
+```bash
+legacy_catalog=/home/box/fertile/data/catalog
+legacy_backup_parent="$HOME/fertile-legacy-spy-backups"
+legacy_backup=$(
+  mkdir -p -- "$legacy_backup_parent" &&
+  copy_dir=$(mktemp -d "$legacy_backup_parent/spy-21utc.XXXXXXXX") &&
+  mkdir -p -- "$copy_dir/catalog/data/bar" "$copy_dir/catalog/data/equity" &&
+  cp -a -- "$legacy_catalog/data/bar/SPY.XNAS-1-DAY-LAST-EXTERNAL" "$copy_dir/catalog/data/bar/" &&
+  cp -a -- "$legacy_catalog/data/equity/SPY.XNAS" "$copy_dir/catalog/data/equity/" &&
+  printf '%s\n' "$copy_dir"
+) && printf '%s\n' "$legacy_backup/catalog"
+```
+
+在 `$legacy_backup` 记录来源目录和提供方、标的 `SPY.XNAS`、实际首尾和条数、原消费方、固定 21:00 UTC 时间口径、OHLCV 和复权口径。下载覆盖旧交易日的 SPY 源 OHLCV、调整收盘价和公司行为。输入核实后的旧归档首尾，以及新 Yahoo 存档的实际观测截止日。finance 迁移示例默认使用 ARCA Bar 类型，本机按示例指引通过 `--help` 选用 `--bar-type SPY.XNAS-1-DAY-LAST-EXTERNAL`。[finance SPY 迁移说明](https://github.com/viramoon/finance/blob/327bae28fd8c1f56c44bdcfb086589eaea9583b2/catalog/README.md#既有-spy-固定-2100-utc-数据)
+
+```bash
+read -r -p '旧 SPY 首日 (YYYY-MM-DD): ' spy_first_session
+read -r -p '旧 SPY 末日 (YYYY-MM-DD): ' spy_last_session
+"$FINANCE_PYTHON" -m fertile_finance.download_yahoo_daily \
+  --symbol SPY --start "$spy_first_session" --end "$spy_last_session" \
+  --output "$FINANCE_HISTORY_ARCHIVE/yahoo-SPY.json"
+read -r -p 'Yahoo SPY 实际观测截止日 (YYYY-MM-DD): ' spy_as_of
+spy_target="$acceptance_root/spy-data"
+"$FINANCE_PYTHON" -B -m fertile_finance.migrate_spy \
+  --source-catalog "${legacy_backup:?}/catalog" \
+  --bar-type SPY.XNAS-1-DAY-LAST-EXTERNAL \
+  --target-data-root "$spy_target" \
+  --yahoo-json "$FINANCE_HISTORY_ARCHIVE/yahoo-SPY.json" --adjustment-as-of "$spy_as_of" \
+  --dry-run > "$acceptance_root/spy-dry-run.json"
+```
+
+核对 dry-run 的新旧首尾、条数、缺口、全日市冬令时 21:00 UTC、夏令时 20:00 UTC 及半日市实际收盘时间，并核对源价精度、复权因子及公司行为。确认后，用同一组参数去掉 `--dry-run`。
+
+```bash
+"$FINANCE_PYTHON" -B -m fertile_finance.migrate_spy \
+  --source-catalog "${legacy_backup:?}/catalog" \
+  --bar-type SPY.XNAS-1-DAY-LAST-EXTERNAL \
+  --target-data-root "$spy_target" \
+  --yahoo-json "$FINANCE_HISTORY_ARCHIVE/yahoo-SPY.json" --adjustment-as-of "$spy_as_of" \
+  > "$acceptance_root/spy-migration.json"
+```
+
+核对重导报告及目标 `$spy_target/catalog/historical/yahoo/SPY.ARCA`。如需保留新归档，将完整版本转存到独立的持久研究位置，保留旧副本和两个报告。官方作业输入按第 5 步审核，SPY 迁移后的 `SPY.ARCA` 归档供单独研究读取。
+
+### 4. 可选重拉 FRED 对齐旧 SPY
+
+**官方四窗口作业不使用 FRED。** 无需 FRED series ID、`cosd` 或 `coed`。已导入的 2024 年 `DGS10` 共 261 条，其覆盖与验收无关。官方作业也无需 Ken French 日频，Sharpe 固定 `rf=0`，结果标记为 `rf_source="rf=0"`。
+
+独立研究如需把 `DGS10` 对齐旧 SPY 最长样本，按 finance 手册的可选命令设置 `cosd=1993-01-29`，将 `coed` 填为核实后的 SPY 归档实际末日。下例的末日仅演示。下载后核对日频、年化百分比单位、实际首尾和缺值，再导入新的独立数据根。若要保留该研究归档，在验收清理前将其转存到独立的持久位置。[finance 可选重拉及导入](https://github.com/viramoon/finance/blob/327bae28fd8c1f56c44bdcfb086589eaea9583b2/RUNBOOK.md#可选扩展-fred-归档以对齐-spy-样本)
+
+```bash
+export FINANCE_FRED_FIRST_DATE=1993-01-29
+export FINANCE_SPY_LAST_SESSION=2024-12-31  # 改为核实的 SPY 归档末日
+export FINANCE_FRED_DATA_ROOT="$acceptance_root/fred-spy-span"
+export FINANCE_FRED_SPY_CSV="$FINANCE_HISTORY_ARCHIVE/fred-DGS10-spy-span.csv"
+curl --fail --location --get 'https://fred.stlouisfed.org/graph/fredgraph.csv' \
+  --data-urlencode 'id=DGS10' --data-urlencode "cosd=$FINANCE_FRED_FIRST_DATE" \
+  --data-urlencode "coed=$FINANCE_SPY_LAST_SESSION" --output "$FINANCE_FRED_SPY_CSV"
+```
+
+下载成功并核对归档后，沿用以上变量按 finance 原文导入，核对写入结果和 `Missing DGS10 values`。
+
+```bash
+"$FINANCE_PYTHON" - <<'PY'
+from datetime import date
+import os
+from pathlib import Path
+
+from fertile_finance.historical_catalog import HistoricalCatalog
+from fertile_finance.research_factors import load_fred
+
+series = load_fred(Path(os.environ["FINANCE_FRED_SPY_CSV"]), series_id="DGS10")
+catalog = HistoricalCatalog(Path(os.environ["FINANCE_FRED_DATA_ROOT"]))
+start = date.fromisoformat(os.environ["FINANCE_FRED_FIRST_DATE"])
+end = date.fromisoformat(os.environ["FINANCE_SPY_LAST_SESSION"])
+print(catalog.write_fred(series, start=start, end=end))
+print("Missing DGS10 values:", sum(row.value is None for row in series.rows))
+PY
+```
+
+### 5. 转换并审核导入研究快照
+
+使用经许可的 NYSE 上市 USD 股票或 ETF 日线。选择无拆股且有连续 XNYS 会话的区间，原始 OHLC 未按现金分红复权、价格可精确表示到美分，成交量为整股。转换器从 Yahoo 源 quote 生成 CSV 和血缘，遇到无法精确表示到美分的价格或区间内的拆股会退出。核对来源、价格口径、公司行为、实际首尾、条数、缺口、`adjustment_as_of` 及 CSV SHA-256 后再运行导入。如果 Yahoo 数据无法满足要求，改用经审核的供应商原始 CSV 并填实际 `--source`，不得自行舍入或补缺。若输入已在 `HistoricalCatalog`，按 finance 文档使用其中的 `--historical-data-root` / `--series-id` 示例。已发布的标的目录不可覆盖，重试导入用新的独立研究根。[finance 日线准备和导入](https://github.com/viramoon/finance/blob/327bae28fd8c1f56c44bdcfb086589eaea9583b2/docs/historical-backtest.md#准备数据)
+
+```bash
+"$FINANCE_PYTHON" -m fertile_finance.convert_research_csv \
+  --yahoo-json "$FINANCE_HISTORY_ARCHIVE/yahoo-IBM.json" --adjustment-as-of 2024-12-31 \
+  --start 2024-01-02 --end 2024-12-31 --output "$FINANCE_HISTORY_ARCHIVE/ibm.csv" \
+  > "$FINANCE_HISTORY_ARCHIVE/ibm.lineage.json"
+cat "$FINANCE_HISTORY_ARCHIVE/ibm.lineage.json"
+sha256sum "$FINANCE_HISTORY_ARCHIVE/ibm.csv"
+```
+
+日期按已核实的源文件取值。审查通过后，把快照导入第 1 步的 `$FERTILE_RESEARCH_ROOT`。
+
+```bash
+"$FINANCE_PYTHON" -m fertile_finance.research_catalog "$FINANCE_HISTORY_ARCHIVE/ibm.csv" \
+  --instrument IBM.XNYS --asset-type stock --kind historical \
+  --source "Yahoo Finance chart IBM" --raw-split-free-reviewed
+```
+
+### 6. 隔离验收官方四窗口历史作业
+
+按已导入标的的覆盖范围调整日期和标的。请求区间至少包含 `slow_period + 1` 个连续 XNYS 会话，示例使用默认慢线 30 日。示例端口 18081 必须空闲，可省略 `--port 18081` 让运行器自动选高位端口。避开 8081、8090 和 8082。运行器启动本次专用的环回 finance-api 和 worker，提交一个 `SmaCrossover` 并轮询终态，队列为 `$FINANCE_ISOLATED_DATA/finance-state/backtests/jobs.sqlite3`。运行结束或中断后回收本次进程并释放端口。[finance 官方隔离命令](https://github.com/viramoon/finance/blob/327bae28fd8c1f56c44bdcfb086589eaea9583b2/RUNBOOK.md#隔离验收官方历史作业)
+
+```bash
+"$FINANCE_PYTHON" -m fertile_finance.isolated_historical_job \
+  --api-bin "$release/bin/finance-api" \
+  --data-root "$FINANCE_ISOLATED_DATA" --research-root "$FERTILE_RESEARCH_ROOT" \
+  --port 18081 --instrument IBM.XNYS --start 2024-01-02 --end 2024-12-31 \
+  > "$acceptance_root/job.json" 2> "$acceptance_root/job.stderr"
+```
+
+退出码为零后检查 `job.json` 的 `status=succeeded`、请求和摘要策略均为 `SmaCrossover`，标的与日期匹配本次请求，`summary.research.dataset` 与快照清单一致。非零时保留错误、终态 JSON（若有）和隔离队列供诊断。
+
+- 核对 `summary.research.windows` 依序为 `50y`、`10y`、`5y`、`longest_sample`，`requested_years` 分别为 50、10、5、`null`。记录每行请求起点、实际及日历覆盖首尾、观测数、应有和缺失交易日、覆盖状态及 `rf_source`。覆盖不足时 `metrics=null`，有值的绩效使用十进制字符串。示例的一年区间应使三个固定窗口覆盖不足，最长样本按 warmup 后的实际净值序列核对。
+- 核对 `summary.research.audit.fills` 等于 `summary.total_orders`。抽查 `recent_fills` 的信号日、执行日与 `executed_at`，确认在下一 XNYS 会话收盘成交，股数、价格和佣金与配置及模拟规则相符。记录零量 bar、阻塞计数和成交样本。零成交时保留计数，需验证逐笔时选经审核且能触发成交的区间重跑。[finance 成交与绩效口径](https://github.com/viramoon/finance/blob/327bae28fd8c1f56c44bdcfb086589eaea9583b2/docs/historical-backtest.md#信号执行和绩效)
+
+### 7. 留存证据并清理
+
+记录 UTC 时间、release manifest、数据与研究根、端口、来源和数据覆盖、作业 ID、四窗口检查结果及成交审计。保留终态 JSON、stderr、CSV 血缘和 `$FERTILE_RESEARCH_ROOT/IBM.XNYS/dataset.json`。若使用供应商 CSV，保存对应审核记录。若进行了 SPY 迁移或 FRED 归档，一并保留报告与归档记录。需要留存队列时，在运行器退出后从独立数据根复制队列目录。以下示例把由 Yahoo 转换输入且成功的 IBM 作业证据留在临时目录之外。
+
+```bash
+evidence=$(mktemp -d "$HOME/fertile-historical-evidence.XXXXXXXX")
+cp -- "$release/manifest.json" "$acceptance_root/job.json" "$acceptance_root/job.stderr" \
+  "$FERTILE_RESEARCH_ROOT/IBM.XNYS/dataset.json" "$evidence/"
+cp -- "$FINANCE_HISTORY_ARCHIVE/ibm.lineage.json" "$evidence/"
+sha256sum "$FINANCE_HISTORY_ARCHIVE/ibm.csv" > "$evidence/ibm.sha256"
+printf '%s\n' "$evidence"
+```
+
+确认运行器已退出、专用端口已释放、证据和需要保留的归档均已转存，再删除第 1 步创建的临时根。只使用本次 `mktemp` 返回的路径。单独备份的旧 SPY 保留在持久备份目录。
+
+```bash
+if [[ ${acceptance_root:-} =~ ^/tmp/fertile-historical\.[A-Za-z0-9]{8}$ && ! -L "$acceptance_root" ]]; then
+  rm -rf -- "$acceptance_root"
+fi
+```
 
 ## 启停、诊断与回滚
 
