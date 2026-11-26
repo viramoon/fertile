@@ -109,6 +109,19 @@ class EncryptedRecovery(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=self.root) as work:
             return remote_backup.inventory(self.transport(), Path(work))
 
+    def encrypted_files(self):
+        return {path for path in self.store.rglob("*") if path.is_file()}
+
+    def corrupt_ciphertext(self, new_files, plaintext_size):
+        size = remote_backup.ciphertext_size(plaintext_size)
+        candidates = [path for path in new_files if path.stat().st_size == size]
+        self.assertEqual(len(candidates), 1, "fixture must identify exactly one encrypted object")
+        blob, = candidates
+        data = bytearray(blob.read_bytes())
+        data[-1] ^= 1
+        blob.write_bytes(data)
+        self.assertEqual(blob.stat().st_size, size)
+
     def test_standalone_full_and_hourly_restore_exact_point(self):
         original = self.success("full")["point"]
         self.old.unlink()
@@ -252,6 +265,138 @@ class EncryptedRecovery(unittest.TestCase):
         self.assertIsNotNone(self.invoke("restore", full, "--snapshot-to", target)[0])
         self.assertFalse(target.exists())
 
+    def test_unrelated_corrupt_commit_does_not_block_exact_full_restore(self):
+        old_full = self.success("full")["point"]
+        original_blobs = self.encrypted_files()
+        new_full = self.success("full")["point"]
+        commit = f"{new_full}.json"
+        listed = self.transport().list_files("commits")
+        self.corrupt_ciphertext(self.encrypted_files() - original_blobs, listed[commit])
+        self.assertEqual(self.transport().list_files("commits"), listed)
+        with self.assertRaises(CryptError):
+            self.transport().download(f"commits/{commit}", self.root / "unreadable-commit")
+
+        target = self.root / "healthy-full"
+        self.assertEqual(self.success("restore", old_full, "--snapshot-to", target)["point"], old_full)
+        self.assertEqual(backup.verify(target)["stamp"], old_full)
+        self.assertEqual((target / "catalog/unchanged.parquet").read_bytes(), self.stable.read_bytes())
+        state = self.success("status")
+        self.assertEqual(state["last_recoverable_point"], old_full)
+        self.assertTrue(state["degraded"])
+
+    def test_live_status_and_latest_restore_skip_equal_length_corruption_and_descendants(self):
+        full = self.success("full")["point"]
+        healthy_hour = self.success("hourly")["point"]
+        original_blobs = self.encrypted_files()
+        bad_payload = self.catalog / "later-corrupt.parquet"
+        bad_payload.write_bytes(b"c" * 32768)
+        bad_hour = self.success("hourly")["point"]
+        bad_blobs = self.encrypted_files() - original_blobs
+        descendant = self.success("hourly")["point"]
+        self.assertEqual([p.id for p in self.read_inventory().chain(descendant)],
+                         [full, healthy_hour, bad_hour, descendant])
+        listing = self.transport().list_files(f"objects/{bad_hour}")
+        self.corrupt_ciphertext(bad_blobs, bad_payload.stat().st_size)
+        self.assertEqual(self.transport().list_files(f"objects/{bad_hour}"), listing)
+
+        self.assertEqual(self.success("status", "--cached")["last_recoverable_point"], descendant)
+        with self.subTest("latest before status refresh"):
+            target = self.root / "latest-healthy"
+            self.assertEqual(self.success("restore", "latest", "--snapshot-to", target)["point"], healthy_hour)
+            self.assertEqual(backup.verify(target)["stamp"], healthy_hour)
+            self.assertFalse((target / "catalog/later-corrupt.parquet").exists())
+
+        with self.subTest("live status"):
+            state = self.success("status")
+            self.assertEqual(state["last_recoverable_point"], healthy_hour)
+            self.assertEqual(state["last_hourly_at"], remote_backup.iso_point(healthy_hour))
+            self.assertTrue(state["degraded"])
+            self.assertTrue(state["alert"])
+            self.assertEqual(self.success("status", "--cached")["last_recoverable_point"], healthy_hour)
+
+        with self.subTest("explicit point"):
+            exact = self.root / "explicit-corrupt"
+            self.assertIsNotNone(self.invoke("restore", descendant, "--snapshot-to", exact)[0])
+            self.assertFalse(exact.exists())
+
+    def test_hourly_clears_cached_points_when_remote_archive_is_empty(self):
+        full = self.success("full")["point"]
+        hour = self.success("hourly")["point"]
+        self.assertEqual(self.success("status", "--cached")["last_recoverable_point"], hour)
+        transport = self.transport()
+        transport.purge("commits")
+        transport.purge("objects")
+
+        self.assertIn("hourly backup requires a verified full recovery point", self.invoke("hourly")[0])
+        state = self.success("status", "--cached")
+        self.assertIsNone(state["last_recoverable_point"])
+        self.assertIsNone(state["last_full_at"])
+        self.assertIsNone(state["last_hourly_at"])
+        self.assertTrue(state["degraded"])
+        self.assertTrue(state["alert"])
+        self.assertNotEqual(self.success("full")["point"], full)
+
+    def test_hourly_removes_known_invalid_full_from_cached_schedule_markers(self):
+        full = self.success("full")["point"]
+        transport = self.transport()
+        object_name = next(iter(transport.list_files(f"objects/{full}")))
+        transport.delete(f"objects/{full}/{object_name}")
+
+        self.assertIn("hourly backup requires a verified full recovery point", self.invoke("hourly")[0])
+        state = self.success("status", "--cached")
+        self.assertIsNone(state["last_recoverable_point"])
+        self.assertIsNone(state["last_full_at"])
+        self.assertTrue(state["degraded"])
+        self.assertTrue(state["alert"])
+
+    def test_hourly_uses_older_full_when_newest_full_has_corrupt_ciphertext(self):
+        good = self.success("full")["point"]
+        original_blobs = self.encrypted_files()
+        later_payload = self.catalog / "later-full.parquet"
+        later_payload.write_bytes(b"f" * 32768)
+        bad = self.success("full")["point"]
+        self.corrupt_ciphertext(self.encrypted_files() - original_blobs, later_payload.stat().st_size)
+        self.assertEqual(self.success("status", "--cached")["last_recoverable_point"], bad)
+
+        state = self.success("hourly")
+        hour = state["point"]
+        self.assertEqual(state["last_recoverable_point"], hour)
+        self.assertEqual(state["last_full_at"], remote_backup.iso_point(good))
+        self.assertTrue(state["degraded"])
+        self.assertEqual([point.id for point in self.read_inventory().chain(hour)], [good, hour])
+        target = self.root / "hour-from-good-full"
+        self.success("restore", hour, "--snapshot-to", target)
+        self.assertEqual((target / "catalog/later-full.parquet").read_bytes(), later_payload.read_bytes())
+
+    def test_hourly_listing_outage_preserves_last_verified_point_with_alert(self):
+        full = self.success("full")["point"]
+        with patch.object(CryptRemote, "list_files", side_effect=CryptError("remote_error", "synthetic listing outage")):
+            self.assertIn("remote_error", self.invoke("hourly")[0])
+        state = self.success("status", "--cached")
+        self.assertEqual(state["last_recoverable_point"], full)
+        self.assertEqual(state["last_full_at"], remote_backup.iso_point(full))
+        self.assertIsNone(state["last_hourly_at"])
+        self.assertTrue(state["degraded"])
+        self.assertTrue(state["alert"])
+        self.assertFalse(self.success("hourly")["degraded"])
+
+    def test_payload_read_outage_preserves_last_verified_point_with_alert(self):
+        full = self.success("full")["point"]
+        for action in ("status", "hourly"):
+            with self.subTest(action=action):
+                self.assertFalse(self.success("status")["degraded"])
+                with patch.object(CryptRemote, "object_hashes",
+                                  side_effect=CryptError("remote_error", "synthetic object read outage")):
+                    code, lines, _ = self.invoke(action)
+                self.assertIn("remote_error", code)
+                cached = self.success("status", "--cached")
+                self.assertEqual(cached["last_recoverable_point"], full)
+                self.assertEqual(cached["last_full_at"], remote_backup.iso_point(full))
+                self.assertTrue(cached["degraded"])
+                self.assertTrue(cached["alert"])
+                if action == "status":
+                    self.assertEqual(json.loads(lines[0])["last_recoverable_point"], full)
+
     def test_missing_keys_and_capacity_fail_with_no_commit(self):
         full = self.success("full")["point"]
         with patch("backup_crypt.shutil.disk_usage", return_value=SimpleNamespace(free=0)):
@@ -340,6 +485,48 @@ class EncryptedRecovery(unittest.TestCase):
         self.assertEqual(self.success("status", "--cached")["last_recoverable_point"], first_hour)
         hour = self.success("hourly")["point"]
         self.assertEqual(self.read_inventory().chain(hour)[0].id, new_full)
+
+    def test_hourly_completion_preserves_full_published_after_parent_scan(self):
+        previous = self.success("full")["point"]
+        listed_commits, release_hour = Event(), Event()
+        original = CryptRemote.list_files
+
+        def pause_hour(transport, relative):
+            files = original(transport, relative)
+            if relative == "commits" and not listed_commits.is_set():
+                listed_commits.set()
+                if not release_hour.wait(15):
+                    raise TimeoutError("full did not publish during hourly scan")
+            return files
+
+        def run(kind):
+            with tempfile.TemporaryDirectory(dir=self.root) as work:
+                remote_backup.run_backup(SimpleNamespace(action=kind, seal_wal=False), self.box,
+                                         "private:fixture", self.transport(), Path(work))
+
+        def pg_command(_box, *command, **_kwargs):
+            if command[0] == "psql":
+                return "t"
+            Path(command[command.index("--file") + 1]).write_text("synthetic dump")
+
+        with (patch.object(backup.Box, "command", pg_command), patch.object(CryptRemote, "list_files", pause_hour),
+              redirect_stdout(io.StringIO()), ThreadPoolExecutor(max_workers=2) as pool):
+            pending_hour = pool.submit(run, "hourly")
+            try:
+                self.assertTrue(listed_commits.wait(10))
+                pool.submit(run, "full").result(timeout=12)
+                self.assertFalse(pending_hour.done())
+            finally:
+                release_hour.set()
+            pending_hour.result(timeout=12)
+        found = self.read_inventory()
+        new_full = found.latest("full")
+        hour = found.latest("hourly")
+        self.assertEqual([point.id for point in found.chain(hour)], [previous, hour])
+        state = self.success("status", "--cached")
+        self.assertEqual(state["last_recoverable_point"], max(new_full, hour))
+        self.assertEqual(state["last_full_at"], remote_backup.iso_point(new_full))
+        self.assertEqual(state["last_hourly_at"], remote_backup.iso_point(hour))
 
     def test_alert_after_one_hour_even_if_integer_age_rounds_down(self):
         point = "20261127T030000.000000Z"

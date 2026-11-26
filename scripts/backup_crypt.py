@@ -11,6 +11,12 @@ import subprocess
 
 
 NAMED_REMOTE = re.compile(r"([A-Za-z0-9_][A-Za-z0-9_-]*):(.*)")
+SHA256_ROW = re.compile(rb"([0-9a-f]{64})  ([0-9a-f]{64})")
+CRYPT_READ_FAILURES = (
+    b"failed to authenticate decrypted block",
+    b"not an encrypted file - bad magic string",
+    b"file is too short to be encrypted",
+)
 CRYPT_OPTIONS = {
     "type", "remote", "password", "password2", "description", "filename_encryption",
     "directory_name_encryption", "no_data_encryption", "filename_encoding", "strict_names",
@@ -122,7 +128,7 @@ class CryptRemote:
         path = "/".join(part for part in (self.prefix, relative) if part)
         return f"{self.name}:{path}"
 
-    def _run(self, command, *paths, flags=(), missing=()):
+    def _run(self, command, *paths, flags=(), missing=(), reading=False):
         crypt, storage, _ = self._profiles()
         if (dict(crypt) != self.crypt_profile
                 or {key: value for key, value in storage.items() if key != "token"} != self.storage_profile):
@@ -132,9 +138,9 @@ class CryptRemote:
             # the dedicated wrapped root before using or creating a prefix.
             self._invoke("lsjson", f"{self.name}:", flags=("--no-modtime", "--no-mimetype"), missing=(3,))
             self.namespace_checked = True
-        return self._invoke(command, *paths, flags=flags, missing=missing)
+        return self._invoke(command, *paths, flags=flags, missing=missing, reading=reading)
 
-    def _invoke(self, command, *paths, flags, missing):
+    def _invoke(self, command, *paths, flags, missing, reading=False):
         # Explicit arguments and a minimal environment prevent inherited rclone
         # settings from selecting credentials, disabling crypt, or logging names.
         env = {"PATH": os.environ.get("PATH", os.defpath), "LC_ALL": "C.UTF-8"}
@@ -143,7 +149,8 @@ class CryptRemote:
                 [self.binary, command, "--config", self.config, "--crypt-strict-names",
                  "--contimeout", "15s", "--timeout", "2m", "--low-level-retries", "3", "--retries", "2",
                  *flags, "--", *paths],
-                env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE if reading else subprocess.DEVNULL,
                 check=False,
             )
         except OSError:
@@ -151,6 +158,12 @@ class CryptRemote:
         if result.returncode in missing:
             return None
         if result.returncode:
+            if reading and result.returncode in (3, 4):
+                raise CryptError("remote_missing", "Encrypted remote file or directory is missing.")
+            # rclone's generic nonzero exit also covers network and local I/O
+            # problems. Only known crypt diagnostics establish data corruption.
+            if reading and any(message in result.stderr for message in CRYPT_READ_FAILURES):
+                raise CryptError("remote_integrity", "Encrypted remote content failed authentication.")
             raise CryptError("remote_error", f"Encrypted remote operation failed ({command}).")
         return result.stdout
 
@@ -191,10 +204,26 @@ class CryptRemote:
         self._run("copy", local.absolute(), self._remote(relative_path(relative)), flags=("--immutable",))
 
     def download(self, relative: str, local: Path):
-        self._run("copyto", self._remote(relative_path(relative)), local.absolute())
+        self._run("copyto", self._remote(relative_path(relative)), local.absolute(), reading=True)
 
     def download_tree(self, relative: str, local: Path):
-        self._run("copy", self._remote(relative_path(relative)), local.absolute())
+        self._run("copy", self._remote(relative_path(relative)), local.absolute(), reading=True)
+
+    def object_hashes(self, relative: str):
+        # The crypt backend must authenticate and decrypt every byte. Its
+        # metadata and the underlying Drive checksum describe ciphertext.
+        data = self._run("hashsum", "SHA256", self._remote(relative_path(relative)),
+                         flags=("--download",), reading=True)
+        actual = {}
+        for line in data.splitlines():
+            row = SHA256_ROW.fullmatch(line)
+            if not row:
+                raise CryptError("remote_integrity", "Invalid encrypted object hash entry.")
+            sha256, name = (field.decode("ascii") for field in row.groups())
+            if name in actual:
+                raise CryptError("remote_integrity", "Duplicate encrypted object hash entry.")
+            actual[name] = sha256
+        return actual
 
     def delete(self, relative: str):
         self._run("deletefile", self._remote(relative_path(relative)), missing=(4,))

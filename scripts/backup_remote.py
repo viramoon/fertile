@@ -27,10 +27,17 @@ MANAGED = ALLOWED_TREES | {"wal"}
 SHA256 = re.compile(r"[a-f0-9]{64}")
 RESTORE_MAX_AGE = timedelta(days=7)
 RPO = timedelta(hours=1)
+POINT_READ_ERRORS = {"remote_integrity", "remote_missing"}
 
 
 class RecoveryError(ValueError):
     pass
+
+
+class UnavailablePoint(RecoveryError):
+    def __init__(self, point_id, message):
+        super().__init__(message)
+        self.point_id = point_id
 
 
 def require(condition, message):
@@ -123,13 +130,44 @@ class Inventory:
     def latest(self, kind=None):
         return max((point.id for point in self.points.values() if kind is None or point.kind == kind), default=None)
 
+    def newest_first(self):
+        return (self.points[point_id] for point_id in sorted(self.points, reverse=True))
+
+
+def exact_chain(remote, point_id, work):
+    point_time(point_id)
+    chain = []
+    parent = None
+    while point_id is not None:
+        path = work / (point_id + ".json")
+        try:
+            remote.download(f"commits/{point_id}.json", path)
+            point = Point.read(path, point_id)
+        except CryptError as error:
+            if error.code not in POINT_READ_ERRORS:
+                raise
+            raise RecoveryError("recovery point missing or chain is broken") from error
+        except (ValueError, TypeError, KeyError) as error:
+            raise RecoveryError("recovery point missing or chain is broken") from error
+        require(parent is None or point.reference() == parent, "broken recovery chain")
+        chain.append(point)
+        parent = point.parent
+        point_id = parent["id"] if parent else None
+    return chain[::-1]
+
 
 def inventory(remote, work):
     commits = work / "commits"
     commits.mkdir()
     listed = remote.list_files("commits")
     if listed:
-        remote.download_tree("commits", commits)
+        try:
+            remote.download_tree("commits", commits)
+        except CryptError as error:
+            if error.code not in POINT_READ_ERRORS:
+                raise
+            # rclone may have copied other manifests before finding a bad one.
+            # The point loop retries any missing file individually.
     objects = remote.list_files("objects")
     by_point = {}
     for name, size in objects.items():
@@ -141,7 +179,10 @@ def inventory(remote, work):
         point_id = filename.removesuffix(".json")
         try:
             require(filename == point_id + ".json" and "/" not in filename, "invalid commit name")
+            point_time(point_id)
             path = commits / filename
+            if not path.is_file():
+                remote.download(f"commits/{filename}", path)
             require(path.is_file() and path.stat().st_size == size, "commit download incomplete")
             point = Point.read(path, point_id)
             require(by_point.get(point.id, {}) == point.objects(), "committed object inventory mismatch")
@@ -149,6 +190,10 @@ def inventory(remote, work):
                 parent = points.get(point.parent["id"])
                 require(parent and parent.reference() == point.parent, "broken recovery chain")
             points[point.id] = point
+        except CryptError as error:
+            if error.code not in POINT_READ_ERRORS:
+                raise
+            invalid.add(point_id)
         except (ValueError, TypeError, KeyError):
             invalid.add(point_id)
     return Inventory(points, invalid, set(by_point))
@@ -179,15 +224,9 @@ def read_state(root, name):
     return state
 
 
-def update_state(root, name, *, found=None, published=None, degraded=None):
+def update_state(root, name, *, published=None, degraded=None):
     with locked(root / "run/backup-remote-state.lock"):
-        state = read_state(root, name) if found is None or published else {}
-        if found is not None:
-            for key, kind in (("last_point", None), ("full", "full"), ("hourly", "hourly")):
-                cached = state.get(key)
-                if cached in found.invalid:
-                    cached = None
-                state[key] = max(cached or "", found.latest(kind) or "") or None
+        state = read_state(root, name)
         state["remote_id"] = reference_id(name)
         if published:
             for key in ("last_point", published.kind):
@@ -197,6 +236,23 @@ def update_state(root, name, *, found=None, published=None, degraded=None):
         atomic_json(state_path(root), state)
     return state
 
+
+def record_observation(root, name, found, heads, before):
+    with locked(root / "run/backup-remote-state.lock"):
+        current = read_state(root, name)
+        state = {"remote_id": reference_id(name)}
+        lost = False
+        for kind in ("full", "hourly"):
+            previous, cached = before.get(kind), current.get(kind)
+            lost |= previous is not None and previous not in found.points
+            # A full may finish publishing after the hourly listing. Preserve
+            # that new observation unless this scan already disproved it.
+            concurrent = cached if cached != previous and cached not in found.invalid else None
+            state[kind] = max(heads.get(kind) or "", concurrent or "") or None
+        state["last_point"] = max(state["full"] or "", state["hourly"] or "") or None
+        state["degraded"] = bool(found.invalid or lost or not state["last_point"] and current.get("degraded"))
+        atomic_json(state_path(root), state)
+    return state
 
 def status_fields(state, now):
     latest = state.get("last_point")
@@ -240,12 +296,50 @@ def effective(chain):
     return files
 
 
-def hour_parent(found, point_id):
-    older = [point.id for point in found.points.values() if point.id < point_id]
-    base = max((item for item in older if found.points[item].kind == "full"), default=None)
-    require(base, "hourly backup requires a verified full recovery point")
-    chosen = max(item for item in older if found.chain(item)[0].id == base)
-    return found.chain(chosen)
+def payload_available(remote, point):
+    expected = point.objects()
+    if not expected:
+        return True
+    try:
+        return remote.object_hashes("objects/" + point.id) == {name: name for name in expected}
+    except CryptError as error:
+        if error.code not in POINT_READ_ERRORS:
+            raise
+        return False
+
+
+def verified_chain(remote, found, point, checked):
+    chain = found.chain(point.id)
+    for item in chain:
+        if item.id in found.invalid:
+            return None
+        if item.id not in checked:
+            if not payload_available(remote, item):
+                found.invalid.add(item.id)
+                return None
+            checked.add(item.id)
+    return chain
+
+
+def verified_heads(remote, found, checked):
+    heads = {}
+    for point in found.newest_first():
+        if point.kind not in heads and verified_chain(remote, found, point, checked):
+            heads[point.kind] = point.id
+        if len(heads) == 2:
+            break
+    return heads
+
+
+def hour_parent(remote, found, point_id, checked):
+    base = next((point.id for point in found.newest_first() if point.kind == "full"
+                 and point.id < point_id and verified_chain(remote, found, point, checked)), None)
+    if base is None:
+        return None
+    for point in found.newest_first():
+        if point.id < point_id and found.chain(point.id)[0].id == base:
+            if chain := verified_chain(remote, found, point, checked):
+                return chain
 
 
 def check_objects(directory, expected):
@@ -307,8 +401,16 @@ def materialize(remote, chain, snapshot):
         received = Path(tempfile.mkdtemp(dir=snapshot.parent))
         try:
             if point.files:
-                remote.download_tree("objects/" + point.id, received)
-            check_objects(received, point.objects())
+                try:
+                    remote.download_tree("objects/" + point.id, received)
+                except CryptError as error:
+                    if error.code in POINT_READ_ERRORS:
+                        raise UnavailablePoint(point.id, "recovery payload is unreadable") from error
+                    raise
+            try:
+                check_objects(received, point.objects())
+            except RecoveryError as error:
+                raise UnavailablePoint(point.id, str(error)) from error
             stale = set(point.deleted) | set(point.files)
             for name in sorted(stale):
                 path = snapshot / name
@@ -319,7 +421,8 @@ def materialize(remote, chain, snapshot):
                             break
                         parent.rmdir()
                 else:
-                    require(name not in point.deleted, "recovery deletion has no predecessor")
+                    if name in point.deleted:
+                        raise UnavailablePoint(point.id, "recovery deletion has no predecessor")
             for name, info in point.files.items():
                 path = snapshot / name
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -327,14 +430,38 @@ def materialize(remote, chain, snapshot):
         finally:
             shutil.rmtree(received)
     expected = chain[-1].snapshot
-    for tree in expected["trees"]:
-        require(tree in ALLOWED_TREES, "unknown snapshot tree")
-        (snapshot / tree).mkdir(exist_ok=True)
-    if "wal" in expected:
-        for tree in ("manifests", "segments"):
-            (snapshot / "wal" / tree).mkdir(parents=True, exist_ok=True)
-    require(verify(snapshot) == expected, "recovered snapshot differs from committed metadata")
+    try:
+        for tree in expected["trees"]:
+            require(tree in ALLOWED_TREES, "unknown snapshot tree")
+            (snapshot / tree).mkdir(exist_ok=True)
+        if "wal" in expected:
+            for tree in ("manifests", "segments"):
+                (snapshot / "wal" / tree).mkdir(parents=True, exist_ok=True)
+        require(verify(snapshot) == expected, "recovered snapshot differs from committed metadata")
+    except (ValueError, KeyError, TypeError) as error:
+        raise UnavailablePoint(chain[-1].id, "invalid recovered snapshot") from error
     return snapshot
+
+
+def stage_restore(remote, selection, work, snapshot):
+    if selection != "latest":
+        chain = exact_chain(remote, selection, work)
+        materialize(remote, chain, snapshot)
+        return chain[-1]
+
+    found = inventory(remote, work)
+    for point in found.newest_first():
+        chain = found.chain(point.id)
+        if any(item.id in found.invalid for item in chain):
+            continue
+        try:
+            materialize(remote, chain, snapshot)
+        except UnavailablePoint as error:
+            found.invalid.add(error.point_id)
+            shutil.rmtree(snapshot)
+        else:
+            return point
+    raise RecoveryError("no readable recovery point with an intact chain")
 
 
 def keep_points(found, days, weeks, restored):
@@ -407,44 +534,49 @@ def run_backup(args, root, name, remote, work):
             previous = next(snapshots(box.backups), None) if box.backups.exists() else None
             meta = capture_snapshot(box, snapshot, previous, remote=True, seal_wal=args.seal_wal)
         chain = ()
-        found = None
         if kind == "hourly":
-            found = inventory(remote, work)
-            if found.invalid:
+            before = read_state(root, name)
+            try:
+                found = inventory(remote, work)
+                checked = set()
+                heads = verified_heads(remote, found, checked)
+                chain = hour_parent(remote, found, meta["stamp"], checked)
+            except CryptError:
                 update_state(root, name, degraded=True)
-            chain = hour_parent(found, meta["stamp"])
+                raise
+            record_observation(root, name, found, heads, before)
+            require(chain, "hourly backup requires a verified full recovery point")
         point = publish(remote, work, snapshot, meta, kind, chain)
-        state = update_state(root, name, found=found, published=point, degraded=bool(found.invalid) if found else None)
+        state = update_state(root, name, published=point)
     print(json.dumps({"point": point.id, "kind": kind, **status_fields(state, datetime.now(UTC))}))
 
 
 def run_restore(args, root, name, remote, work):
     with locked(root / "run/backup-remote-restore.lock"), locked(root / "run/backup-remote.lock", fcntl.LOCK_SH):
-        found = inventory(remote, work)
-        selected = found.latest() if args.point == "latest" else args.point
-        chain = found.chain(selected)
         if args.snapshot_to is not None:
             target = args.snapshot_to
             require(target.is_absolute() and target == target.resolve() and target.parent.is_dir()
                     and not target.exists(), "snapshot destination must be an absent absolute path")
             with tempfile.TemporaryDirectory(dir=target.parent, prefix=".backup-receive-") as temporary:
                 stage = Path(temporary) / "snapshot"
-                materialize(remote, chain, stage)
+                point = stage_restore(remote, args.point, work, stage)
                 sync_tree(stage)
                 stage.rename(target)
                 sync_dir(target.parent)
-            print(json.dumps({"point": selected, "snapshot": str(target)}))
+            print(json.dumps({"point": point.id, "snapshot": str(target)}))
             return
         targets = (args.target_data_root, args.target_database, None)
+        stage = work / "snapshot"
+        point = stage_restore(remote, args.point, work, stage)
+        stage = stage.rename(work / point.id)
         with restore_session(root, targets, quiet=True) as fd:
             box = Box(restoring=True, quiet=True)
             box.fds = [fd]
             require(args.target_database != box.db and not overlaps(args.target_data_root.resolve(), box.data),
                     "remote restore requires a data root and database separate from the active instance")
-            stage = materialize(remote, chain, work / selected)
             meta = verify_restore(box, stage, targets)
             restore(box, stage, meta, False, targets)
-            atomic_json(receipt_file(root), {"remote_id": reference_id(name), "point": chain[-1].reference(),
+            atomic_json(receipt_file(root), {"remote_id": reference_id(name), "point": point.reference(),
                                             "restored_at": utc_stamp()})
 
 
@@ -494,8 +626,10 @@ def main():
             else:
                 with locked(root / "run/backup-remote.lock"):
                     if args.action == "status":
+                        before = read_state(root, name)
                         found = inventory(remote, work)
-                        state = update_state(root, name, found=found, degraded=bool(found.invalid))
+                        heads = verified_heads(remote, found, set())
+                        state = record_observation(root, name, found, heads, before)
                         print(json.dumps(status_fields(state, datetime.now(UTC))))
                     else:
                         prune_remote(remote, root, name, work, settings)

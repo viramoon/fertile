@@ -112,6 +112,19 @@ class RemoteSchedule(unittest.TestCase):
         self.assertTrue(degraded["degraded"])
         self.launch.assert_not_called()
 
+    def test_confirmed_remote_loss_reschedules_todays_full(self):
+        self.set_state(full=self.instant, hourly=self.instant, last_point=self.instant)
+        self.observe()
+        self.launch.assert_not_called()
+
+        found = backup_remote.Inventory({}, set(), set())
+        before = backup_remote.read_state(self.root, self.name)
+        backup_remote.record_observation(self.root, self.name, found, {}, before)
+        checks = self.observe(self.instant + timedelta(minutes=1))
+        self.assertIsNone(checks["backup:remote_age"]["last_recoverable_at"])
+        self.assertTrue(checks["backup:remote_age"]["alert"])
+        self.assertEqual(self.commands(), ["full", "hourly"])
+
     def test_disabled_or_one_shot_does_not_launch_uploads(self):
         checks = self.observe(once=True)
         self.assertEqual(checks["backup:remote_full"]["state"], "skipped")
