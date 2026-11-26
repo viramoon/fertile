@@ -24,6 +24,19 @@
 
 本机只做本地压力测试和部署复验。保持 `FERTILE_PUBLIC_ORIGIN` 未设置，巡检覆盖文件中的 `public_origin` 省略或设为 `null`。公网采样记录为跳过，部署冒烟使用 `tests/e2e-smoke.sh local --paper-only`。未来的生产服务器由运维配置自己的 HTTPS origin。公网冒烟还需在 `tests/e2e-smoke.sh public` 后显式传入该 origin。[巡检与告警](../ops/monitoring.md)
 
+## web 管理会话与集成凭据
+
+以下变量可选，写在 `config/runtime.env`，由 supervisord 和 systemd 的控制器传给 web。未启用时省略对应行。修改后，supervisord 运行 `scripts/fertile ensure-up` 重新读取配置并替换配置有变的进程，systemd 重启 `fertile-web.service`。
+
+| 参数 | 用途和默认行为 |
+| --- | --- |
+| `WEB_PUBLIC_ORIGIN` | 启用浏览器管理会话。填写与浏览器 `Origin` 完全一致的 HTTPS origin，省略默认端口、路径和尾部斜杠。未设置时浏览器管理会话关闭，已配置的 Bearer 令牌仍可用于支持它的接口。此设置独立于 `FERTILE_PUBLIC_ORIGIN` 公网巡检。 |
+| `WEB_ADMIN_SESSION_TTL_SECONDS` | 会话期限，默认 900 秒，允许 1 至 900 秒。重启 web 后已有会话需要重新登录。 |
+| `WEB_CREDENTIAL_DIR` | 与公钥路径成对设置。填写 web 运行账户所有的 0700 持久绝对目录，例如 `$FERTILE_ROOT/secrets/web-credentials`。目录须避开版本、静态资源及整栈备份采集路径。两项均省略时，集成凭据录入返回 503。 |
+| `WEB_CREDENTIAL_RECIPIENT_PUBLIC_KEY_FILE` | 与密文目录成对设置。填写 web 可读的 RSA 公钥 PEM 绝对路径。公钥由 web 运行账户或 root 所有，组和其他用户不可写。私钥由获授权的接收方保管。 |
+
+`runtime.env` 只放 origin、期限和路径等非机密值。启用凭据录入后，在 PostgreSQL 备份之外单独保管配套 JWE 密文和接收方私钥。权限、密钥轮换和备份说明见 [web 运行手册](https://github.com/viramoon/web/blob/90662dbb904724f119814576cb98128d8cb9ed05/RUNBOOK.md#集成配置及凭据)。
+
 ## 隔离历史验收的路径
 
 本机 `runtime.env` 未设置 `FERTILE_RESEARCH_ROOT` 时，live API 与 worker 都读取 `$FERTILE_ROOT/data/research`。把验收日线导入该目录会立即让现网作业看到新快照。验收时仅为导入命令和 finance 隔离运行器指定专用研究根，使用独立绝对路径，避开 live 默认研究根及其子目录。

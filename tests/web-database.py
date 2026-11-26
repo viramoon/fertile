@@ -1,4 +1,5 @@
 """Exercise local PG17 peer isolation, upgrade/restore the previous web migration, and preserve external credentials."""
+from hashlib import sha384
 import json
 import os
 import socket
@@ -13,11 +14,39 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 import supervision
 
+INITIAL = "20261122000000"
+W1 = "20261126000000"
+APPLIED = f"{INITIAL},{W1}"
+
 def run(*args, env, capture=False, check=True):
     return subprocess.run(args, env=env, text=True, capture_output=capture, check=check)
 
 def sql(env, query):
     return run("psql", "-XAt", "-v", "ON_ERROR_STOP=1", "-c", query, env=env, capture=True).stdout.strip()
+
+def applied_migrations(env, schema):
+    return sql(env, f"SELECT string_agg(version::text, ',' ORDER BY version) "
+                    f"FROM {schema}._sqlx_migrations WHERE success")
+
+def seed_pre_w1(env):
+    migration = REPO / "web/migrations" / f"{INITIAL}_initial_schemas.sql"
+    checksum = sha384(migration.read_bytes()).hexdigest()
+    # Recreate a pre-W1 database using its original migration and SQLx's ledger
+    # format. The current binary applies W1 after this fixture is restored.
+    ledger = f"""
+        CREATE TABLE public._sqlx_migrations (
+            version bigint PRIMARY KEY,
+            description text NOT NULL,
+            installed_on timestamptz NOT NULL DEFAULT now(),
+            success boolean NOT NULL,
+            checksum bytea NOT NULL,
+            execution_time bigint NOT NULL
+        );
+        INSERT INTO public._sqlx_migrations (version, description, success, checksum, execution_time)
+        VALUES ({INITIAL}, 'initial schemas', true, decode('{checksum}', 'hex'), 0);
+    """
+    run("psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "--single-transaction",
+        "-f", migration, "-c", ledger, env=env)
 
 def legacy_bundle(root, source, config):
     # Keep the rollback regression usable in shallow/squashed checkouts. The
@@ -100,14 +129,17 @@ def audit():
             supervision.prepare_web(old_plan)
             assert sql(base, "SELECT count(*) FROM pg_roles WHERE rolname='fertile_web'") == "0"
             assert sql(admin, "SHOW hba_file") == str(original[1])
-            run(source, "migrate", env=candidate)
-            print("previous bundle: new database created, original peer identity and HBA; no managed role")
+            seed_pre_w1(admin)
+            assert applied_migrations(admin, "public") == INITIAL
+            assert sql(admin, "SELECT to_regclass('app.integration_configs') IS NULL") == "t"
+            print("previous bundle: pre-W1 database created, original peer identity and HBA; no managed role")
             sql(admin, "INSERT INTO app.schema_info VALUES ('preserve', 17)")
             sql(admin, "CREATE SCHEMA unrelated; CREATE TABLE unrelated.keep(n int)")
             archive = root / "legacy.dump"
             run("pg_dump", "-Fc", "--create", "-f", archive, env=admin)
             run("dropdb", "web", env=base)
             run("pg_restore", "--exit-on-error", "--create", "-d", "postgres", archive, env=base)
+            assert applied_migrations(admin, "public") == INITIAL
             server.terminate()
             server.wait(timeout=15)
             supervision.switch(root / "current", release)
@@ -118,16 +150,17 @@ def audit():
                            "has_database_privilege(current_database(),'CREATE'), has_schema_privilege('public','CREATE') "
                            "FROM pg_roles WHERE rolname=current_user")
                 assert role == "fertile_web|f|f|f|f|f|f|f", role
-                assert sql(web, "SELECT count(*) FROM fertile_web._sqlx_migrations WHERE success") == "1"
+                assert applied_migrations(web, "fertile_web") == APPLIED
+                assert sql(web, "SELECT to_regclass('app.integration_configs') IS NOT NULL") == "t"
                 assert sql(web, "SELECT version FROM app.schema_info WHERE component='preserve'") == "17"
-                # A rollback to the previous candidate, connecting as box, sees the very same history.
+                # The current migrator using the legacy connection sees the same ledger.
                 run(source, "migrate", env=candidate)
-                assert sql(admin, "SELECT count(*) FROM public._sqlx_migrations WHERE success") == "1"
+                assert applied_migrations(admin, "public") == APPLIED
                 assert sql(admin, "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='unrelated'") == admin_name
                 assert sql(web, "SELECT current_schema()") == "fertile_web"
                 assert sql(web, "SELECT has_schema_privilege('app','CREATE'),has_schema_privilege('blog','CREATE')") == "t|t"
                 assert run("psql","-XAt","-c","SELECT 1",env=dict(web,PGDATABASE="postgres"),capture=True,check=False).returncode != 0
-                print(label, role, "migrations=1 preserved=17")
+                print(label, role, f"migrations={APPLIED} preserved=17")
             server.terminate()
             server.wait(timeout=15)
             supervision.switch(root / "current", legacy)
@@ -135,15 +168,16 @@ def audit():
             server = start_pg(old_plan)
             supervision.prepare_web(old_plan)
             run(source, "migrate", env=old_plan["services"]["web"]["env"])
-            assert sql(admin, "SELECT count(*) FROM public._sqlx_migrations WHERE success") == "1"
+            assert applied_migrations(admin, "public") == APPLIED
             assert sql(admin, "SELECT version FROM app.schema_info WHERE component='preserve'") == "17"
-            print("rollback: previous bundle migrated using the compatibility view; existing data preserved")
+            print("legacy layout: current migrator used the compatibility view; existing data preserved")
             server.terminate()
             server.wait(timeout=15)
             supervision.switch(root / "current", release)
             server = start_pg(plan)
             run("dropdb", "web", env=base)
             supervision.prepare_web(plan)
+            assert applied_migrations(web, "fertile_web") == APPLIED
             assert sql(web, "SELECT version FROM app.schema_info WHERE component='web'") == "1"
             assert sql(web, "SELECT has_database_privilege(current_database(),'CREATE')") == "f"
             run(source, "migrate", env=candidate)

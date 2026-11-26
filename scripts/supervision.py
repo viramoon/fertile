@@ -54,7 +54,12 @@ BINDIR = Path(os.environ.get("FERTILE_SUPERVISOR_BIN", ROOT / "tools/supervisor/
 NAME = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]*\Z")
 SETTING = re.compile(r"[A-Z_][A-Z_0-9]*\Z")
 EXTERNAL_PROGRAMS = {"cloudflared", "tunnel", "viramoon-site", "watchdog", "viramoon-watchdog"}
+WEB_RUNTIME_SETTINGS = {
+    "WEB_PUBLIC_ORIGIN", "WEB_ADMIN_SESSION_TTL_SECONDS",
+    "WEB_CREDENTIAL_DIR", "WEB_CREDENTIAL_RECIPIENT_PUBLIC_KEY_FILE",
+}
 SUPPORTED = {
+    *WEB_RUNTIME_SETTINGS,
     "FERTILE_PROFILE", "FERTILE_MARKET_SOURCE", "FERTILE_DATA_ROOT", "FERTILE_POSTGRES_PORT",
     "FERTILE_RESEARCH_ROOT", "FERTILE_WEB_DATABASE",
     "FINANCE_API_PORT", "FINANCE_COLLECTOR_PORT", "WEB_PORT", "IB_GATEWAY_ADDRESS",
@@ -62,7 +67,7 @@ SUPPORTED = {
     "FERTILE_BACKUP_DAYS", "FERTILE_BACKUP_WEEKS", "FERTILE_BACKUP_REMOTE",
 }
 INHERIT = {
-    *SUPPORTED, "HOME", "PATH", "LANG", "LC_ALL", "TZ", "USER", "LOGNAME",
+    *(SUPPORTED - WEB_RUNTIME_SETTINGS), "HOME", "PATH", "LANG", "LC_ALL", "TZ", "USER", "LOGNAME",
     "FERTILE_BOX_HOME", "FERTILE_ROOT", "LD_LIBRARY_PATH", "UV_CACHE_DIR",
     "FERTILE_CONTROL_PYTHON", "FERTILE_SUPERVISOR_BIN", "FERTILE_SERVICE_MANIFEST",
     "SSL_CERT_FILE", "CURL_CA_BUNDLE", "XDG_RUNTIME_DIR", "PYTHONDONTWRITEBYTECODE",
@@ -203,7 +208,8 @@ def build_plan(*, release=None, names=None):
     common = dict(PYTHONDONTWRITEBYTECODE="1", FERTILE_ROOT=str(ROOT), FERTILE_PROFILE=profile, FERTILE_MARKET_SOURCE=source,
                   FERTILE_DATA_ROOT=str(data), FERTILE_RESEARCH_ROOT=str(research), PGHOST=str(RUN / "postgres"),
                   PGPORT=port(settings.get("FERTILE_POSTGRES_PORT", 5432)), PGDATABASE=web_db)
-    common.update({key: val for key, val in settings.items() if key not in common})
+    web_settings = {key: value for key, value in settings.items() if key in WEB_RUNTIME_SETTINGS}
+    common.update({key: value for key, value in settings.items() if key not in common and key not in web_settings})
     common["FERTILE_POSTGRES_PORT"] = common["PGPORT"]
     base = {k: os.environ[k] for k in INHERIT if k in os.environ}
     services = {}
@@ -237,6 +243,7 @@ def build_plan(*, release=None, names=None):
                        FINANCE_COLLECTOR_CONFIG=settings.get("FINANCE_COLLECTOR_CONFIG", str(
                            release / "finance/config/collector" / (f"{profile}.yaml" if source == "replay" else "ib-cloudbox.yaml"))))
         if name == "web":
+            env.update(web_settings)
             # The controlling CLI can be newer than the selected release. Earlier
             # managed-role bundles shipped the SQL before declaring the capability.
             sql_available = (release / "fertile/scripts/prepare-web-db.sql").is_file()
