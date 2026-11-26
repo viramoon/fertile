@@ -280,7 +280,8 @@ class EncryptedRecovery(unittest.TestCase):
         self.assertEqual(self.transport().list_files("commits"), {})
 
     def test_prune_guards_recent_restore_and_preserves_chain(self):
-        week = datetime.now(UTC) - timedelta(days=35)
+        now = datetime.now(UTC)
+        week = now - timedelta(days=35 + now.weekday())
         ids = []
         for offset in (0, 1, 7, 14, 21, 28, 29, 30, 31, 32, 33, 34):
             ids.append(self.success("full", cut=(week + timedelta(days=offset)).strftime(backup.STAMP))["point"])
@@ -288,13 +289,19 @@ class EncryptedRecovery(unittest.TestCase):
         self.assertIn("successful isolated restore", self.invoke("prune")[0])
         found = self.read_inventory()
         proof = {"remote_id": remote_backup.reference_id("private:fixture"),
-                 "restored_at": backup.utc_stamp(), "point": found.points[hour].reference()}
+                 "restored_at": (now - timedelta(days=8)).strftime(backup.STAMP),
+                 "point": found.points[hour].reference()}
+        backup.atomic_json(remote_backup.receipt_file(self.box), proof)
+        self.assertIn("successful isolated restore", self.invoke("prune")[0])
+        self.assertEqual(self.read_inventory().points.keys(), found.points.keys())
+        proof["restored_at"] = backup.utc_stamp()
         backup.atomic_json(remote_backup.receipt_file(self.box), proof)
         result = self.success("prune")
-        self.assertGreater(result["pruned"], 0)
+        self.assertEqual(result, {"pruned": 2, "retained": 11})
         remaining = self.read_inventory()
-        self.assertEqual(remaining.points.keys(), remote_backup.keep_points(found, 7, 4, hour))
-        self.assertNotIn(ids[0], remaining.points)
+        # 7 daily fulls are in the newest week. Three older ISO weeks
+        # contribute one full each; the oldest week drops both its fulls.
+        self.assertEqual(remaining.points.keys(), {*ids[2:], hour})
         self.assertEqual([p.id for p in remaining.chain(hour)], [ids[-1], hour])
         self.success("restore", hour, "--snapshot-to", self.root / "after-prune")
 
