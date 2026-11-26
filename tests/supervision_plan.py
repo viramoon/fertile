@@ -174,6 +174,26 @@ class RuntimePlan(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported"):
             ctl.build_plan()
 
+    def test_optional_web_settings_are_passed_only_to_web(self):
+        rows = [{"name": name, "directory": str(self.root), "command": ["/bin/true"]}
+                for name in ("web", "finance-api")]
+        self.manifest.write_text(json.dumps({"services": rows}))
+        settings = {
+            "WEB_PUBLIC_ORIGIN": "https://dashboard.example.test",
+            "WEB_ADMIN_SESSION_TTL_SECONDS": "300",
+            "WEB_CREDENTIAL_DIR": str(self.root / "jwe"),
+            "WEB_CREDENTIAL_RECIPIENT_PUBLIC_KEY_FILE": str(self.root / "recipient.pem"),
+        }
+        services = ctl.build_plan()["services"]
+        self.assertTrue(settings.keys().isdisjoint(services["web"]["env"]))
+        (self.root / "config/runtime.env").write_text(
+            "".join(f"{key}={value}\n" for key, value in settings.items()))
+        with patch.dict(os.environ, {"WEB_ADMIN_SESSION_TTL_SECONDS": "120"}):
+            services = ctl.build_plan()["services"]
+        expected = {**settings, "WEB_ADMIN_SESSION_TTL_SECONDS": "120"}
+        self.assertEqual({key: services["web"]["env"][key] for key in settings}, expected)
+        self.assertTrue(settings.keys().isdisjoint(services["finance-api"]["env"]))
+
     def test_rendered_launcher_runs_without_version_in_runtime_directory(self):
         self.write(command=["/bin/echo", "launcher reached fixture"])
         ctl.render(ctl.build_plan())

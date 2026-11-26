@@ -74,6 +74,8 @@ with path.open("x", encoding="utf-8") as stream:
 PY
 ```
 
+浏览器管理会话和集成凭据按需配置。可选变量、HTTPS origin、权限和默认行为见 [web 管理会话与集成凭据](../docs/configuration.md#web-管理会话与集成凭据)。升级已有数据库时按 [v1 阶段 0 重新部署](../ops/ruler-runbook.md#v1-阶段-0-重新部署) 执行迁移和复验。
+
 ## 3. 启动服务
 
 同一实例由一种守护方式控制。`deploy/services.yaml` 定义核心服务的启动顺序和健康端点。
