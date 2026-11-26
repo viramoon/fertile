@@ -569,6 +569,37 @@ class PublicationPolicy(unittest.TestCase):
         self.assert_rejected(self.guard("artifact", "supervisor", output), "invalid or unavailable input")
         self.assertEqual(output.read_bytes(), before)
 
+    def test_artifact_allows_its_foreign_owned_checkout_with_path_guards(self):
+        linked = self.parent / "linked"
+        unrelated = self.parent / "unrelated"
+        self.git("worktree", "add", "-q", "--detach", str(linked))
+        self.git("init", "-q", str(unrelated))
+        self.env.update(GIT_TEST_ASSUME_DIFFERENT_OWNER="1", GIT_CONFIG_COUNT="0")
+        ordinary_git = self.git("worktree", "list", "--porcelain", check=False)
+        self.assertNotEqual(ordinary_git.returncode, 0)
+        self.assertIn("dubious ownership", ordinary_git.stderr)
+
+        timing = self.parent / "timing.env"
+        timing.write_text("cold_seconds=41\nwarm_seconds=2\n")
+        output = self.parent / "bootstrap-timing.json"
+        self.assert_passed(self.guard("artifact", "bootstrap", output, "--timing", timing))
+        self.assertEqual(json.loads(output.read_bytes()), {"schema_version": 1, "check": "bootstrap",
+                         "result": "passed", "cold_seconds": 41, "warm_seconds": 2})
+        for tree in (self.repo, linked):
+            blocked = tree / "bootstrap-timing.json"
+            self.assert_rejected(self.guard("artifact", "bootstrap", blocked, "--timing", timing),
+                                 "private-root-overlaps-worktree")
+            self.assertFalse(blocked.exists())
+
+        self.assert_rejected(self.guard("private-root", self.parent / "private"), "git-read-failed")
+        elsewhere = self.parent / "unrelated-report.json"
+        result = subprocess.run(
+            [sys.executable, "-B", self.repo / "scripts/data-guard.py", "artifact", "supervisor", elsewhere],
+            cwd=unrelated, env=self.env, text=True, capture_output=True,
+        )
+        self.assert_rejected(result, "git-read-failed")
+        self.assertFalse(elsewhere.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

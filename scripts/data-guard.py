@@ -602,10 +602,11 @@ def pr_metadata(event):
     return (title + "\n" + (body or "")).encode()
 
 
-def check_private_roots(roots):
+def check_private_roots(roots, *, safe_checkout=None):
+    git_options = ("-c", f"safe.directory={safe_checkout}") if safe_checkout is not None else ()
     worktrees = [
         Path(os.fsdecode(row[len(b"worktree "):])).resolve()
-        for row in git("worktree", "list", "--porcelain", "-z").split(b"\0")
+        for row in git(*git_options, "worktree", "list", "--porcelain", "-z").split(b"\0")
         if row.startswith(b"worktree ")
     ]
     for path in roots:
@@ -629,7 +630,9 @@ def artifact(profile, output, timing):
         report.update(cold_seconds=int(match[1]), warm_seconds=int(match[2]))
     elif timing is not None:
         raise Rejected("unexpected-artifact-input")
-    check_private_roots([output])
+    # Container jobs can run as a different user from the checkout owner.
+    # Scope trust to this checkout and this read-only Git invocation.
+    check_private_roots([output], safe_checkout=Path(__file__).resolve().parents[1])
     with output.open("x", encoding="utf-8") as stream:
         json.dump(report, stream, indent=2)
         stream.write("\n")
