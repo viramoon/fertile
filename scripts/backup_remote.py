@@ -510,6 +510,12 @@ def prune_remote(remote, root, name, work, settings, *, automatic=False):
     weeks = int(settings.get("FERTILE_BACKUP_WEEKS", 4))
     require(days >= 1 and weeks >= 0, "retention requires days>=1 and weeks>=0")
     keep = keep_points(found, days, weeks, restored.id)
+    # The retention set includes all ancestors. Check each point's current
+    # content once, before deleting any commit or object.
+    for point_id in sorted(keep):
+        require(payload_available(remote, found.points[point_id]),
+                "remote prune blocked by unreadable or corrupt retained recovery payload")
+
     obsolete = set(found.points) - keep
     for point_id in sorted(obsolete, reverse=True):
         remote.delete(f"commits/{point_id}.json")

@@ -450,6 +450,42 @@ class EncryptedRecovery(unittest.TestCase):
         self.assertEqual([p.id for p in remaining.chain(hour)], [ids[-1], hour])
         self.success("restore", hour, "--snapshot-to", self.root / "after-prune")
 
+    def test_prune_preserves_only_healthy_full_when_recently_restored_full_is_corrupt(self):
+        now = datetime.now(UTC)
+        old = self.success("full", cut=(now - timedelta(days=1)).strftime(backup.STAMP))["point"]
+        original_blobs = self.encrypted_files()
+        payload = self.catalog / "newest-full.parquet"
+        payload.write_bytes(b"r" * 32768)
+        recent = self.success("full", cut=now.strftime(backup.STAMP))["point"]
+        found = self.read_inventory()
+        self.assertEqual(remote_backup.keep_points(found, 1, 0, recent), {recent})
+        backup.atomic_json(remote_backup.receipt_file(self.box), {
+            "remote_id": remote_backup.reference_id("private:fixture"),
+            "restored_at": backup.utc_stamp(),
+            "point": found.points[recent].reference(),
+        })
+
+        transport = self.transport()
+        commits = transport.list_files("commits")
+        objects = transport.list_files("objects")
+        self.corrupt_ciphertext(self.encrypted_files() - original_blobs, payload.stat().st_size)
+        self.assertEqual(transport.list_files("commits"), commits)
+        self.assertEqual(transport.list_files("objects"), objects)
+        self.assertEqual(self.success("status")["last_recoverable_point"], old)
+
+        with (patch.dict(os.environ, {"FERTILE_BACKUP_DAYS": "1", "FERTILE_BACKUP_WEEKS": "0"}),
+              patch.object(CryptRemote, "delete", autospec=True, side_effect=CryptRemote.delete) as delete,
+              patch.object(CryptRemote, "purge", autospec=True, side_effect=CryptRemote.purge) as purge):
+            status, lines, _ = self.invoke("prune")
+        self.assertIn("remote prune blocked by unreadable or corrupt retained recovery payload", status or "", lines)
+        delete.assert_not_called()
+        purge.assert_not_called()
+        self.assertEqual(transport.list_files("commits"), commits)
+        self.assertEqual(transport.list_files("objects"), objects)
+        target = self.root / "only-healthy-full"
+        self.assertEqual(self.success("restore", old, "--snapshot-to", target)["point"], old)
+        self.assertEqual(backup.verify(target)["stamp"], old)
+
     def test_hourly_can_publish_while_full_upload_is_waiting(self):
         previous = self.success("full")["point"]
         transfer, release = Event(), Event()
