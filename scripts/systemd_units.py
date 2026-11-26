@@ -248,12 +248,18 @@ def validate_units(units):
         metadata = sections["Unit"]
         required = {"Description"}
         if unit == TARGET:
-            required |= {"Wants", "After"}
+            required |= {"Wants", "Before", "DefaultDependencies", "Conflicts"}
             if sections["Install"].get("WantedBy") != ["multi-user.target"]:
                 raise ValueError("fertile.target must be installed with multi-user.target")
-            for key in ("Wants", "After"):
-                if set(metadata.get(key, [""])[0].split()) != expected - {TARGET}:
-                    raise ValueError(f"{unit}: {key} must include all core services")
+            members = expected - {TARGET}
+            if set(" ".join(metadata.get("Wants", [])).split()) != members:
+                raise ValueError(f"{unit}: Wants must include every generated service")
+            # PartOf queues the member stop jobs. Reverse ordering makes
+            # them finish before the target's own stop job completes.
+            if (metadata.get("DefaultDependencies") != ["no"] or metadata.get("After")
+                    or set(" ".join(metadata.get("Before", [])).split()) != members | {"shutdown.target"}
+                    or metadata.get("Conflicts") != ["shutdown.target"]):
+                raise ValueError(f"{unit}: invalid shutdown ordering for member services")
         else:
             fields = sections["Service"]
             if (fields.get("Type") != ["exec"] or fields.get("Restart") != ["always"] or

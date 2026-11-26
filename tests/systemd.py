@@ -22,6 +22,30 @@ import yaml
 
 
 class Render(unittest.TestCase):
+    def test_target_orders_shutdown_after_every_generated_member(self):
+        rendered = units.render(Path("/srv/fertile"), "a" * 40, "trader", "trading",
+                                include_optional=True, settings={}, mounts=set())
+        target = rendered[units.TARGET]
+        members = [unit for unit in rendered if unit != units.TARGET]
+        self.assertIn("DefaultDependencies=no\n", target)
+        self.assertIn(f"Before={' '.join(members)} shutdown.target\n", target)
+        self.assertIn("Conflicts=shutdown.target\n", target)
+        self.assertNotIn("\nAfter=", target)
+        for unit in members:
+            self.assertIn("PartOf=fertile.target\n", rendered[unit])
+        units.validate_units(rendered)
+
+    def test_validation_rejects_target_stop_order_that_returns_before_members(self):
+        rendered = units.render(Path("/srv/fertile"), "a" * 40, "trader", "trading",
+                                settings={}, mounts=set())
+        target = rendered[units.TARGET]
+        for replacement in (
+            target.replace("Before=", "After="),
+            target.replace("DefaultDependencies=no", "DefaultDependencies=yes"),
+        ):
+            with self.subTest(target=replacement), self.assertRaisesRegex(ValueError, "shutdown ordering"):
+                units.validate_units({**rendered, units.TARGET: replacement})
+
     def test_fstab_mount_uses_same_canonical_path_as_volume(self):
         with TemporaryDirectory() as directory:
             base = Path(directory)
