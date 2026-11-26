@@ -8,6 +8,7 @@
 | scripts/fertile up / ensure / down | 依序启动、重启后恢复、逆序优雅停止服务。 |
 | scripts/fertile status --json | 输出服务启用状态、进程以及可用的 live / ready 结果。 |
 | scripts/fertile data-root | 输出当前环境与 `config/runtime.env` 解析出的 finance 数据根。 |
+| scripts/healthwatch | 采样本机健康状态、记录告警并调度备份。未来生产服务器可通过 `FERTILE_PUBLIC_ORIGIN` 或巡检覆盖文件显式启用 HTTPS 就绪探测。详见 [巡检与告警](../ops/monitoring.md)。 |
 | scripts/fertile rollback SHA | 校验既有版本并切换，重新加载受影响服务。 |
 | scripts/fertile rollback --switch-only SHA | supervisor 已停时，校验既有版本并切换 `current`，由后续 `ensure-up` 启动。 |
 | scripts/backup.sh | 将活动库、队列、catalog 和公开配置备份到持久目录。 |
@@ -17,6 +18,8 @@
 | scripts/release.sh --dry-run | 从 Git 和 GitHub 读取版本、包含的提交与 PR、关闭 issue，向标准输出写入预览。 |
 
 服务使用 [部署清单](../deploy/service.yaml)。操作步骤、备份与故障处理见 [Ruler 手册](../ops/ruler-runbook.md)，系统版本规则见 [发版文档](../docs/release.md)。
+
+本机压力测试与部署复验使用 `tests/e2e-smoke.sh local --paper-only`，公网巡检按默认配置跳过。
 
 ## 本机历史验收
 

@@ -1,4 +1,4 @@
-"""Verify bounded paper-socket loss and observe the independently managed HTTPS origin."""
+"""Verify bounded local paper-socket loss and optionally check a configured HTTPS origin."""
 import argparse
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
@@ -26,7 +26,6 @@ import e2e_smoke
 
 ROOT = drill.ROOT
 NS_MINUTE = 60_000_000_000
-PUBLIC = "https://fertile.viramoon.com"
 MARKET_KEYS = {"market:fresh", "service:finance-collector:ready"}
 
 
@@ -52,7 +51,7 @@ def session(release, opened, closed, duration):
     return start
 
 
-def public_target(args, configured):
+def public_target(args, plan):
     if args.protocol_fixture:
         require(not args.public_origin, "protocol fixture must never use a public domain")
         if args.fixture_origin:
@@ -60,27 +59,32 @@ def public_target(args, configured):
             require(u.scheme == "https" and u.hostname == "127.0.0.1" and u.port and
                     not u.username and not u.password and u.path in ("", "/") and not u.query and not u.fragment,
                     "fixture origin must be an explicit https://127.0.0.1:<port>")
-        require(configured == args.fixture_origin, "healthwatch and the fixture origin must agree")
+        require(configured_origin(plan) == args.fixture_origin, "healthwatch and the fixture origin must agree")
         return args.fixture_origin
     require(not args.fixture_origin, "fixture origin only works in protocol fixture mode")
     if args.paper_only:
         require(not args.public_origin, "paper-only mode does not take a public origin")
+    if not args.public_origin:
         return None
-    require(args.public_origin == PUBLIC == configured,
-            "explicitly confirmed public origin must match this deployment's healthwatch configuration")
+    configured = configured_origin(plan)
+    message = "--public-origin must match the HTTPS origin explicitly configured for this deployment's healthwatch"
+    require(isinstance(configured, str) and configured, message)
+    try:
+        configured = e2e_smoke.public_origin(configured)
+    except argparse.ArgumentTypeError:
+        raise RuntimeError(message) from None
+    require(e2e_smoke.origin_key(urlsplit(args.public_origin)) == e2e_smoke.origin_key(urlsplit(configured)), message)
     return args.public_origin
 
 
-def configured_origin(plan, release):
+def configured_origin(plan):
     env = plan["services"]["healthwatch"]["env"]
     if env.get("FERTILE_PUBLIC_ORIGIN"):
         return env["FERTILE_PUBLIC_ORIGIN"]
     if path := env.get("FERTILE_HEALTH_CONFIG"):
         conf = yaml.safe_load(Path(path).read_text()) or {}
-        if "public_origin" in conf:
-            return conf["public_origin"]
-    manifest = yaml.safe_load((release / "fertile/deploy/service.yaml").read_bytes())
-    return manifest["infrastructure"]["tunnel"]["public_origin"]
+        return conf.get("public_origin")
+    return None
 
 
 def marks(path):
@@ -182,7 +186,7 @@ def run(args):
     plan = json.loads((root / "run/services.json").read_bytes())
     release = (root / "current").resolve(strict=True)
     require(release == Path(plan["release"]).resolve(strict=True), "supervisor plan and active release differ")
-    origin = public_target(args, configured_origin(plan, release))
+    origin = public_target(args, plan)
     opened = None if args.protocol_fixture else session(release, args.session_open, args.session_close, args.duration)
     daemon, active, skipped = drill.running_initial()
     required = {"finance-api", "finance-collector", "web", "healthwatch", "postgres", "finance-backtest-worker"}
@@ -231,9 +235,9 @@ def run(args):
     alerts = root / "logs/alerts/alerts.jsonl"
     cursor = alerts.stat().st_size
     paper_probe(release, args.protocol_fixture)
-    mode = "protocol-fixture" if args.protocol_fixture else "paper-only" if args.paper_only else "full"
+    mode = "protocol-fixture" if args.protocol_fixture else "full" if origin else "paper-only"
     omitted = (["real IB account", "exchange session", "real Cloudflare Tunnel", "public smoke"]
-               if args.protocol_fixture else ["Ruler-managed tunnel recovery", "public smoke"] if args.paper_only
+               if args.protocol_fixture else ["Ruler-managed tunnel recovery", "public smoke"] if not origin
                else ["Ruler-managed tunnel recovery"])
     drill.report("network_baseline", mode=mode, duration_seconds=args.duration, bars=before_bars,
                  unverified=omitted, skipped_services=skipped)
@@ -297,7 +301,7 @@ def run(args):
                  alerts={k: [(item["event"], item["timestamp"]) for item in records] for k, records in events.items()})
     smoke = HERE.parent / "e2e-smoke.sh"
     subprocess.run([smoke, "local", *(["--protocol-fixture"] if args.protocol_fixture else [])], check=True, timeout=260)
-    if mode == "full":
+    if origin and not args.protocol_fixture:
         subprocess.run([smoke, "public", origin], check=True, timeout=260)
     drill.report("network_drill_complete", mode=mode, unverified=omitted)
 
@@ -305,10 +309,11 @@ def run(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group()
-    modes.add_argument("--paper-only", action="store_true")
+    modes.add_argument("--paper-only", action="store_true", help="require local-only checks (the default)")
     modes.add_argument("--protocol-fixture", action="store_true")
     parser.add_argument("--duration", type=int, default=120)
-    parser.add_argument("--public-origin")
+    parser.add_argument("--public-origin", type=e2e_smoke.public_origin,
+                        help="also check the HTTPS origin explicitly configured for healthwatch")
     parser.add_argument("--fixture-origin")
     parser.add_argument("--session-open")
     parser.add_argument("--session-close")

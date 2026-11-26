@@ -3,11 +3,11 @@
 fertile 是金融看板 + 自动交易系统的总仓库，负责初始化、集成、监控、运维与发布。finance、web、frontend 通过 submodule 绑定精确 commit；agent 是独立流程知识库，不是 submodule。
 
 ```text
-浏览器 → Tunnel（入口）→ web（axum，API + frontend 静态文件）→ HTTP → finance api
-                           ↓                                      ↕（持久化状态）
-                      PostgreSQL app / blog             worker / collector → 回放或 paper Gateway
-                                                            ↕
-                                                     Nautilus Parquet catalog
+本机浏览器 → web（axum，API + frontend 静态文件）→ HTTP → finance api
+              ↓                                           ↕（持久化状态）
+        PostgreSQL app / blog                   worker / collector → 回放或 paper Gateway
+                                                     ↕
+                                              Nautilus Parquet catalog
 研究 / 回测（Rust + Python / PyO3）← 历史 catalog
 
 agent → 通用 skill / prompt / 工作流分发（不是业务服务部署）
@@ -20,4 +20,4 @@ web 使用 axum + sqlx + PostgreSQL，业务与博客 schema 归 web；调用 fi
 
 OpenAPI 从 finance / web 代码导出（utoipa），快照在 [contracts](../contracts/README.md)，生成客户端禁止手改；实时消息另外定义。所有交易数值使用精确类型，不能用浮点传输 / 计算造成精度损失。
 
-当前在云电脑使用 paper，迁移边界与网络证据见 [ADR-001](adr/ADR-001-cloud-box-network-constraints.md)；环境 profile 与运行模式独立，路径配置化。8090 为 web、8081 为 finance API、8082 为 collector、4002 为本机只读 paper Gateway。工具版本固定在 deploy/toolchain.env；公网入口为 https://fertile.viramoon.com，由 Ruler 管理 DNS 与 Tunnel。
+当前云电脑用于本地压力测试，使用 paper，部署复验与巡检均走本地。8090 为 web、8081 为 finance API、8082 为 collector、4002 为本机只读 paper Gateway。环境 profile 与运行模式独立，路径配置化，工具版本固定在 `deploy/toolchain.env`。未来生产服务器的公网入口、冒烟和巡检由运维按该服务器的 HTTPS origin 显式启用。迁移边界与网络证据见 [ADR-001](adr/ADR-001-cloud-box-network-constraints.md)。

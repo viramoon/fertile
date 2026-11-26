@@ -15,10 +15,13 @@ Ruler 在运行根 config/runtime.env 中填写每行一个非敏感 KEY=VALUE�
 | FERTILE_RESEARCH_ROOT | 默认为当前 FERTILE_ROOT 下的 data/research，API、worker、备份共用。可显式设置为该目录本身或其具体子目录，恢复到独立数据根时也可设为 `$FERTILE_DATA_ROOT/research`。使用具体的绝对路径。 |
 | FERTILE_WEB_DATABASE | 受管本机 web 的数据库名称，默认 `web`。可通过控制器命令环境临时选择已恢复的库。使用普通 PostgreSQL 库名，开头为字母或下划线，随后可含字母、数字或下划线，最多 63 字符。 |
 | FINANCE_COLLECTOR_CONFIG、IB_GATEWAY_ADDRESS | 指向当前行情源的配置和本机 paper 接口 127.0.0.1:4002。 |
-| FERTILE_HEALTH_CONFIG、FERTILE_PUBLIC_ORIGIN | 站点巡检配置和经确认的 HTTPS 入口。公网入口为空时采样会记录跳过。 |
+| FERTILE_HEALTH_CONFIG | 站点巡检覆盖文件的路径。可在未来生产服务器的文件里显式填写 `public_origin`。 |
+| FERTILE_PUBLIC_ORIGIN | 运维显式启用公网巡检的 HTTPS origin，如 `https://<your-origin>`。非空环境变量优先于覆盖文件。 |
 | FERTILE_BACKUP_DAYS、FERTILE_BACKUP_WEEKS、FERTILE_BACKUP_REMOTE | 本地保留周期与可选 rclone remote 名。详细设置见 [备份](../ops/backup.md)。 |
 
 主管为 web 注入同一 release 的 WEB_STATIC_ROOT、finance HTTP 地址和 PostgreSQL socket。本机 web 使用独立的 fertile_web PostgreSQL 登录角色，通过 Unix socket peer 映射认证。运行时角色仅在其私有迁移 schema、app 和 blog 内具有相应权限，首次 SQLx 迁移的数据库 CREATE 权限由主管临时授予并收回。管理员备份继续使用原 peer 身份。外部 DATABASE_URL 放在 web-database.env，使用外部连接时保留 `FERTILE_WEB_DATABASE` 默认值。迁移、权限和停库恢复按 [Ruler 手册](../ops/ruler-runbook.md) 操作。
+
+本机只做本地压力测试和部署复验。保持 `FERTILE_PUBLIC_ORIGIN` 未设置，巡检覆盖文件中的 `public_origin` 省略或设为 `null`。公网采样记录为跳过，部署冒烟使用 `tests/e2e-smoke.sh local --paper-only`。未来的生产服务器由运维配置自己的 HTTPS origin。公网冒烟还需在 `tests/e2e-smoke.sh public` 后显式传入该 origin。[巡检与告警](../ops/monitoring.md)
 
 ## 隔离历史验收的路径
 

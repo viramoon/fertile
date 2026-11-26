@@ -22,7 +22,7 @@ import supervision as ctl
 import supervisor_drill as drill
 
 
-PUBLIC_PROBE = "https://fertile.viramoon.com/healthz/live"
+PUBLIC_PROBE = "https://supervision.example.test/healthz/live"
 LOCAL_PROBE = "http://127.0.0.1:8081/healthz/live"
 
 

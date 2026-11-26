@@ -20,6 +20,8 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 import yaml
 
+from http_origin import parse_https_origin
+
 SCRIPTS = Path(__file__).resolve().parent
 USER_AGENT = "fertile-healthwatch/" + (SCRIPTS.parent / "VERSION").read_text(encoding="utf-8").strip()
 UTC = timezone.utc
@@ -63,9 +65,7 @@ def append(path, record):
 def settings(root):
     deploy = SCRIPTS.parent / "deploy"
     conf = yaml.safe_load((deploy / "healthwatch.yaml").read_text())
-    manifest = yaml.safe_load((deploy / "service.yaml").read_text())
-    conf.update(public_origin=manifest["infrastructure"]["tunnel"]["public_origin"],
-                disk_path=str(root.parent))
+    conf.update(public_origin=None, disk_path=str(root.parent))
     overlay = os.environ.get("FERTILE_HEALTH_CONFIG")
     if overlay:
         extra = yaml.safe_load(Path(overlay).read_text())
@@ -81,10 +81,11 @@ def settings(root):
         datetime.strptime(conf["backup_at_utc"], "%H:%M")
     if not Path(conf["disk_path"]).is_absolute():
         raise ValueError("disk_path must be absolute")
-    if conf["public_origin"]:
-        origin = urlsplit(conf["public_origin"])
-        if origin.scheme != "https" or not origin.hostname or origin.username or origin.password or origin.path not in ("", "/") or origin.query or origin.fragment:
-            raise ValueError("public_origin must be an HTTPS origin")
+    if conf["public_origin"] not in (None, ""):
+        try:
+            parse_https_origin(conf["public_origin"])
+        except ValueError:
+            raise ValueError("public_origin must be an HTTPS origin") from None
     return conf
 
 
@@ -110,7 +111,7 @@ def http_json(url, timeout, local=False):
 
 def public_ready(origin, timeout):
     if not origin:
-        return result("skipped", "public probe disabled for this instance")
+        return result("skipped", "public origin not configured")
     code, body = http_json(origin.rstrip("/") + "/healthz/ready", timeout)
     ok = (code == 200 and isinstance(body, dict) and body.get("status") in ("ready", "degraded")
           and isinstance(body.get("checks"), list) and bool(body["checks"])

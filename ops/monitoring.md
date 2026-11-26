@@ -15,7 +15,7 @@
 healthwatch 的 HTTP 探针和 webhook 投递均发送 `fertile-healthwatch/<VERSION>` User-Agent。
 
 - finance-api、finance-collector、web 的本地 live 和 ready 各有单独探针。服务清单来自 `scripts/fertile status --json`，启用项另查 supervisor 进程状态；postgres、worker、IB Gateway 等没有 HTTP 端点的服务使用进程探针。手动禁用与 replay 隐含禁用写 skipped；已启用服务缺程序或缺登录凭据记录 failed。
-- 公网独立请求 https://fertile.viramoon.com 的 `/healthz/ready`，要求 HTTP 200 和有效的 web 就绪 JSON。必需依赖均健康时，web 对可选依赖的降级状态仍视为入口可达。跳转、非预期 HTML、TLS 错误及 Tunnel 502/530 使该探针失败。隔离实例显式设置 `public_origin: null` 后，该探针记录 skipped。检查从盒子访问公网入口；不同运营商与地域的可达性另需从相应地点测量。
+- `public:ready` 默认记录 `skipped`，本机压力测试期间保持此设置。此时没有公网探测请求或公网探针告警。未来生产服务器显式配置 HTTPS origin 后，巡检从该服务器独立请求对应的 `/healthz/ready`，要求 HTTP 200 和有效的 web 就绪 JSON。必需依赖均健康时，web 对可选依赖的降级状态仍视为入口可达。跳转、非预期 HTML、TLS 错误及 Tunnel 502/530 使该探针失败。不同运营商与地域的可达性需从相应地点测量。
 - `market:fresh` 从 finance `/api/v1/market/status` 读取业务状态、每个标的的年龄和陈旧标志。统计标的数、陈旧数、观测到的最大年龄及数据源；缺少行情或数据心跳过期标记失败。未启用采集或旧版接口返回 404 会记录 skipped。
 - 磁盘检查默认为部署根的父目录，对应 `/home/box`。可用空间低于 2 GiB 时告警。最近完成的备份需同时具备合法 UTC 时间戳目录、`snapshot.json` 和 `SHA256SUMS`；超过 36 小时、时间在未来或从未完成均告警。清单内容完整性由备份及恢复流程校验。
 - 未就绪、已断开的服务与行情陈旧分别计时。业务健康不等同于 PID 存在；交易的订单核对、未决写请求和真实券商认证应结合 [健康检查](health-checks.md) 与 [Ruler 手册](ruler-runbook.md) 验证。采样不能发现两次轮询之间始末皆已结束的短暂故障，系统与守护日志可补充事件级时间线。
@@ -24,7 +24,7 @@ healthwatch 的 HTTP 探针和 webhook 投递均发送 `fertile-healthwatch/<VER
 
 ## 运行与配置
 
-在部署环境中安装控制端 Python 依赖并运行 `scripts/fertile ensure-up`。默认设置在 [deploy/healthwatch.yaml](../deploy/healthwatch.yaml)，实例级覆盖可在 `config/runtime.env` 设置 `FERTILE_HEALTH_CONFIG=/home/box/fertile/config/healthwatch.yaml`。覆盖文件接受同名配置、`disk_path`、`public_origin`。公网来源默认继承 [服务部署清单](../deploy/service.yaml)，显式设置 `FERTILE_PUBLIC_ORIGIN` 优先。配置更改后重启 healthwatch 并核对采样结果。
+在部署环境中安装控制端 Python 依赖并运行 `scripts/fertile ensure-up`。默认设置在 [deploy/healthwatch.yaml](../deploy/healthwatch.yaml)，实例级覆盖可在 `config/runtime.env` 设置 `FERTILE_HEALTH_CONFIG=/home/box/fertile/config/healthwatch.yaml`。覆盖文件接受同名配置、`disk_path` 和 `public_origin`。本机保持 `FERTILE_PUBLIC_ORIGIN` 未设置，覆盖文件中的 `public_origin` 省略或设为 `null`。未来生产服务器由运维在覆盖文件中填写 `public_origin: "https://<your-origin>"` 或在运行环境中设置 `FERTILE_PUBLIC_ORIGIN=https://<your-origin>`。非空环境变量优先。配置更改后重启 healthwatch 并核对采样结果。
 
 ```sh
 root=${FERTILE_ROOT:-/home/box/fertile}
@@ -59,6 +59,6 @@ python3 scripts/soak_report.py \
   --output "ops/reports/$(date -u +%F)-soak.md"
 ```
 
-报告列出每项探针观测可用率、断线次数、恢复耗时、未恢复事件、行情最大陈旧年龄、跳过原因、采样缺口和实际告警。覆盖不足或存在缺测时仍生成报告，时长门禁以非零状态退出。应写明使用真实 paper 或 replay、实际公网来源，以及是否覆盖美股交易时段。隔离容器、回放源和测试 TLS 入口均按其实际环境标记。
+报告列出每项探针观测可用率、断线次数、恢复耗时、未恢复事件、行情最大陈旧年龄、跳过原因、采样缺口和实际告警。覆盖不足或存在缺测时仍生成报告，时长门禁以非零状态退出。应写明使用真实 paper 或 replay、是否启用了公网探针，以及是否覆盖美股交易时段。已启用公网探针时记录实际 origin。隔离容器、回放源和测试 TLS 入口均按其实际环境标记。
 
-现有网站、Cloudflare 和 DNS 由 Ruler 管理。healthwatch 只探测公网的 fertile 健康端点；本地隔离实例在巡检覆盖文件中使用 `public_origin: null`。部署脚本和巡检无需访问 Tunnel 凭据。
+现有网站、Cloudflare 和 DNS 由 Ruler 管理。部署脚本和巡检无需访问 Tunnel 凭据。

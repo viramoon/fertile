@@ -2,7 +2,7 @@
 
 常规发布依据已验证的 fertile tag。当前高可用联调使用指定的 fertile 集成提交，其 gitlink 锁定 finance、web 和 frontend。所有命令从总仓库根目录运行。保留上一次可用的构建和备份，再切换代码或数据格式。
 
-Ruler 负责目标盒子部署、现有网站、Cloudflare 隧道、DNS 和线上恢复。现网站使用 127.0.0.1:8080。fertile 的独立源站为 127.0.0.1:8090，目标域名为 https://fertile.viramoon.com。fertile 的脚本只管理本项目进程和持久目录。部署不安装开机钩子、shell 启动项或主机定时任务。
+本机只做本地压力测试。fertile 的入口为 `http://127.0.0.1:8090`，现有网站使用 `127.0.0.1:8080`。本机原有的 fertile 公网入口已移除，部署复验和巡检只走本地。Ruler 负责目标盒子部署、现有网站、Cloudflare 隧道、DNS 和线上恢复。fertile 的脚本只管理本项目进程和持久目录。部署不安装开机钩子、shell 启动项或主机定时任务。
 
 在本机执行官方历史日线验收时，直接使用[部署后的隔离历史日线验收](#部署后的隔离历史日线验收)。
 
@@ -11,7 +11,7 @@ Ruler 负责目标盒子部署、现有网站、Cloudflare 隧道、DNS 和线�
 1. 用 box 用户将源码 checkout 到 /home/box/fertile-source。初始化三个私有子模块及 Nautilus 源码。核对目标提交和 profile。
 2. 按 [bootstrap](../deploy/bootstrap.md) 安装锁定的工具，执行 source /home/box/fertile/env.sh。确认磁盘剩余足以构建 Rust、Python wheel、前端与备份。
 3. 按 web 手册确认静态目录、数据库角色和管理令牌。凭据文件只允许属主读写。[web RUNBOOK](https://github.com/viramoon/web/blob/main/RUNBOOK.md)
-4. 在本机 Gateway 完成 paper 登录前，公网可达性、paper 账号和行情连续性独立记录。开发演练可显式选 replay，并为回放与真实行情分别安排持久数据根。
+4. 在本机 Gateway 完成 paper 登录前，独立记录本机服务状态、paper 账号和行情连续性。开发演练可显式选 replay，并为回放与真实行情分别安排持久数据根。
 
 ```sh
 git submodule update --init --recursive
@@ -287,7 +287,7 @@ scripts/fertile rollback <previous-fertile-commit>
    "${old_env[@]}" scripts/fertile ensure-up
    ```
 
-5. 核对 `current`、数据根、旧库连接和服务状态。确认 web、finance API 就绪，查询一条升级前已有的作业，再运行 `--paper-only` 冒烟。冒烟会在当前队列提交作业，需在核对指针后执行。公网入口验收按维护窗口要求执行，通过后再恢复接单。
+5. 核对 `current`、数据根、旧库连接和服务状态。确认 web、finance API 就绪，查询一条升级前已有的作业，再运行本机 `--paper-only` 冒烟。冒烟会在当前队列提交作业，需在核对指针后执行。通过本地复验后恢复接单。
 
    ```bash
    readlink -f -- "$FERTILE_ROOT/current"
@@ -297,7 +297,6 @@ scripts/fertile rollback <previous-fertile-commit>
    psql -X -h "$FERTILE_ROOT/run/postgres" -p "$FERTILE_POSTGRES_PORT" -d "$old_db" \
      -c "SELECT datname, count(*) FROM pg_stat_activity WHERE datname=current_database() AND usename='fertile_web' GROUP BY datname"
    "${old_env[@]}" tests/e2e-smoke.sh local --paper-only
-   "${old_env[@]}" tests/e2e-smoke.sh public https://fertile.viramoon.com --paper-only
    ```
 
 6. 切回新版时，暂停接单并让旧版作业结束。需要保留窗口内的新写入时，依照第 2 步停业务并单独启动 PG，执行 `"${old_env[@]}" PGDATABASE="$old_db" scripts/backup.sh`，记录快照路径后执行 `scripts/postgres.sh stop`。通过原先记录的新版指针启动新版，研究目录继续使用原配置。确认新版作业可查，再重复运行状态检查和 paper-only 冒烟。
@@ -313,9 +312,9 @@ scripts/fertile rollback <previous-fertile-commit>
 
 ## 重启与外部入口
 
-主机重启后由 Ruler 按 bootstrap 核对持久根和工具链，运行 scripts/fertile ensure-up。在运行配置一致时，重复调用可保留现有服务 PID。Ruler 决定调用时机和外部调度。优先核对持久数据库、finance 数据路径和行情新鲜度，再分别验收本地 web 与公网。记录端点和业务状态。[健康检查](health-checks.md)
+主机重启后由 Ruler 按 bootstrap 核对持久根和工具链，运行 `scripts/fertile ensure-up`。在运行配置一致时，重复调用可保留现有服务 PID。Ruler 决定调用时机和外部调度。核对持久数据库、finance 数据路径和行情新鲜度，再用 `tests/e2e-smoke.sh local --paper-only` 验收本机 web。记录端点和业务状态。[健康检查](health-checks.md)
 
-Ruler 在现有 Tunnel 和 DNS 中为 fertile.viramoon.com 配置 http://127.0.0.1:8090 的路由。现有站点继续使用 8080，现场核验的进程、启动方式、隧道配置和凭据由 Ruler 管理。deploy/service.yaml 只记录公网 URL 和本机端口。healthwatch 独立探测 /healthz/ready 并记录失败，隧道修复由 Ruler 执行。
+`deploy/service.yaml` 的 `infrastructure.tunnel.public_origin` 默认为 `null`。本机保持公网巡检未配置。未来生产服务器由运维显式配置自己的 HTTPS origin，设置 `FERTILE_PUBLIC_ORIGIN` 或巡检覆盖文件后，healthwatch 才会从该服务器独立探测公网 `/healthz/ready`。[巡检配置](monitoring.md#运行与配置)
 
 ## 管理令牌
 
@@ -356,20 +355,20 @@ tests/simulate-reboot.sh
 
 ## 整栈冒烟与故障验收
 
-先生成示例回测，再用持久目录的 web 管理令牌运行冒烟。脚本检查系统分项、市场数据年龄、首页 JS/CSS，并实际提交一个幂等回测，直到取得带精确数值的成功摘要。公开入口只填写用户已确认、由其控制且确实路由到本机 web 的 HTTPS origin。
+先生成示例回测，再用持久目录的 web 管理令牌运行本机冒烟。脚本检查系统分项、市场数据年龄、首页 JS/CSS，并实际提交一个幂等回测，直到取得带精确数值的成功摘要。
 
 首页必须至少声明一个同源 JavaScript 模块和一个同源样式表，所有同源模块和样式表都要通过 HTTP 状态、媒体类型和响应内容检查。同源比较中，HTTP 的 `:80` 和 HTTPS 的 `:443` 各自与省略端口等价。脚本跳过所有跨域 `<script src>` 和样式表，包括 Cloudflare Insights 注入的脚本，并写入 `event` 为 `skipped cross-origin asset` 的 JSON 日志，包含资源类型 `kind`（`js` 或 `css`）和主机名 `host`。
 
-~~~sh
-tests/e2e-smoke.sh local
-tests/e2e-smoke.sh public https://fertile.viramoon.com
-~~~
-
-只验收未接入 IB 行情的 paper 部署时，为本机或公网冒烟显式添加 `--paper-only`。本机跳过 healthwatch、xvfb 和 ib-gateway 的就绪要求，仍要求其余核心进程运行、collector live 为 200，并额外接受 collector ready 为 503。两个入口都接受 `system/status` 与 `market/status` 一致的 IB `recovering` 状态，此时暂免行情新鲜度检查。Web 就绪、数据库、finance API、前端资源和回测提交仍需通过。公网与本机请求都发送 `fertile-e2e-smoke/<VERSION>` User-Agent。
+本机部署复验使用 `--paper-only`。该选项跳过本机 healthwatch、xvfb 和 ib-gateway 的就绪要求，仍要求其余核心进程运行、collector live 为 200，并额外接受 collector ready 为 503。本机与公网冒烟在 `--paper-only` 下都接受 `system/status` 与 `market/status` 一致的 IB `recovering` 状态，此时暂免行情新鲜度检查。Web 就绪、数据库、finance API、前端资源和回测提交仍需通过。公网与本机请求都发送 `fertile-e2e-smoke/<VERSION>` User-Agent。
 
 ~~~sh
 tests/e2e-smoke.sh local --paper-only
-tests/e2e-smoke.sh public https://fertile.viramoon.com --paper-only
+~~~
+
+未来生产服务器的运维人员配置自己的 HTTPS 入口并确认它路由到该服务器的 web 后，可在维护窗口显式运行公网冒烟。将下例中的占位 origin 替换为实际入口，未接入 IB 行情的 paper 部署另加 `--paper-only`。
+
+~~~sh
+tests/e2e-smoke.sh public 'https://<your-origin>'
 ~~~
 
 在维护窗口逐项执行，确保每个场景结束后恢复业务再进入下一项。进程测试只向已核对父进程和 PID 身份的本实例服务发信号。停库场景同时检查 web 和 finance PID。
@@ -380,11 +379,11 @@ python3 tests/chaos/services.py postgres
 python3 tests/chaos/services.py reboot
 ~~~
 
-网络演练依赖已登录的只读 paper Gateway 和稳定的 1 分钟行情。它只给本机 paper 连接施加限定故障，公网只观察。真实 Tunnel 恢复的命令和验收由 Ruler 记录。[网络演练](../tests/chaos/network.md)
+网络演练依赖已登录的只读 paper Gateway 和稳定的 1 分钟行情。它只给本机 paper 连接施加限定故障，默认只检查本地端点。未来生产服务器如需同时观察公网入口，由运维显式传入 `--public-origin`。[网络演练](../tests/chaos/network.md)
 
 ## 24 小时观察
 
-在真实盒子上述测试通过后，保留 healthwatch 的持续采样，尽量覆盖一个美股正常交易时段。先核实当时采样显示的发布提交、数据源和公网入口。将起点设为一条真实样本的 UTC 时间，等待至少一天，最后一条样本必须覆盖所选终点。
+在本机上述测试通过后，保留 healthwatch 的持续采样，尽量覆盖一个美股正常交易时段。先核实采样显示的发布提交、数据源和公网探针的跳过状态。将起点设为一条真实样本的 UTC 时间，等待至少一天，最后一条样本必须覆盖所选终点。
 
 ~~~sh
 root=/home/box/fertile
@@ -394,7 +393,7 @@ printf '%s\n' "$start" > "$root/run/soak-start.utc"
 start=$(cat "$root/run/soak-start.utc")
 python3 scripts/soak_report.py \
   --samples "$root/logs/healthwatch/samples.jsonl" --alerts "$root/logs/alerts/alerts.jsonl" \
-  --start "$start" --require-hours 24 --label "目标盒子 · IBKR paper 与已确认的 Tunnel" \
+  --start "$start" --require-hours 24 --label "本地压力测试机 · IBKR paper" \
   --output "ops/reports/${start%%T*}-soak.md"
 ~~~
 

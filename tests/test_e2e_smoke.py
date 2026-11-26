@@ -1,6 +1,6 @@
 """Regression tests for the acceptance script's evidence and credential boundaries."""
 import argparse
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,6 +18,10 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 
 import e2e_smoke as check
+
+
+TEST_HOST = "deployment.invalid"
+TEST_ORIGIN = f"https://{TEST_HOST}"
 
 
 class Site(BaseHTTPRequestHandler):
@@ -132,11 +136,10 @@ class SmokeTests(unittest.TestCase):
 
     def test_fixture_rejects_credentials_and_public_switch(self):
         root = self.secret.parent
-        (root / "secrets").mkdir()
-        (root / "secrets/ibkr-paper.env").touch()
-        with self.assertRaisesRegex(check.SmokeError, "paper credentials"):
-            check.require_fixture_environment(root, root)
-        proc = subprocess.run([sys.executable, check.__file__, "public", "https://fertile.viramoon.com",
+        with patch.object(check.os.path, "lexists", side_effect=lambda path: path == root / "secrets/ibkr-paper.env"):
+            with self.assertRaisesRegex(check.SmokeError, "paper credentials"):
+                check.require_fixture_environment(root, root)
+        proc = subprocess.run([sys.executable, check.__file__, "public", TEST_ORIGIN,
                                "--protocol-fixture"], capture_output=True, timeout=3)
         self.assertEqual(proc.returncode, 2)
         self.assertIn(b"unrecognized arguments", proc.stderr)
@@ -164,13 +167,7 @@ class SmokeTests(unittest.TestCase):
             self.exercise()
         self.assertFalse(self.site.posts)
 
-    def test_explicit_origins_only_and_private_secret(self):
-        self.assertEqual(check.public_origin("https://fertile.viramoon.com/"), "https://fertile.viramoon.com")
-        for origin in ("http://fertile.viramoon.com", "https://fertile.viramoon.com.evil.invalid",
-                       "https://fertile.viramoon.com/other", "https://account@fertile.viramoon.com",
-                       "https://www.viramoon.com"):
-            with self.assertRaises(argparse.ArgumentTypeError):
-                check.public_origin(origin)
+    def test_private_secret_and_no_cross_origin_read(self):
         self.secret.chmod(0o640)
         with self.assertRaisesRegex(check.SmokeError, "0600"):
             check.token_from(self.secret)
@@ -178,17 +175,57 @@ class SmokeTests(unittest.TestCase):
             self.http.read("https://other.invalid/a.js", asset=True)
 
 
+class PublicOriginTests(unittest.TestCase):
+    def test_explicit_https_origins_accept_other_hosts_and_optional_ports(self):
+        for origin in (TEST_ORIGIN, "https://smoke.example.test:8443", "https://[::1]:443"):
+            with self.subTest(origin=origin):
+                self.assertEqual(check.public_origin(origin), origin)
+                self.assertEqual(check.public_origin(origin + "/"), origin)
+
+    def test_explicit_origins_reject_invalid_formats(self):
+        for origin in ("", TEST_HOST, f"http://{TEST_HOST}", "https://", f"{TEST_ORIGIN}/other",
+                       f"{TEST_ORIGIN}//", f"{TEST_ORIGIN}?x=1", f"{TEST_ORIGIN}#", f"{TEST_ORIGIN}?",
+                       f"https://account@{TEST_HOST}", f"https://@{TEST_HOST}", f"{TEST_ORIGIN}:invalid",
+                       f"{TEST_ORIGIN}:", f"{TEST_ORIGIN}:0", f"{TEST_ORIGIN}:65536", f" {TEST_ORIGIN}",
+                       f"{TEST_ORIGIN}\n", f"{TEST_ORIGIN}\\", "https://[::xyz]"):
+            with self.subTest(origin=origin):
+                with self.assertRaisesRegex(argparse.ArgumentTypeError, "expected an HTTPS origin"):
+                    check.public_origin(origin)
+
+    def test_missing_public_origin_rejects_before_io_even_with_healthwatch_origin(self):
+        output = io.StringIO()
+        with patch.object(sys, "argv", [check.__file__, "public", "--paper-only"]), \
+             patch.dict(os.environ, {"FERTILE_PUBLIC_ORIGIN": TEST_ORIGIN}), \
+             patch.object(check, "build_opener") as opener, \
+             patch.object(check, "token_from") as token, \
+             redirect_stderr(output), self.assertRaises(SystemExit) as exc:
+            check.main()
+        self.assertEqual(exc.exception.code, 2)
+        self.assertIn("public requires an explicit HTTPS origin", output.getvalue())
+        opener.assert_not_called()
+        token.assert_not_called()
+
+    def test_shell_public_requires_explicit_opt_in(self):
+        wrapper = Path(check.__file__).with_name("e2e-smoke.sh")
+        proc = subprocess.run([wrapper, "public"], capture_output=True, text=True, timeout=3)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("This machine is for local stress testing", proc.stderr)
+        self.assertIn("operators explicitly configured its own origin", proc.stderr)
+        self.assertEqual(proc.stdout, "")
+
+
 class HTTPOriginTests(unittest.TestCase):
     def test_cross_origin_requests_are_rejected_before_opening(self):
         with patch.object(check, "build_opener") as opener:
-            http = check.HTTP(check.PUBLIC_ORIGIN, local=False)
+            http = check.HTTP(TEST_ORIGIN, local=False)
             for url in (
-                "http://fertile.viramoon.com:443/a.js",
-                "https://fertile.viramoon.com:444/a.js",
-                "https://fertile.viramoon.com:0/a.js",
+                "http://deployment.invalid:443/a.js",
+                "https://deployment.invalid:444/a.js",
+                "https://deployment.invalid:0/a.js",
                 "https://other.invalid:443/a.js",
-                "https://user@fertile.viramoon.com:443/a.js",
-                "https://fertile.viramoon.com:invalid/a.js",
+                "https://deployment.invalid.other.invalid:443/a.js",
+                "https://user@deployment.invalid:443/a.js",
+                "https://deployment.invalid:invalid/a.js",
             ):
                 with self.subTest(url=url):
                     with self.assertRaisesRegex(check.SmokeError, "refusing a cross-origin request"):
@@ -299,7 +336,8 @@ class PaperSmokeTests(unittest.TestCase):
         return requests
 
     def test_paper_local_and_public_run_the_full_smoke_with_user_agent(self):
-        for args, host in ((["local"], "127.0.0.1:8090"), (["public", check.PUBLIC_ORIGIN], "fertile.viramoon.com")):
+        for args, host in ((["local"], "127.0.0.1:8090"), (["public", TEST_ORIGIN + "/"], TEST_HOST),
+                           (["public", "https://smoke.example.test:8443"], "smoke.example.test:8443")):
             with self.subTest(args=args):
                 requests = self.exercise_cli(*args, "--paper-only")
                 self.assertIn((host, "/api/v1/backtests", "POST"), requests)
@@ -308,36 +346,36 @@ class PaperSmokeTests(unittest.TestCase):
 
     def test_public_paper_smoke_skips_injected_cross_origin_assets(self):
         html = (b'<script type="module" src="a.js"></script>'
-                b'<link rel="stylesheet" href="https://fertile.viramoon.com/a.css">'
-                b'<script type="module" src="https://static.cloudflareinsights.com/beacon.min.js"></script>'
+                b'<link rel="stylesheet" href="https://deployment.invalid/a.css">'
+                b'<script type="module" src="https://insights.invalid/beacon.min.js"></script>'
                 b'<link rel="stylesheet" href="//cdn.invalid/a.css">')
-        requests = self.exercise_cli("public", check.PUBLIC_ORIGIN, "--paper-only",
+        requests = self.exercise_cli("public", TEST_ORIGIN, "--paper-only",
                                      asset_responses={"/": ("text/html", html)})
-        host = "fertile.viramoon.com"
+        host = TEST_HOST
         self.assertEqual({request_host for request_host, _, _ in requests}, {host})
         self.assertIn((host, "/a.js", "GET"), requests)
         self.assertIn((host, "/a.css", "GET"), requests)
         self.assertIn((host, "/api/v1/backtests", "POST"), requests)
-        check.log.assert_any_call("skipped cross-origin asset", kind="js", host="static.cloudflareinsights.com")
+        check.log.assert_any_call("skipped cross-origin asset", kind="js", host="insights.invalid")
         check.log.assert_any_call("skipped cross-origin asset", kind="css", host="cdn.invalid")
 
     def test_public_paper_smoke_logs_cross_origin_scripts_of_any_type(self):
         html = (b'<script type="module" src="/a.js"></script><link rel="stylesheet" href="/a.css">'
                 b'<script src="https://analytics.invalid/beacon.js"></script>'
                 b'<script type="text/javascript" src="//cdn.invalid/library.js"></script>')
-        requests = self.exercise_cli("public", check.PUBLIC_ORIGIN, "--paper-only",
+        requests = self.exercise_cli("public", TEST_ORIGIN, "--paper-only",
                                      asset_responses={"/": ("text/html", html)})
-        self.assertEqual({host for host, _, _ in requests}, {"fertile.viramoon.com"})
+        self.assertEqual({host for host, _, _ in requests}, {TEST_HOST})
         check.log.assert_any_call("skipped cross-origin asset", kind="js", host="analytics.invalid")
         check.log.assert_any_call("skipped cross-origin asset", kind="js", host="cdn.invalid")
 
     def test_public_paper_smoke_fetches_assets_with_explicit_https_default_port(self):
-        html = (b'<script type="module" src="https://fertile.viramoon.com:443/a.js"></script>'
-                b'<link rel="stylesheet" href="//FERTILE.VIRAMOON.COM:0443/a.css">')
-        requests = self.exercise_cli("public", check.PUBLIC_ORIGIN, "--paper-only",
+        html = (b'<script type="module" src="https://deployment.invalid:443/a.js"></script>'
+                b'<link rel="stylesheet" href="//DEPLOYMENT.INVALID:0443/a.css">')
+        requests = self.exercise_cli("public", TEST_ORIGIN, "--paper-only",
                                      asset_responses={"/": ("text/html", html)})
-        self.assertIn(("fertile.viramoon.com:443", "/a.js", "GET"), requests)
-        self.assertIn(("FERTILE.VIRAMOON.COM:0443", "/a.css", "GET"), requests)
+        self.assertIn(("deployment.invalid:443", "/a.js", "GET"), requests)
+        self.assertIn(("DEPLOYMENT.INVALID:0443", "/a.css", "GET"), requests)
 
     def test_local_paper_smoke_fetches_assets_with_implicit_http_default_port(self):
         host = "[::1]"
@@ -356,7 +394,7 @@ class PaperSmokeTests(unittest.TestCase):
         ):
             with self.subTest(html=html):
                 with self.assertRaisesRegex(check.SmokeError, "expected built Vite JavaScript and CSS from the same origin"):
-                    self.exercise_cli("public", check.PUBLIC_ORIGIN, "--paper-only",
+                    self.exercise_cli("public", TEST_ORIGIN, "--paper-only",
                                       asset_responses={"/": ("text/html", html)})
 
     def test_public_paper_smoke_rejects_invalid_same_origin_assets(self):
@@ -367,19 +405,19 @@ class PaperSmokeTests(unittest.TestCase):
         ):
             with self.subTest(asset=asset, response=response):
                 with self.assertRaisesRegex(check.SmokeError, f"invalid {kind} asset"):
-                    self.exercise_cli("public", check.PUBLIC_ORIGIN, "--paper-only", asset_responses={asset: response})
+                    self.exercise_cli("public", TEST_ORIGIN, "--paper-only", asset_responses={asset: response})
 
     def test_public_paper_smoke_rejects_missing_same_origin_asset(self):
         html = b'<script type="module" src="/missing.js"></script><link rel="stylesheet" href="/a.css">'
         with self.assertRaisesRegex(check.SmokeError, r"GET /missing\.js returned HTTP 404"):
-            self.exercise_cli("public", check.PUBLIC_ORIGIN, "--paper-only",
+            self.exercise_cli("public", TEST_ORIGIN, "--paper-only",
                               asset_responses={"/": ("text/html", html)})
 
     def test_strict_http_rejects_recovery_and_paper_rejects_disagreement(self):
         with self.assertRaisesRegex(check.SmokeError, "unhealthy system market summary"):
-            self.exercise_cli("public", check.PUBLIC_ORIGIN)
+            self.exercise_cli("public", TEST_ORIGIN)
         with self.assertRaisesRegex(check.SmokeError, "inconsistent recovering market status"):
-            self.exercise_cli("public", check.PUBLIC_ORIGIN, "--paper-only", detail_state="degraded")
+            self.exercise_cli("public", TEST_ORIGIN, "--paper-only", detail_state="degraded")
 
 
 if __name__ == "__main__":

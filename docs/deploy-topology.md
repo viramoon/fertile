@@ -5,7 +5,7 @@
 | 模块 | 当前云电脑 + paper | 迁移后的边界 |
 | --- | --- | --- |
 | finance trader、collector、api 与 IB Gateway | 分进程，数据与状态位于配置化 /home/box 根目录 | 交易、实时数据和状态可独立迁往稳定服务器；api 边界与访问控制需验证 |
-| web + frontend 静态文件 | axum 托管 SPA，经 Tunnel 入口 | 可留云电脑或随服务器迁移，不影响交易核心 |
+| web + frontend 静态文件 | axum 托管 SPA，本机环回访问 | 随生产服务器迁移时，由运维显式配置该服务器的 HTTPS 入口，不影响交易核心 |
 | 研究、分析、回测 | 云电脑读取历史 Parquet catalog | 继续留云电脑，不进交易关键路径 |
 | PostgreSQL app / blog | 归 web，持久化并备份 | 随 web 与业务数据需求迁移；不让交易依赖展示数据库 |
 | catalog / Nautilus 节点恢复状态 | 归 finance，持久化方案与备份验证 | 随交易 / 数据边界迁移，状态后端 TBD |
