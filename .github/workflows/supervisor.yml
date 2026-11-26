@@ -25,6 +25,8 @@ jobs:
             tests/build-atomicity.sh tests/chaos-restart.sh tests/simulate-reboot.sh
       - name: Verify isolated build failure preserves the current stack
         run: bash tests/build-atomicity.sh
+      - name: Check Python dependency hints without site packages
+        run: python3 -B tests/control_dependencies.py
       - name: Install the pinned supervisor
         run: |
           python3 -m venv "$RUNNER_TEMP/fertile-supervisor"

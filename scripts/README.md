@@ -4,6 +4,7 @@
 | --- | --- |
 | scripts/bootstrap-box.sh | 按 deploy/toolchain.env 安装持久工具和 PostgreSQL。重新执行可恢复系统包。`--system-packages` 输出当前发行版的 apt 包名。 |
 | scripts/check-toolchain.sh | 检查版本与可执行文件的安装前缀。 |
+| scripts/setup-supervisor.sh | 将锁定的 PyYAML 和 Supervisor 安装到 `$FERTILE_ROOT/tools/supervisor`，供 `scripts/healthwatch` 和 `scripts/fertile` 的 Python 控制端使用。详情见 [控制端 Python 依赖](../deploy/linux-server.md#控制端-python-依赖)。 |
 | scripts/fertile build [--ref SHA] | 从指定总仓提交的 gitlink 构建 finance、web、前端，校验产物并原子切换 current。 |
 | scripts/fertile up / ensure / down | supervisord 依序启动、重启后恢复、逆序优雅停止服务。 |
 | scripts/fertile install-systemd --root PATH --user USER --group GROUP | 管理员为选定发布安装核心服务 unit，启用 `fertile.target` 开机启动。 |

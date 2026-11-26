@@ -18,7 +18,13 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-import yaml
+try:
+    import yaml
+except ModuleNotFoundError as error:
+    if error.name != "yaml":
+        raise
+    sys.exit("healthwatch: PyYAML is missing. Use scripts/healthwatch with the control Python "
+             "from scripts/setup-supervisor.sh, or ask an administrator to install python3-yaml on Debian/Ubuntu.")
 
 from http_origin import parse_https_origin
 from runtime_root import resolve_root

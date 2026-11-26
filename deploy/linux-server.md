@@ -4,7 +4,7 @@
 
 ## 1. 准备运行账户、源码与工具
 
-使用一个普通 Linux 账户构建和运行服务。本例中的 `$USER` 和 `$(id -gn)` 分别是该账户和主组。拥有管理员权限的运维人员负责 apt、systemd 与反向代理操作。初始系统至少需要 Bash、Git、CA 证书和 curl。
+使用一个普通 Linux 账户构建和运行服务。本例中的 `$USER` 和 `$(id -gn)` 分别是该账户和主组。拥有管理员权限的运维人员负责 apt、systemd 与反向代理操作。初始系统至少需要 Bash、Git、CA 证书和 curl。systemd 安装入口还需要发行版提供的 `python3`。
 
 使用能读取总仓与 `finance`、`web`、`frontend` 三个私有子仓库的 Git 身份检出。根据站点的 Git 凭据管理方式授权读取，勿把令牌放入 clone URL。确定部署 commit 或 tag 后再初始化子模块，递归初始化也会取回 finance 的 Nautilus 源码。
 
@@ -37,6 +37,12 @@ scripts/fertile build
 ```
 
 首次构建完成后，`readlink -f "$FERTILE_ROOT/current"` 应指向本次 checkout 对应的 `releases/<commit>`。构建时间、缓存与重试步骤见 [构建流程](build.md)。
+
+### 控制端 Python 依赖
+
+巡检和进程控制脚本依赖 PyYAML。加载 `env.sh` 后，以运行账户执行 `scripts/setup-supervisor.sh`，按锁定清单将 PyYAML 和 Supervisor 装入 `$FERTILE_ROOT/tools/supervisor`。巡检和日常控制优先使用 `scripts/healthwatch`、`scripts/fertile`，它们会为 Python 控制端选择该实例的解释器。[控制端依赖锁定清单](supervisor-requirements.txt)
+
+需要用发行版的 `/usr/bin/python3` 直接运行脚本时，由管理员通过 apt 安装 PyYAML 对应的 `python3-yaml`，Debian 12 和 Ubuntu 24.04 的包名相同。直接运行 `supervision.py` 还需要 Supervisor 模块。`pip` 安装只在实例虚拟环境内进行。
 
 ## 2. 配置行情与管理令牌
 

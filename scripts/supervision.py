@@ -25,8 +25,17 @@ from urllib.parse import quote
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from xmlrpc.client import Fault, ServerProxy
 
-from supervisor.xmlrpc import SupervisorTransport
-import yaml
+try:
+    import yaml
+    from supervisor.xmlrpc import SupervisorTransport
+except ModuleNotFoundError as error:
+    advice = "Use scripts/fertile with the control Python from scripts/setup-supervisor.sh"
+    if error.name == "yaml":
+        sys.exit(f"fertile: PyYAML is missing. {advice}, "
+                 "or ask an administrator to install python3-yaml on Debian/Ubuntu.")
+    if error.name == "supervisor":
+        sys.exit(f"fertile: supervisor is missing. {advice}.")
+    raise
 
 SCRIPTS = Path(__file__).resolve().parent
 IS_CHILD_LAUNCHER = __name__ == "__main__" and sys.argv[1:2] == ["_exec"]
