@@ -48,4 +48,5 @@ fertile 以 git submodule 引入 finance、web、frontend；agent 是独立仓�
 
 - [开发环境与 CI 策略](dev-environment.md)
 - [配置与密钥](configuration.md)
+- [四仓数据发布政策与接入](data-policy.md)
 - [Gateway 方案](ibkr-gateway.md)

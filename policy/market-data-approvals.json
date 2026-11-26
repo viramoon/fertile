@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "approvals": {
+    "ibkr-us-equity-l1": {"capability": "pending", "price": null},
+    "ibkr-opra-l1": {"capability": "pending", "price": null},
+    "ibkr-nasdaq-totalview": {"capability": "pending", "price": null}
+  }
+}

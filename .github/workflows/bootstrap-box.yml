@@ -13,7 +13,7 @@ jobs:
       - name: 准备干净容器
         run: |
           apt-get -o Acquire::Retries=5 update
-          apt-get -o Acquire::Retries=5 install -y git ca-certificates curl sudo
+          apt-get -o Acquire::Retries=5 install -y git ca-certificates curl sudo python3
           useradd --create-home --shell /bin/bash box
           echo 'box ALL=(ALL) NOPASSWD: SETENV: /usr/bin/apt-get' > /etc/sudoers.d/box-bootstrap
           chmod 0440 /etc/sudoers.d/box-bootstrap
@@ -24,17 +24,19 @@ jobs:
         run: bash tests/bootstrap-packages.sh
       - name: 首次安装、二次跳过、版本与 Postgres
         run: |
+          umask 077
           chmod -R a+rX "$GITHUB_WORKSPACE"
           runuser -u box -- env FERTILE_BOX_HOME=/home/box/ci-persistent \
             FERTILE_TEST_LOGS=/home/box/test-logs \
-            bash "$GITHUB_WORKSPACE/tests/bootstrap-box.sh"
-          cat /home/box/test-logs/timing.env
-      - name: 保存安装与耗时证据
-        if: always()
+            bash "$GITHUB_WORKSPACE/tests/bootstrap-box.sh" >"$RUNNER_TEMP/fertile-bootstrap.log" 2>&1
+      - name: 生成可公开的安装耗时报告
+        run: python3 -B scripts/data-guard.py artifact bootstrap "$RUNNER_TEMP/bootstrap-timing.json" --timing /home/box/test-logs/timing.env
+      - name: 保存安装耗时报告
         uses: actions/upload-artifact@v4
         with:
-          name: bootstrap-box-logs
-          path: /home/box/test-logs
+          name: bootstrap-timing
+          path: ${{ runner.temp }}/bootstrap-timing.json
+          if-no-files-found: error
   debian-packages:
     runs-on: ubuntu-24.04
     container: debian:12

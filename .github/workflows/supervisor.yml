@@ -41,13 +41,16 @@ jobs:
           "$FERTILE_CONTROL_PYTHON" -B tests/test_e2e_smoke.py
       - name: Exercise rendering, restarts and whole-stack recovery
         run: |
-          set -o pipefail
-          "$RUNNER_TEMP/fertile-supervisor/bin/python" tests/supervision_plan.py
-          "$RUNNER_TEMP/fertile-supervisor/bin/python" -u tests/supervisor_ci.py | tee "$RUNNER_TEMP/supervisor-drill.log"
-      - name: Save drill output
-        if: always()
+          umask 077
+          {
+            "$RUNNER_TEMP/fertile-supervisor/bin/python" tests/supervision_plan.py
+            "$RUNNER_TEMP/fertile-supervisor/bin/python" -u tests/supervisor_ci.py
+          } >"$RUNNER_TEMP/fertile-supervisor.log" 2>&1
+      - name: Prepare the public drill result
+        run: python3 -B scripts/data-guard.py artifact supervisor "$RUNNER_TEMP/supervisor-drill.json"
+      - name: Save the drill result
         uses: actions/upload-artifact@v4
         with:
           name: supervisor-drill
-          path: ${{ runner.temp }}/supervisor-drill.log
-          if-no-files-found: ignore
+          path: ${{ runner.temp }}/supervisor-drill.json
+          if-no-files-found: error

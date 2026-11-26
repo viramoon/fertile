@@ -32,7 +32,7 @@ finance 的 rust-toolchain.toml、.python-version、.uv-version、toolchain.env 
 
 ## CI 策略
 
-所有仓库只使用 GitHub 托管 runner。bootstrap CI 在干净的 `ubuntu:24.04` 容器内执行首次真实安装、二次全 SKIP、source 后逐工具核对精确版本与前缀，以及 PostgreSQL 建表写入并跨重启读取。日志与冷 / 热耗时作为 artifact 保存。Debian 12 检查用该版本的 apt 索引验证包名解析。systemd CI 渲染并静态校验 unit，守护行为由隔离测试验证。
+所有仓库只使用 GitHub 托管 runner。bootstrap CI 在干净的 `ubuntu:24.04` 容器内执行首次真实安装、二次全 SKIP、source 后逐工具核对精确版本与前缀，以及 PostgreSQL 建表写入并跨重启读取。冷 / 热耗时通过公开报告检查后作为 artifact 保存。Debian 12 检查用该版本的 apt 索引验证包名解析。systemd CI 渲染并静态校验 unit，守护行为由隔离测试验证。Git 与制品检查见 [四仓数据发布政策](data-policy.md)。
 
 finance CI 从上游源码构建 wheel，缓存以 source commit + 工具链 / lock / 构建脚本为依据，并运行上游离线最小示例。缓存只能加速，不能跳过来源校验与回测。部署与 CI 相互独立：CI 不访问 IBKR 账户、不登录 Gateway、不执行生产迁移。密钥与配置见 [configuration.md](configuration.md)，Gateway 方案见 [ibkr-gateway.md](ibkr-gateway.md)。
 
