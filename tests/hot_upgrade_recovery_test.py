@@ -133,6 +133,75 @@ class Recovery(unittest.TestCase):
         manager.start.assert_called_once_with(args.service, plan["services"][args.service])
         self.assertEqual(accepted["status"], "reconciled")
 
+    def test_paper_cold_recovery_starts_managed_display_and_gateway(self):
+        args = self.interrupted("finance-collector", "collector", source="ib")
+        plan = self.plan(args.service, "xvfb", "ib-gateway", "healthwatch")
+        plan["services"][args.service].update(
+            role="collector", source="ib", ready_url="http://127.0.0.1:19082/healthz/ready",
+        )
+        scripts = self.base / "fertile/scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "handoff_start.py").touch()
+        api = Mock()
+        running = {}
+        starts = []
+        daemon = False
+        dependencies = {"xvfb", "ib-gateway"}
+
+        def boot():
+            nonlocal daemon
+            daemon = True
+
+        def start(name, wait):
+            self.assertTrue(wait)
+            if name == args.service:
+                self.assertTrue(dependencies <= running.keys())
+            handoff_start.require_start(self.root, name, self.base.name, "supervisord", launch=True)
+            starts.append(name)
+            running[name] = 80 + len(starts)
+
+        api.getAllProcessInfo.return_value = []
+        api.getProcessInfo.side_effect = lambda name: {
+            "pid": running.get(name, 0), "statename": "RUNNING" if name in running else "STOPPED",
+        }
+        api.reloadConfig.return_value = [([], [], [])]
+        api.startProcess.side_effect = start
+        with (patch.object(cli.units, "managed_release", return_value=None),
+              patch.object(cli.ctl, "release_path", return_value=self.base),
+              patch.object(cli.ctl, "daemon_pid", side_effect=lambda: int(daemon)),
+              patch.object(cli.ctl, "build_plan", side_effect=lambda **_options: deepcopy(plan)),
+              patch.object(cli.ctl, "prepare_data_root"),
+              patch.object(cli.ctl, "connection", return_value=api),
+              patch.object(cli.ctl, "render", side_effect=lambda row: self.snapshot.write_text(json.dumps(row))),
+              patch.object(cli.ctl, "start_daemon", side_effect=boot) as start_daemon,
+              patch.object(cli, "owns_listener", return_value=True),
+              patch.object(cli.ctl, "http_status", side_effect=lambda *_: 200 if dependencies <= running.keys() else 503)):
+            first = Mock(side_effect=[self.confirm(safe_to_start=True), {"ready": False}])
+            with self.assertRaisesRegex(RuntimeError, "could not be reconciled"):
+                cli.reconcile(args, first)
+            self.assertEqual(starts, ["xvfb", "ib-gateway", args.service])
+            first_pid = running[args.service]
+            del running["ib-gateway"]
+            second = Mock(side_effect=[self.confirm(), {"ready": True}])
+            self.assertEqual(cli.reconcile(args, second)["status"], "reconciled")
+        start_daemon.assert_called_once_with()
+        self.assertEqual(starts, ["xvfb", "ib-gateway", args.service, "ib-gateway"])
+        self.assertEqual(second.call_args.args[1]["runtime"]["pid"], first_pid)
+
+    def test_replay_and_externally_managed_paper_do_not_start_gateway(self):
+        with patch.object(cli.ctl, "daemon_pid", return_value=0):
+            manager = cli.Supervisor(self.base, recovery=True)
+        manager.api = Mock()
+        manager.plan = self.plan("finance-collector", "ib-gateway", "xvfb")
+        collector = manager.plan["services"]["finance-collector"]
+        gateway = manager.plan["services"]["ib-gateway"]
+        for source, skip in (("replay", ""), ("ib", "needs_credentials")):
+            with self.subTest(source=source, skip=skip):
+                collector["source"] = source
+                gateway["skip"] = skip
+                manager.prepare_recovery_dependencies("finance-collector")
+        manager.api.startProcess.assert_not_called()
+
     def test_systemd_launcher_blocks_automatic_and_unauthorized_starts(self):
         args = self.interrupted("finance-collector", "collector", source="replay")
         plan = self.plan(args.service, "finance-backtest-worker")

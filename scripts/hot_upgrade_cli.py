@@ -158,14 +158,24 @@ class Supervisor:
 
     def prepare_recovery_dependencies(self, name):
         plan = self.plan
+        services = plan["services"]
+        if name == "finance-collector" and services[name].get("source") == "ib":
+            gateway = services.get("ib-gateway")
+            if gateway and not gateway["skip"]:
+                display = services.get("xvfb")
+                if not display or display["skip"]:
+                    raise RuntimeError("managed paper Gateway display is unavailable for recovery")
+                for dependency in ("xvfb", "ib-gateway"):
+                    if not self.pid(dependency):
+                        self.api.startProcess(dependency, True)
         if name in {"web", "web-notifier"} and plan["web_database"] != "external":
-            postgres = plan["services"]["postgres"]
+            postgres = services["postgres"]
             if postgres["skip"]:
                 raise RuntimeError("managed PostgreSQL is unavailable for recovery")
             if not self.pid("postgres"):
                 self.api.startProcess("postgres", True)
             ctl.await_postgres(postgres)
-        if name == "web" and plan["services"]["web"]["env"].get("WEB_REQUIRE_FINANCE") == "true":
+        if name == "web" and services["web"]["env"].get("WEB_REQUIRE_FINANCE") == "true":
             ctl.check_queue_compatibility(plan)
             if not self.pid("finance-api"):
                 self.api.startProcess("finance-api", True)
@@ -469,6 +479,8 @@ def reconcile(args, hook):
                 if service == "finance-api":
                     ctl.check_queue_compatibility(plan)
                 start_handoff(manager, service, row, record)
+            elif isinstance(manager, Supervisor):
+                manager.prepare_recovery_dependencies(service)
             if isinstance(manager, Supervisor):
                 running = manager.plan["services"][service]
                 if running.get("release", manager.plan["release"]) != str(active):
