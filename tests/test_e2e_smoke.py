@@ -23,10 +23,12 @@ import e2e_smoke as check
 TEST_HOST = "deployment.invalid"
 TEST_ORIGIN = f"https://{TEST_HOST}"
 LICENSE_DIR = "/third-party/lightweight-charts/"
+NOTICE_TEXT = b"TradingView Lightweight Charts\nCopyright TradingView, Inc.\n" + b"Attribution text.\n" * 40
 LICENSE_FIXTURES = {
     LICENSE_DIR + "LICENSE": ("text/plain", b"   Apache License\nVersion 2.0, January 2004\n"),
-    LICENSE_DIR + "NOTICE": ("application/octet-stream", b"TradingView Lightweight Charts\nCopyright TradingView, Inc.\n"),
+    LICENSE_DIR + "NOTICE": ("application/octet-stream", NOTICE_TEXT),
 }
+LICENSE_ROUTES = {**LICENSE_FIXTURES, "/NOTICE": LICENSE_FIXTURES[LICENSE_DIR + "NOTICE"]}
 
 
 class Site(BaseHTTPRequestHandler):
@@ -46,8 +48,8 @@ class Site(BaseHTTPRequestHandler):
             self.send(200, "export default 1", "text/javascript")
         elif self.path == "/a.css":
             self.send(200, "body{color:#222}", "text/css")
-        elif self.path in LICENSE_FIXTURES:
-            media, body = LICENSE_FIXTURES[self.path]
+        elif self.path in LICENSE_ROUTES:
+            media, body = LICENSE_ROUTES[self.path]
             self.send(200, body.decode(), media)
         elif self.path == "/healthz/live":
             self.send(200, {"status": "ok"})
@@ -324,7 +326,7 @@ class PaperSmokeTests(unittest.TestCase):
         }
         assets = {"/": ("text/html", b'<script type="module" src="/a.js"></script><link rel="stylesheet" href="/a.css">'),
                   "/a.js": ("text/javascript", b"export default 1"), "/a.css": ("text/css", b"body{}"),
-                  **LICENSE_FIXTURES}
+                  **LICENSE_ROUTES}
         assets.update(asset_responses or {})
         requests = []
         version = (Path(__file__).resolve().parents[1] / "VERSION").read_text().strip()
@@ -370,6 +372,25 @@ class PaperSmokeTests(unittest.TestCase):
             for selector in (path, "/static" + path):
                 self.assertIn(("127.0.0.1:8090", selector, "GET"), local_requests)
                 self.assertNotIn((TEST_HOST, selector, "GET"), public_requests)
+
+    def test_only_local_paper_smoke_gets_root_notice(self):
+        local_requests = self.exercise_cli("local", "--paper-only")
+        public_requests = self.exercise_cli("public", TEST_ORIGIN, "--paper-only")
+        self.assertIn(("127.0.0.1:8090", "/NOTICE", "GET"), local_requests)
+        self.assertNotIn((TEST_HOST, "/NOTICE", "GET"), public_requests)
+
+    def test_local_paper_smoke_requires_root_notice_to_exist(self):
+        with patch.dict(LICENSE_ROUTES, LICENSE_FIXTURES, clear=True), \
+             self.assertRaisesRegex(check.SmokeError, "GET /NOTICE returned HTTP 404, expected 200"):
+            self.exercise_cli("local", "--paper-only")
+
+    def test_local_paper_smoke_rejects_wrong_root_notice_body(self):
+        media, notice = LICENSE_ROUTES["/NOTICE"]
+        for root_notice in (("text/html", b"<!doctype html>"), ("text/plain", b"<!doctype html>"),
+                            (media, notice + b"Unexpected trailing content.\n")):
+            with self.subTest(media=root_notice[0], size=len(root_notice[1])), \
+                 self.assertRaisesRegex(check.SmokeError, "/NOTICE did not return the same notice text"):
+                self.exercise_cli("local", "--paper-only", asset_responses={"/NOTICE": root_notice})
 
     def test_local_smoke_rejects_spa_fallback_at_either_license_url(self):
         for path in LICENSE_FIXTURES:

@@ -241,15 +241,20 @@ def check_assets(http):
 
 
 def check_licenses(http):
+    text_media = {"application/octet-stream", "text/plain"}
     for name, heading, marker in (
         ("LICENSE", b"Apache License", b"Version 2.0, January 2004"),
         ("NOTICE", b"TradingView Lightweight Charts", b"TradingView, Inc."),
     ):
         path = f"/third-party/lightweight-charts/{name}"
-        media, body = http.read(path, asset=True)
-        require(media in {"application/octet-stream", "text/plain"} and body.lstrip().startswith(heading)
+        media, body = http.read(path, json_body=False)
+        require(media in text_media and body.lstrip().startswith(heading)
                 and marker in body, f"{path} did not return the expected license text")
         http.read("/static" + path, expected=404, asset=True)
+        if name == "NOTICE":
+            root_media, root_body = http.read("/NOTICE", json_body=False)
+            require(root_media in text_media and root_body == body,
+                    f"/NOTICE did not return the same notice text as {path}")
 
 
 def timestamp(value):

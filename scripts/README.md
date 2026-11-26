@@ -26,7 +26,7 @@
 
 静态路由等 OpenAPI 未变的 web 升级可以保留 frontend 记录的 web 祖先提交。契约检查会从该祖先和新版 gitlink 的独立 Git 归档分别导出 OpenAPI 并逐字节比较。两个客户端仍按锁定的输入重新生成校验，两份快照仍与锁定提交的导出比对。[契约验证流程](../contracts/README.md#验证)
 
-本机压力测试与部署复验使用 `tests/e2e-smoke.sh local --paper-only`，公网巡检按默认配置跳过。
+本机压力测试与部署复验使用 `tests/e2e-smoke.sh local --paper-only`，其中覆盖根路径 `/NOTICE` 和第三方许可证路径。手工核对响应与静态制品的方法见 [第三方许可证复验](../ops/ruler-runbook.md#第三方许可证复验)。公网巡检按默认配置跳过。
 
 ## 本机历史验收
 
