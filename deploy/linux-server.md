@@ -122,6 +122,8 @@ curl -fsS -o /dev/null http://127.0.0.1:8090/dashboard
 
 在部署机的浏览器打开 `http://127.0.0.1:8090/dashboard`。若部署机只有 SSH，可在自己电脑上执行 `ssh -N -L 8090:127.0.0.1:8090 <登录用户>@<服务器>`，再在自己电脑的浏览器打开同一个地址。用 `scripts/fertile status --json` 核对进程和 HTTP 状态。collector 在 paper Gateway 未登录或行情陈旧时可能未就绪，应连同 `system/status` 一起判断。[健康检查](../ops/health-checks.md)
 
+在部署机核对根路径 `/NOTICE` 和第三方许可证路径的状态码及制品正文。[第三方许可证复验](../ops/ruler-runbook.md#第三方许可证复验)
+
 上述步骤都是只读检查。需要验证回测写入时，先配置管理令牌，再以运行账户生成回测样例并运行冒烟。冒烟会提交一条作业。以下用 `--paper-only` 复验核心五项，paper Gateway 恢复中的行情可暂时未就绪。
 
 ```bash

@@ -50,18 +50,39 @@ curl -fsS http://127.0.0.1:8090/api/v1/backtests/sample
 1. 记录当前 fertile 提交、三个 gitlink 和实际 web 库名，暂停写入，保留旧版制品和可恢复的升级前备份。启用集成凭据录入的实例另存配套密文与接收方密钥。[备份与恢复](backup.md)
 2. 检出获批提交并初始化递归子模块。运行 `scripts/fertile build --ref <fertile-commit>`，核对 `current/manifest.json` 的三个 gitlink 和完整静态目录。systemd 按普通服务器指南在构建前停旧 target，构建后重装指向新版的 unit。[systemd 版本切换](../deploy/linux-server.md#systemd)
 3. 受管 PostgreSQL 由 supervisord 的 `scripts/fertile ensure-up` 或 systemd 启动时的准备步骤以 `fertile_web` 运行新版 `web migrate`，成功后启动新版 web。使用外部 PostgreSQL 时，由数据库管理员安排显式迁移。以 web 运行账户加载服务所用的 `DATABASE_URL` 和 profile，设置 `WEB_CONFIG_DIR="$FERTILE_ROOT/current/web/config"`，执行新版 `current/bin/web migrate`，成功后再重启到新版 web。确认 SQLx 台账已记录 `20261126000000` 成功。
-4. 核对新版 web PID、`/healthz/ready` 和 `/api/v1/system/status`，打开终端页面并核对同源 JS/CSS，按[第三方许可证复验](#第三方许可证复验)核对两个许可证文件的响应内容。在部署复验窗口运行 `tests/e2e-smoke.sh local --paper-only`，确认可提交回测。官方历史日线作业按[隔离历史日线验收](#部署后的隔离历史日线验收)使用隔离队列。
+4. 核对新版 web PID、`/healthz/ready` 和 `/api/v1/system/status`，打开终端页面并核对同源 JS/CSS，按[第三方许可证复验](#第三方许可证复验)核对两个第三方路径和根路径 `/NOTICE` 的响应。在部署复验窗口运行 `tests/e2e-smoke.sh local --paper-only`，确认可提交回测。官方历史日线作业按[隔离历史日线验收](#部署后的隔离历史日线验收)使用隔离队列。
 5. 降级到 W1 之前时，从升级前快照恢复独立的兼容数据库，保留已迁移的数据库和密文。旧版 SQLx 迁移器会拒绝台账中新增的迁移版本。使用新版控制器与兼容数据库切回旧制品，步骤见 [从升级前快照回滚并切回新版](#从升级前快照回滚并切回新版)。若重装旧版 systemd unit，先记录并撤下 `runtime.env` 中已配置的 W1 变量，切回新版后恢复。若还跨越 finance `7600be4`，为旧 finance 选择兼容的独立数据根或恢复首次写入四窗口摘要前的备份。
 
 ### 许可证路径修复升级
 
-从已完成阶段 0 部署的 `9be96c7` 升级到 web `4e6bb70` 时，服务变更只需部署并启动新版 web 二进制。选用已通过集成验收的完整 fertile 制品，按所用守护器的版本切换流程加载新版发布路径。supervisord 需重载指向新版的进程配置，systemd 按[版本切换流程](../deploy/linux-server.md#systemd)重新安装固定到新版的 unit。静态制品布局沿用 `$release/static/`，finance 和 frontend 继续使用阶段 0 锁定的提交。此次升级无新增数据库迁移、环境变量、端口或进程。重启后核对 web 就绪和系统状态，再核对本机许可证响应。
+从 fertile `8e49834` 升级到锁定 web `de02f75` 的制品时，服务变更只需部署新版 web 二进制并重启 web。选用已通过集成验收的完整 fertile 制品。若切换发布目录，确保守护器加载指向新版的路径。supervisord 需重载进程配置，systemd 按[版本切换流程](../deploy/linux-server.md#systemd)重新安装固定到新版的 unit。静态制品布局继续使用 `$release/static/`，沿用原有数据库迁移、环境变量、端口和进程配置。重启后核对新版 web PID、`/healthz/ready` 和 `/api/v1/system/status`，再核对本机许可证响应。
 
 ### 第三方许可证复验
 
-`$release` 是部署中的发布目录，`WEB_STATIC_ROOT` 指向其 `static/` 子目录。制品文件位于 `$release/static/third-party/lightweight-charts/{LICENSE,NOTICE}`，浏览器分别请求 `/third-party/lightweight-charts/LICENSE` 和 `/third-party/lightweight-charts/NOTICE`。
+`$release` 是部署中的发布目录，`WEB_STATIC_ROOT` 指向其 `static/` 子目录。前端使用 `/third-party/lightweight-charts/LICENSE` 和 `/third-party/lightweight-charts/NOTICE`，根路径 `/NOTICE` 提供同一份 NOTICE。三个 URL 均应返回 HTTP 200，正文分别与 `$release/static/third-party/lightweight-charts/{LICENSE,NOTICE}` 对应文件逐字节一致。根路径对应的完整制品路径为 `$release/static/third-party/lightweight-charts/NOTICE`。
 
-在目标机器用本机 web 端口请求两个 URL，逐一确认 HTTP 200，保存响应正文并与发布目录中对应文件逐字节比较。`LICENSE` 应为 Apache License 2.0 正文，`NOTICE` 应含 TradingView Lightweight Charts 署名。新版 web 对误写的 `/static/third-party/lightweight-charts/LICENSE` 和 `/static/third-party/lightweight-charts/NOTICE` 均返回 404。
+在目标机器设置 `release` 为实际发布目录，并使用本机 web 端口运行以下核对。误写的 `/static/third-party/lightweight-charts/LICENSE` 和 `/static/third-party/lightweight-charts/NOTICE` 均应返回 404。
+
+```bash
+(
+  set -eu
+  origin=http://127.0.0.1:8090
+  license_dir="${release:?先设置实际发布目录}/static/third-party/lightweight-charts"
+  body=$(mktemp)
+  trap 'rm -f -- "$body"' EXIT
+  for path in /third-party/lightweight-charts/{LICENSE,NOTICE} /NOTICE; do
+    status=$(curl --noproxy '*' -sS -o "$body" -w '%{http_code}' "$origin$path")
+    printf '%s HTTP %s\n' "$path" "$status"
+    test "$status" = 200
+    cmp -- "$body" "$license_dir/${path##*/}"
+  done
+  for path in /static/third-party/lightweight-charts/{LICENSE,NOTICE}; do
+    status=$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' "$origin$path")
+    printf '%s HTTP %s\n' "$path" "$status"
+    test "$status" = 404
+  done
+)
+```
 
 ## 部署后的隔离历史日线验收
 
@@ -380,7 +401,7 @@ tests/simulate-reboot.sh
 
 首页必须至少声明一个同源 JavaScript 模块和一个同源样式表，所有同源模块和样式表都要通过 HTTP 状态、媒体类型和响应内容检查。同源比较中，HTTP 的 `:80` 和 HTTPS 的 `:443` 各自与省略端口等价。脚本跳过所有跨域 `<script src>` 和样式表，包括 Cloudflare Insights 注入的脚本，并写入 `event` 为 `skipped cross-origin asset` 的 JSON 日志，包含资源类型 `kind`（`js` 或 `css`）和主机名 `host`。
 
-本机冒烟还按[许可证 HTTP 路径](#第三方许可证复验)验证两个文件均返回 200 和预期许可证文本特征，并验证误加 `/static` 前缀的两个路径均返回 404。
+本机冒烟还按[许可证 HTTP 路径](#第三方许可证复验)验证两个第三方路径均返回 200 和预期许可证文本，根路径 `/NOTICE` 返回 200 且正文与第三方 NOTICE 响应逐字节一致，误加 `/static` 前缀的两个路径均返回 404。
 
 本机部署复验使用 `--paper-only`。该选项跳过本机 healthwatch、xvfb 和 ib-gateway 的就绪要求，仍要求其余核心进程运行、collector live 为 200，并额外接受 collector ready 为 503。本机与公网冒烟在 `--paper-only` 下都接受 `system/status` 与 `market/status` 一致的 IB `recovering` 状态，此时暂免行情新鲜度检查。Web 就绪、数据库、finance API、前端资源和回测提交仍需通过。公网与本机请求都发送 `fertile-e2e-smoke/<VERSION>` User-Agent。
 
