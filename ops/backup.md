@@ -12,12 +12,12 @@
 
 ## 非活动旧 SPY catalog 的单独备份
 
-日常 `scripts/backup.sh` 的行情与队列备份以当前活动 `FERTILE_DATA_ROOT` 为准。本机活动根是 `data-paper`，因此日常快照不包含非活动 catalog 下 `/home/box/fertile/data/catalog/data/bar/SPY.XNAS-1-DAY-LAST-EXTERNAL` 的固定 21:00 UTC 日线及同一 catalog 下的 `data/equity/SPY.XNAS`。
+日常 `scripts/backup.sh` 的行情与队列备份以当前活动 `FERTILE_DATA_ROOT` 为准。本机活动根是 `data-paper`，因此日常快照不包含非活动 catalog 下 `$FERTILE_ROOT/data/catalog/data/bar/SPY.XNAS-1-DAY-LAST-EXTERNAL` 的固定 21:00 UTC 日线及同一 catalog 下的 `data/equity/SPY.XNAS`。
 
 迁移前确认旧 catalog 已无写入方，以下命令将日线和 equity 元数据复制到日常备份轮转之外的新目录，保留 Nautilus catalog 目录结构。可将 `legacy_backup_parent` 改为另一个独立的持久绝对路径。两次复制都成功后才会打印备份 catalog 路径。复制失败时保留原件，排查原因后用新目录重新复制。
 
 ```bash
-legacy_catalog=/home/box/fertile/data/catalog
+legacy_catalog="${FERTILE_ROOT:?先设置实例的持久根}/data/catalog"
 legacy_backup_parent="$HOME/fertile-legacy-spy-backups"
 legacy_backup=$(
   mkdir -p -- "$legacy_backup_parent" &&
@@ -33,7 +33,7 @@ legacy_backup=$(
 
 ## 配置
 
-默认持久根为 `/home/box/fertile`。手工操作先加载引导环境，并使用与 supervisor 相同的 `config/runtime.env`。备份要求活动数据根已挂载，路径遵循 `FERTILE_DATA_ROOT` 及 `FERTILE_MARKET_SOURCE`。IB 默认为 `data/`，回放默认为 `data/replay/`。PG 默认连接 `$FERTILE_ROOT/run/postgres`，端口来自 `FERTILE_POSTGRES_PORT`。备份库名依序取 `PGDATABASE`、`FERTILE_WEB_DATABASE`、`web`。恢复库名由 `--target-database` 指定。若 web 使用外部 PG，备份和恢复需提供对应的 libpq `PGHOST`、`PGPORT` 与角色认证，备份另传 `PGDATABASE`。
+手工操作先加载本实例的 `env.sh`，使用与服务相同的 `config/runtime.env`。备份要求活动数据根已挂载，路径遵循 `FERTILE_DATA_ROOT` 及 `FERTILE_MARKET_SOURCE`。IB 默认为 `data/`，回放默认为 `data/replay/`。PG 默认连接 `$FERTILE_ROOT/run/postgres`，端口来自 `FERTILE_POSTGRES_PORT`。备份库名依序取 `PGDATABASE`、`FERTILE_WEB_DATABASE`、`web`。恢复库名由 `--target-database` 指定。若 web 使用外部 PG，备份和恢复需提供对应的 libpq `PGHOST`、`PGPORT` 与角色认证，备份另传 `PGDATABASE`。
 
 可在 `$FERTILE_ROOT/config/backup.conf` 设置以下非机密值。进程环境中的同名变量优先。
 
@@ -51,7 +51,7 @@ legacy_backup=$(
 以运行服务的非 root 账户操作。使用有建库权限、能读取和改名已有目标库、能还原对象所有者及授权的 PG 管理角色。本机默认 PostgreSQL 管理员通过 Unix socket peer 连接。目标实例应先具备归档引用的所有角色（本机包括 `fertile_web`）、扩展和表空间。预留一份目标现状备份、一套暂存状态文件和一套数据库所需空间。使用受信任的备份，SHA256 用于发现传输和存储损坏。
 
 ```bash
-source /home/box/fertile/env.sh
+source "${FERTILE_ROOT:?先设置实例的持久根}/env.sh"
 snapshot="$FERTILE_ROOT/backups/<已选快照时间戳>"
 target_data="$FERTILE_ROOT/data-paper-rollback"
 target_db=web_rollback
@@ -63,6 +63,8 @@ scripts/restore.sh "$snapshot" --dry-run
 
 发现占用且未加 `--overwrite` 时，命令在标准错误中输出 `non-empty restore directory` 或 `non-empty target database`，点名目标并退出 1。加 `--overwrite` 后，占用目标会收到 `Warning:`，说明正式恢复会替换、移除或保留哪些内容。其余检查都通过时退出 0。以退出码判断整次检查是否通过，因为 `SHA256 verified` 可能先于占用错误输出。dry-run 只读检查，不创建目录、数据库、锁、恢复日志或临时归档。正式恢复仍需停止写入方，并在未加 `--overwrite` 时重新检查占用。
 
+下例使用 supervisord 停止业务。systemd 实例先由管理员执行 `sudo systemctl stop fertile.target`。
+
 ```bash
 scripts/fertile down
 scripts/postgres.sh start
@@ -71,7 +73,7 @@ scripts/restore.sh "$snapshot" --target-data-root "$target_data" --target-databa
 scripts/postgres.sh stop
 ```
 
-手工单独启动 PG 时，把 `FERTILE_POSTGRES_PORT` 设为现场值。恢复成功后，按 [Ruler 回滚手册](ruler-runbook.md#从升级前快照回滚并切回新版) 切换 release 和运行指针再启动 supervisor。
+手工单独启动 PG 时，把 `FERTILE_POSTGRES_PORT` 设为现场值。supervisord 实例的发布与运行指针切换见 [Ruler 回滚手册](ruler-runbook.md#从升级前快照回滚并切回新版)。systemd 实例按 [普通服务器部署指南](../deploy/linux-server.md#systemd) 切换发布和启动整栈。
 
 - 写入模式同时要求 `--target-data-root` 和 `--target-database`。数据根为具体的绝对目录，父目录须存在。默认将业务状态、行情 catalog 和研究目录恢复到目标的 `finance-state/`、`catalog/`、`research/`。可通过 `--target-research-root` 显式选择 `$FERTILE_ROOT/data/research` 下已有父目录的路径，用于恢复独立配置的研究目录。快照内的 `config/` 仅供核对。
 - 非空数据根、非空研究目标或包含应用对象的目标库需要 `--overwrite`。目标库检查涵盖应用 schema、对象和大对象。覆盖仅替换快照管理的目录和有归档的目标库，数据根其余文件保留。快照缺少数据库归档时，目标库原样保留。快照尚无 `research` 项时，所选研究目录保留。

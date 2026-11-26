@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-root=${FERTILE_ROOT:-/home/box/fertile}
+# shellcheck source=/dev/null
+source "$repo/scripts/runtime-root.sh"
+root=$(fertile_root)
 venv="$root/tools/supervisor"
 lock="$repo/deploy/supervisor-requirements.txt"
 if [[ -x "$venv/bin/python" ]] && "$venv/bin/python" - "$lock" <<'PY'

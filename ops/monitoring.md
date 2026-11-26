@@ -1,6 +1,6 @@
 # 健康巡检、告警与观察报告
 
-[healthwatch](../scripts/healthwatch) 由 supervisord 守护，默认每 30 秒采样一次。所有时间使用 UTC。默认根目录为 `/home/box/fertile`，演练时设置 `FERTILE_ROOT` 可完全隔离运行目录、日志和备份。
+[healthwatch](../scripts/healthwatch) 由 supervisord 管理的实例启动，默认每 30 秒采样一次。所有时间使用 UTC。使用本实例的 `FERTILE_ROOT` 读取运行目录、日志和备份。普通服务器的 systemd 核心五项由 systemctl 及 HTTP 端点验证。部署额外巡检时由运维安排其运行方式。[普通服务器部署指南](../deploy/linux-server.md)
 
 | 文件 | 内容 |
 | --- | --- |
@@ -24,10 +24,10 @@ healthwatch 的 HTTP 探针和 webhook 投递均发送 `fertile-healthwatch/<VER
 
 ## 运行与配置
 
-在部署环境中安装控制端 Python 依赖并运行 `scripts/fertile ensure-up`。默认设置在 [deploy/healthwatch.yaml](../deploy/healthwatch.yaml)，实例级覆盖可在 `config/runtime.env` 设置 `FERTILE_HEALTH_CONFIG=/home/box/fertile/config/healthwatch.yaml`。覆盖文件接受同名配置、`disk_path` 和 `public_origin`。本机保持 `FERTILE_PUBLIC_ORIGIN` 未设置，覆盖文件中的 `public_origin` 省略或设为 `null`。未来生产服务器由运维在覆盖文件中填写 `public_origin: "https://<your-origin>"` 或在运行环境中设置 `FERTILE_PUBLIC_ORIGIN=https://<your-origin>`。非空环境变量优先。配置更改后重启 healthwatch 并核对采样结果。
+supervisord 模式下，在部署环境中安装控制端 Python 依赖并运行 `scripts/fertile ensure-up`。默认设置见 [deploy/healthwatch.yaml](../deploy/healthwatch.yaml)。如需覆盖，在 `config/runtime.env` 的 `FERTILE_HEALTH_CONFIG` 中填入 `$FERTILE_ROOT/config/healthwatch.yaml` 对应的绝对路径。覆盖文件接受同名配置、`disk_path` 和 `public_origin`。本地压测保持 `FERTILE_PUBLIC_ORIGIN` 未设置，覆盖文件中的 `public_origin` 省略或设为 `null`。普通服务器可在覆盖文件中填 `public_origin: "https://<your-origin>"`，或在运行环境中设置 `FERTILE_PUBLIC_ORIGIN=https://<your-origin>`。非空环境变量优先。配置更改后重启 healthwatch 并核对采样结果。
 
 ```sh
-root=${FERTILE_ROOT:-/home/box/fertile}
+root=${FERTILE_ROOT:?先加载实例的 env.sh}
 scripts/fertile status --json
 tail -f "$root/logs/alerts/alerts.jsonl"
 tail -1 "$root/logs/healthwatch/samples.jsonl" | python3 -m json.tool
@@ -49,7 +49,7 @@ scripts/healthwatch --once
 在完整部署启动后记录观察开始时刻和环境，持续采样实际墙钟 24 小时。用 [soak_report.py](../scripts/soak_report.py) 指定同一窗口及报告路径。下例创建当前部署的本地报告；提交前复核来源、域名和跨版本情况。
 
 ```sh
-root=${FERTILE_ROOT:-/home/box/fertile}
+root=${FERTILE_ROOT:?先加载实例的 env.sh}
 mkdir -p ops/reports
 python3 scripts/soak_report.py \
   --samples "$root/logs/healthwatch/samples.jsonl" \

@@ -1,13 +1,46 @@
 #!/usr/bin/env bash
 set -euo pipefail
 scripts=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-root=${FERTILE_ROOT:-${FERTILE_BOX_HOME:-/home/box}/fertile}
+# shellcheck source=scripts/runtime-root.sh
+source "$scripts/runtime-root.sh"
+root=$(fertile_root)
+export PYTHONDONTWRITEBYTECODE=1
+case "${1:-}" in
+  install-systemd|uninstall-systemd)
+    action=$1; shift
+    exec /usr/bin/python3 -I "$scripts/systemd_units.py" "$action" --root "$root" "$@"
+    ;;
+  verify-systemd)
+    exec /usr/bin/python3 -I "$scripts/systemd_units.py" "$@"
+    ;;
+  status|restart|logs|up|ensure|ensure-up|down|stop|rollback)
+    if [[ ! -x /usr/bin/python3 ]]; then
+      : # A supervisord-only host can use the pinned control Python.
+    elif release=$(/usr/bin/python3 -I "$scripts/systemd_units.py" _managed --root "$root"); then
+      case "$1" in
+        status)
+          (( EUID != 0 )) || { echo 'Run fertile status as the service account.' >&2; exit 1; }
+          FERTILE_ROOT="$root" exec /bin/bash "$release/fertile/scripts/systemd-service.sh" "$@"
+          ;;
+        restart|logs)
+          action="_$1"; shift
+          exec /usr/bin/python3 -I "$scripts/systemd_units.py" "$action" --root "$root" "$@"
+          ;;
+        *)
+          echo 'This root is managed by systemd. Use systemctl to control fertile.target, or uninstall-systemd to switch managers.' >&2
+          exit 1
+          ;;
+      esac
+    elif [[ $? != 3 ]]; then
+      exit 1
+    fi
+    ;;
+esac
 if [[ -f "$root/env.sh" ]]; then
   # shellcheck disable=SC1091
   source "$root/env.sh"
 fi
 export FERTILE_ROOT="$root"
-export PYTHONDONTWRITEBYTECODE=1
 if [[ ${1:-} == build ]]; then shift; exec "$scripts/build-release.sh" "$@"; fi
 if [[ -z ${FERTILE_CONTROL_PYTHON:-} && -z ${FERTILE_SUPERVISOR_BIN:-} ]]; then
   if [[ ${1:-} == up || ${1:-} == ensure || ${1:-} == ensure-up ]]; then "$scripts/setup-supervisor.sh"; fi

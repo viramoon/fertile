@@ -1,15 +1,17 @@
 # 服务健康检查
 
-从源码根运行 scripts/fertile status --json，记录部署提交、UTC 时间、进程 PID 与下面的业务探测。HTTP 状态为 200 表示对应探测通过，503 要结合响应里的 checks 定位。
+从源码根运行 `scripts/fertile status --json`，记录部署提交、UTC 时间、进程 PID 与下面的业务探测。状态命令识别当前持久根的已安装 systemd 实例，其他环境从 supervisord 取进程状态。HTTP 状态为 200 表示对应探测通过，503 要结合响应里的 checks 定位。[普通服务器部署指南](../deploy/linux-server.md)
 
 `scripts/fertile status --json` 从控制端脚本所在的检出或发布目录读取 `VERSION`，仅请求清单中配置的探针 URL，发送 `fertile-supervision/<VERSION>` User-Agent，在报告中保留首跳 HTTP 状态码。运行目录中的服务启动器副本直接执行 `_exec`，版本读取留在控制端状态检查阶段。`tests/chaos-restart.sh` 的独立存活探针发送 `fertile-supervisor-drill/<VERSION>`，同样以配置的 URL 的首跳结果为准，遇到 3xx 会报告失败。
 
+systemd 模式的 PostgreSQL unit 启动时等待 Unix socket 通过 `pg_isready`。状态命令读取 systemd 的服务 PID，并请求与 supervisord 相同的 HTTP live 和 ready 端点。核心五项的 systemd 安装未配置 healthwatch unit，连续采样由需要该功能的环境另行安排。
+
 | 服务 | 存活检查 | 就绪或业务检查 |
 | --- | --- | --- |
-| postgres | supervisor 和 pg_isready | Unix socket 连接数据库 web，读取 app.schema_info |
+| postgres | 守护器进程状态和 pg_isready | Unix socket 连接数据库 web，读取 app.schema_info |
 | finance-api | 8081 /healthz/live | 8081 /healthz/ready 检查数据根可读，/api/v1/market/status 提供独立的行情摘要 |
 | finance-collector | 8082 /healthz/live | 8082 /healthz/ready 要求数据源、补数、catalog 写入和各标的新鲜度通过 |
-| finance-backtest-worker | supervisor 的 worker PID | 经 web 提交带幂等键的回测，轮询同一 ID 到 succeeded |
+| finance-backtest-worker | 受管 worker PID | 经 web 提交带幂等键的回测，轮询同一 ID 到 succeeded |
 | web | 8090 /healthz/live | /healthz/ready 检查数据库、静态首页和 finance；默认 finance 中断返回 degraded，/api/v1/system/status 提供分项结果 |
 | frontend | web 的首页及带摘要的 assets | 浏览器深链刷新成功，读取状态与示例回测 |
 | 外部 HTTPS（仅未来生产服务器显式启用） | 运维配置 HTTPS origin | `https://<your-origin>/healthz/ready`，与本机结果分别记录 |

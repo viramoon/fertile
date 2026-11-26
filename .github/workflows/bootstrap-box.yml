@@ -20,6 +20,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: 离线验证系统包选择
+        run: bash tests/bootstrap-packages.sh
       - name: 首次安装、二次跳过、版本与 Postgres
         run: |
           chmod -R a+rX "$GITHUB_WORKSPACE"
@@ -33,3 +35,23 @@ jobs:
         with:
           name: bootstrap-box-logs
           path: /home/box/test-logs
+  debian-packages:
+    runs-on: ubuntu-24.04
+    container: debian:12
+    timeout-minutes: 10
+    steps:
+      - name: 读取 Debian 12 仓库索引
+        run: |
+          apt-get -o Acquire::Retries=5 update
+          apt-get -o Acquire::Retries=5 install -y --no-install-recommends ca-certificates git
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: 解析 bootstrap 包名并模拟安装
+        shell: bash
+        run: |
+          packages=$(scripts/bootstrap-box.sh --system-packages)
+          grep -Fxq 'libgtk-3-0' <<< "$packages"
+          grep -Fxq 'libasound2' <<< "$packages"
+          mapfile -t package_list <<< "$packages"
+          apt-get --simulate install --no-install-recommends "${package_list[@]}"

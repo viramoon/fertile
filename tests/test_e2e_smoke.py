@@ -245,11 +245,12 @@ class PaperSmokeTests(unittest.TestCase):
         logger.start()
         self.addCleanup(logger.stop)
 
-    def snapshot(self):
-        return json.dumps({"supervisor": "RUNNING", "services": self.services})
+    def snapshot(self, **fields):
+        return json.dumps({"supervisor": "RUNNING", "services": self.services, **fields})
 
-    def await_local(self, **options):
-        with patch.object(check.subprocess, "check_output", return_value=self.snapshot()), \
+    def await_local(self, *, manager=None, **options):
+        snapshot = self.snapshot(manager=manager) if manager else self.snapshot()
+        with patch.object(check.subprocess, "check_output", return_value=snapshot), \
              patch.object(check.time, "monotonic", side_effect=[0, 61]):
             return check.await_stack(**options)
 
@@ -271,6 +272,15 @@ class PaperSmokeTests(unittest.TestCase):
             self.await_local()
         self.services["finance-collector"]["ready"] = 200
         self.assertEqual(self.await_local(), ("http://127.0.0.1:8090", {}))
+
+    def test_systemd_checks_core_services_without_healthwatch(self):
+        with self.assertRaisesRegex(check.SmokeError, "finance-collector=.*ready=503"):
+            self.await_local(manager="systemd")
+        self.services["finance-collector"]["ready"] = 200
+        self.assertEqual(self.await_local(manager="systemd"), ("http://127.0.0.1:8090", {}))
+        del self.services["finance-backtest-worker"]
+        with self.assertRaisesRegex(check.SmokeError, "missing a required service"):
+            self.await_local(manager="systemd")
 
     def test_paper_stack_still_requires_core_services_and_collector_live(self):
         for name in ("finance-api", "web"):

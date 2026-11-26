@@ -15,7 +15,13 @@ import time
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-import yaml
+try:
+    import yaml
+except ModuleNotFoundError as error:
+    if error.name != "yaml":
+        raise
+    sys.exit("network drill: PyYAML is missing. Use tests/chaos/network.sh with the control Python "
+             "from scripts/setup-supervisor.sh, or ask an administrator to install python3-yaml on Debian/Ubuntu.")
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
@@ -197,7 +203,7 @@ def run(args):
     if args.protocol_fixture:
         # Keep a loopback TLS fixture on loopback even if the calling shell sets a proxy.
         os.environ["no_proxy"] = os.environ["NO_PROXY"] = "127.0.0.1,::1,localhost"
-        e2e_smoke.require_fixture_environment(root, Path(os.environ.get("FERTILE_BOX_HOME", "/home/box")))
+        e2e_smoke.require_fixture_environment(root)
         require(all(skipped.get(n) == "disabled" for n in ("ib-gateway", "xvfb")),
                 "fixture requires disabled real Gateway and display")
     require(all(not active[n].get("ready_url") or active[n]["ready"] == 200 for n in required),

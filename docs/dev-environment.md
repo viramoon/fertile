@@ -4,26 +4,27 @@
 
 ## 新盒子与重启后
 
-当前支持 Debian 和 Ubuntu 24.04 的 x86_64 盒子，需要 Bash 和 sudo。只有 /home/box 按持久处理；PID 1 是 tini，不依赖 systemd。
+支持 Debian 12 和 Ubuntu 24.04（x86_64），需要 Bash 和 apt 安装权限。下面示例针对独立开发实例。压测盒子的 PID 1 是 tini，只有 `/home/box` 按持久处理，继续使用 supervisord。普通服务器的安装步骤见 [普通服务器部署指南](../deploy/linux-server.md)。
 
 ```sh
-git clone --recurse-submodules https://github.com/viramoon/fertile.git /home/box/fertile-source
-cd /home/box/fertile-source
+git clone --recurse-submodules https://github.com/viramoon/fertile.git
+cd fertile
+export FERTILE_ROOT="$HOME/fertile-dev"
 bash scripts/bootstrap-box.sh
-source /home/box/fertile/env.sh
+source "$FERTILE_ROOT/env.sh"
 bash scripts/check-toolchain.sh
 bash scripts/postgres.sh init
 bash scripts/postgres.sh start
 bash scripts/postgres.sh status
 ```
 
-停止数据库用 `bash scripts/postgres.sh stop`。初始化、启动和停止允许重复执行；已有数据主版本不匹配时拒绝自动迁移。默认仅监听 127.0.0.1:5432；本地 Unix socket 在持久根的 run/postgres，CI 使用 55432。
+停止手工启动的数据库用 `bash scripts/postgres.sh stop`。初始化、启动和停止允许重复执行，已有数据主版本不匹配时拒绝自动迁移。手工 `start` 默认仅监听 `127.0.0.1:5432`，supervisord 和 systemd 启动的受管数据库只用持久根 `run/postgres` 下的 Unix socket。CI 使用端口编号 55432。
 
 PostgreSQL 首次初始化时采用系统时区。持久集群的显式设置与验证步骤见 [PostgreSQL 时区](../deploy/bootstrap.md#postgresql-时区)。
 
-安装器以 FERTILE_BOX_HOME 覆盖 /home/box，例如 `FERTILE_BOX_HOME=/tmp/ci-box bash scripts/bootstrap-box.sh`；后续命令也使用相同变量。它必须是无空格的绝对路径。不修改 HOME / 用户 shell 配置；env.sh 不含密钥。Rustup / Cargo、uv / Python、Node、pnpm、LLVM、PostgreSQL 二进制、缓存和数据都在此根下，系统目录没有这些工具的唯一副本。
+已导出的 `FERTILE_ROOT` 优先。用 `FERTILE_BOX_HOME=/tmp/ci-box bash scripts/bootstrap-box.sh` 可以将默认根改为 `/tmp/ci-box/fertile`，后续命令加载该根下的 `env.sh`。bootstrap 接受无空格的绝对路径。`env.sh` 提供工具路径和缓存配置，保留现有 HOME 与用户 shell 配置。Rustup / Cargo、uv / Python、Node、pnpm、LLVM、PostgreSQL 二进制、缓存和数据都在持久根下。
 
-系统包是可重建的编译与运行依赖：build-essential、pkg-config、libssl-dev、zlib1g-dev、libtinfo6、libxml2、libz3-4、bison、flex，以及 curl / git / xz / bzip2 / CA。每次检查 dpkg；缺失才通过 apt 补装，重启后丢失也可重建。sudo 需允许保留代理变量，安装器不打印代理值或凭据。网络下载带重试、超时和原子落盘；失败保留缓存并明确提示重跑。LLVM 归档只展开 clang / lld、共享库、libclang 和资源文件，减少空间。pnpm 12 直接安装官方 Linux 原生包，避免 npm 引导入口在首次执行时额外联网下载。
+系统包是可重建的编译与运行依赖。用 `scripts/bootstrap-box.sh --system-packages` 查看 apt 选择的包名。Ubuntu 24.04 优先选用 GTK、ALSA 的 t64 包，Debian 12 回退到传统包名。每次用 dpkg 检查安装状态，缺失时通过 apt 补装。若用 sudo 补装，需允许保留代理变量。网络下载带重试、超时和原子落盘，失败保留缓存。LLVM 归档只展开 clang / lld、共享库、libclang 和资源文件，减少空间。pnpm 12 直接安装官方 Linux 原生包。
 
 ## 跨仓库同步
 
@@ -31,7 +32,7 @@ finance 的 rust-toolchain.toml、.python-version、.uv-version、toolchain.env 
 
 ## CI 策略
 
-所有仓库只使用 GitHub 托管 runner，不在云盒子自建 runner。bootstrap CI 在干净 ubuntu:24.04 容器内运行：首次真实安装、二次全 SKIP、source 后逐工具核对精确版本与前缀、Postgres 建表写入并跨重启读取。日志与冷 / 热耗时作为 artifact 保存，不能用 mock 代替安装验收。
+所有仓库只使用 GitHub 托管 runner。bootstrap CI 在干净的 `ubuntu:24.04` 容器内执行首次真实安装、二次全 SKIP、source 后逐工具核对精确版本与前缀，以及 PostgreSQL 建表写入并跨重启读取。日志与冷 / 热耗时作为 artifact 保存。Debian 12 检查用该版本的 apt 索引验证包名解析。systemd CI 渲染并静态校验 unit，守护行为由隔离测试验证。
 
 finance CI 从上游源码构建 wheel，缓存以 source commit + 工具链 / lock / 构建脚本为依据，并运行上游离线最小示例。缓存只能加速，不能跳过来源校验与回测。部署与 CI 相互独立：CI 不访问 IBKR 账户、不登录 Gateway、不执行生产迁移。密钥与配置见 [configuration.md](configuration.md)，Gateway 方案见 [ibkr-gateway.md](ibkr-gateway.md)。
 

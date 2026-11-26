@@ -2,7 +2,12 @@
 set -Eeuo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo/deploy/toolchain.env"
-source "${FERTILE_BOX_HOME:-/home/box}/fertile/env.sh"
+# shellcheck source=/dev/null
+source "$repo/scripts/runtime-root.sh"
+root=$(fertile_root)
+# shellcheck source=/dev/null
+source "$root/env.sh"
+export FERTILE_ROOT="$root"
 [[ "$(rustc --version)" = "rustc $RUST_VERSION "* ]]
 [[ "$(python --version)" = "Python $PYTHON_VERSION" ]]
 [[ "$(uv --version)" = "uv $UV_VERSION"* ]]

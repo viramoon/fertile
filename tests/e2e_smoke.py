@@ -21,6 +21,7 @@ from uuid import uuid4
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 from http_origin import parse_https_origin
+from runtime_root import resolve_root
 
 CLI = ROOT / "scripts/fertile"
 USER_AGENT = "fertile-e2e-smoke/" + (ROOT / "VERSION").read_text(encoding="utf-8").strip()
@@ -143,8 +144,11 @@ def require_fixture_listener(pid, port=4002):
             "the named protocol fixture does not own the loopback listener")
 
 
-def require_fixture_environment(root, box):
-    for location in {root, box / "fertile", Path("/home/box/fertile")}:
+def require_fixture_environment(root, box=None):
+    if box is None and (box_home := os.environ.get("FERTILE_BOX_HOME")):
+        box = Path(box_home)
+    locations = {root, box / "fertile"} if box is not None else {root}
+    for location in locations:
         require(not any(os.path.lexists(location / "secrets" / file) for file in ("ibkr-paper.env", "alerts.env")),
                 "paper credentials or an alert destination are present; fixture mode refused")
     require(os.environ.get("IB_GATEWAY_ADDRESS", "127.0.0.1:4002") == "127.0.0.1:4002",
@@ -153,13 +157,14 @@ def require_fixture_environment(root, box):
 
 
 def await_stack(protocol_fixture=False, *, paper_only=False):
-    required = CORE - {"healthwatch"} if paper_only else CORE
     deadline = time.monotonic() + 60
     while True:
         result = subprocess.check_output([CLI, "status", "--json"], timeout=10)
         snapshot = json.loads(result)
+        systemd = snapshot.get("manager") == "systemd"
+        required = CORE - {"healthwatch"} if paper_only or systemd else CORE
         services = snapshot["services"]
-        require(required <= services.keys(), "local supervisor manifest is missing a required service")
+        require(required <= services.keys(), "local service manifest is missing a required service")
         if protocol_fixture:
             require(PAPER_SERVICES <= services.keys() and all(
                 services[name]["state"] == "disabled" and services[name]["pid"] == 0 for name in PAPER_SERVICES),
@@ -412,11 +417,10 @@ def main():
     signal.signal(signal.SIGALRM, timed_out)
     signal.alarm(args.timeout_seconds)
     try:
-        box = Path(os.environ.get("FERTILE_BOX_HOME", "/home/box"))
-        root = Path(os.environ.get("FERTILE_ROOT", box / "fertile"))
+        root = resolve_root()
         fixture = args.mode == "local" and args.protocol_fixture
         if fixture:
-            require_fixture_environment(root, box)
+            require_fixture_environment(root)
         origin, skipped = await_stack(fixture, paper_only=args.paper_only) if args.mode == "local" else (args.origin, {})
         secret = Path(os.environ.get("WEB_ADMIN_TOKEN_FILE", root / "secrets/web.env"))
         log("smoke", mode=args.mode, origin=origin, paper_only=args.paper_only, timeout_seconds=args.timeout_seconds)
