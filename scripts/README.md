@@ -6,12 +6,16 @@
 | scripts/check-toolchain.sh | 检查版本与可执行文件的安装前缀。 |
 | scripts/setup-supervisor.sh | 将锁定的 PyYAML 和 Supervisor 安装到 `$FERTILE_ROOT/tools/supervisor`，供 `scripts/healthwatch` 和 `scripts/fertile` 的 Python 控制端使用。详情见 [控制端 Python 依赖](../deploy/linux-server.md#控制端-python-依赖)。 |
 | scripts/fertile build [--ref SHA] | 从指定总仓提交的 gitlink 构建 finance、web、前端，校验产物并原子切换 current。 |
+| scripts/fertile build --stage-only [--ref SHA] | 复用构建与制品校验，将下一发布保存在 `releases/` 待选择。 |
+| scripts/fertile container | 以 tini 管理前台 supervisord，作为容器入口加载同一进程清单。 |
 | scripts/fertile up / ensure / down | supervisord 依序启动、重启后恢复、逆序优雅停止服务。 |
 | scripts/fertile install-systemd --root PATH --user USER --group GROUP | 管理员为选定发布安装核心服务 unit，启用 `fertile.target` 开机启动。 |
 | scripts/fertile uninstall-systemd --root PATH | 管理员停止并停用该实例的 `fertile.target`，移除本仓库安装的 unit。 |
 | scripts/fertile verify-systemd | 渲染并静态检查样例 unit。若有 systemd-analyze 则执行 verify。 |
 | scripts/fertile status --json | 读取已安装 systemd 实例或 supervisord 的进程状态，以及 HTTP live / ready 结果。 |
 | scripts/fertile restart SERVICE / logs SERVICE | 操作当前实例所属守护器，分别重启服务或读取近 100 行日志。systemd 模式日志来自 journal。 |
+| scripts/fertile hot-upgrade SERVICE SHA --hook PATH | 验证兼容性，完成指定进程的候选就绪或停写交接，记录服务发布指针。`--migrate` 应用扩展迁移，`--rollback` 走兼容回退。 |
+| scripts/fertile hot-upgrade-status [--json] / hot-upgrade-reconcile ID --hook PATH | 读取热升级事务或在核对实际进程、租约和发布指针后确认中断结果。详见[热升级与本机接口](../deploy/hot-upgrade.md)。 |
 | scripts/fertile data-root | 输出当前环境与 `config/runtime.env` 解析出的 finance 数据根。 |
 | scripts/healthwatch | 采样本机健康状态、记录告警并调度备份。未来生产服务器可通过 `FERTILE_PUBLIC_ORIGIN` 或巡检覆盖文件显式启用 HTTPS 就绪探测。详见 [巡检与告警](../ops/monitoring.md)。 |
 | scripts/fertile rollback SHA | 校验既有版本并切换，重新加载受影响服务。 |

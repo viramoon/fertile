@@ -19,7 +19,6 @@ import tempfile
 REPO = Path(__file__).resolve().parents[1]
 UNIT_DIR = Path("/etc/systemd/system")
 SYSTEMD_BOOT = Path("/run/systemd/system")
-SERVICES = ("postgres", "finance-api", "finance-collector", "finance-backtest-worker", "web")
 TARGET = "fertile.target"
 PREFIX = "# fertile-systemd-v1 "
 ACCOUNT = re.compile(r"[a-zA-Z_][a-zA-Z0-9_.-]*\Z")
@@ -28,9 +27,15 @@ SYSTEMCTL = "/usr/bin/systemctl"
 JOURNALCTL = "/usr/bin/journalctl"
 SYSTEM_ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C"}
 
+# JSON is a YAML 1.2 subset. The root-owned installer reads only the trusted
+# inventory and templates beside this script, using the system interpreter.
+SYSTEMD_ROWS = {row["name"]: row for row in json.loads((REPO / "deploy/services.yaml").read_text())["services"]
+                if row.get("systemd")}
+SERVICES = tuple(name for name, row in SYSTEMD_ROWS.items() if "availability" not in row)
+
 
 def service_unit(name):
-    if name not in SERVICES:
+    if name not in SYSTEMD_ROWS:
         raise ValueError(f"service unavailable in systemd mode: {name}")
     return f"fertile-{name}.service"
 
@@ -71,7 +76,18 @@ def selected_release(root):
     return release.name
 
 
-def render(root, commit, user, group):
+def host_rows(release, *, include_optional=False):
+    for row in SYSTEMD_ROWS.values():
+        if not row.get("enabled", True):
+            continue
+        if "availability" in row and not include_optional:
+            artifact = Path(Template(row.get("availability_artifact", row["command"][0])).substitute(release=str(release)))
+            if not artifact.is_file():
+                continue
+        yield row
+
+
+def render(root, commit, user, group, *, include_optional=False):
     if not ACCOUNT.fullmatch(user) or not ACCOUNT.fullmatch(group) or "root" in (user, group):
         raise ValueError("systemd units require a non-root user and group name")
     release = release_path(root, commit)
@@ -81,33 +97,39 @@ def render(root, commit, user, group):
     target = Template((templates / "target.tmpl").read_text())
     launcher = quote(release / "fertile/scripts/systemd-service.sh")
     units = {}
-    previous = None
-    for name in SERVICES:
+    fields = dict(root=root, release=release, data=root / "data", research=root / "data/research",
+                  run=root / "run", logs=root / "logs")
+    for row in host_rows(release, include_optional=include_optional):
+        name = row["name"]
         dependencies = []
-        if previous:
-            dependencies.append(f"After={previous}")
-        if name == "web":
-            pg = service_unit("postgres")
-            dependencies.extend([f"Wants={pg}", f"After={pg}"])
+        for key in ("after", "wants"):
+            if names := row.get(key):
+                dependencies.append(f"{key.capitalize()}=" + " ".join(map(service_unit, names)))
+        mounts = [quote(Template(path).substitute(fields)) for path in row.get("volumes", {})]
+        dependencies.append("RequiresMountsFor=" + " ".join([quote(root), *mounts]))
         # The ':' prefix disables systemd's environment expansion in command arguments.
         command = f":/bin/bash {launcher}"
         prepare = f"ExecStartPre={command} prepare {name}"
-        ready = f"ExecStartPost={command} ready {name}" if name == "postgres" else ""
+        ready = f"ExecStartPost={command} ready {name}" if row.get("startup") == "postgres" else ""
+        condition = f"ExecCondition={command} condition {name}" if "availability" in row else ""
+        limits = row.get("limits", {})
         units[service_unit(name)] = service.substitute(
             owner=marker, name=name, dependencies="\n".join(dependencies), user=user, group=group,
             environment=quote(f"FERTILE_ROOT={root}"), prepare=prepare, start=f"{command} run {name}",
-            ready=ready, kill_mode="mixed" if name == "postgres" else "control-group",
+            condition=condition, ready=ready, stop_seconds=limits.get("stop_seconds", 30),
+            nofile=limits.get("nofile", 1024), kill_mode="mixed" if name == "postgres" else "control-group",
             kill_signal="SIGINT" if name == "postgres" else "SIGTERM",
         )
-        previous = service_unit(name)
     units[TARGET] = target.substitute(owner=marker, units=" ".join(units))
     return units
 
 
 def validate_units(units):
     """Validate sections, links and required settings when systemd-analyze is unavailable."""
-    expected = {*(service_unit(name) for name in SERVICES), TARGET}
-    if units.keys() != expected:
+    expected = set(units)
+    core = {*(service_unit(name) for name in SERVICES), TARGET}
+    allowed = {*(service_unit(name) for name in SYSTEMD_ROWS), TARGET}
+    if not core <= expected <= allowed:
         raise ValueError("incomplete set of systemd units")
     for unit, content in units.items():
         sections = {}
@@ -135,11 +157,11 @@ def validate_units(units):
             fields = sections["Service"]
             if (fields.get("Type") != ["exec"] or fields.get("Restart") != ["always"] or
                 any(not fields.get(key) for key in
-                    ("User", "Group", "Environment", "ExecStart", "ExecStartPre", "TimeoutStopSec"))):
+                    ("User", "Group", "Environment", "ExecStart", "ExecStartPre", "TimeoutStopSec", "LimitNOFILE"))):
                 raise ValueError(f"{unit}: incomplete service directives")
             if metadata.get("PartOf") != [TARGET]:
                 raise ValueError(f"{unit}: missing reference to {TARGET}")
-            if any(not entry.startswith(":/bin/bash ") for key in ("ExecStart", "ExecStartPre", "ExecStartPost")
+            if any(not entry.startswith(":/bin/bash ") for key in ("ExecStart", "ExecStartPre", "ExecStartPost", "ExecCondition")
                    for entry in fields.get(key, [])):
                 raise ValueError(f"{unit}: malformed service command")
         if required - metadata.keys():
@@ -285,20 +307,24 @@ def install(root, user, group):
         raise ValueError("systemd services must use a non-root user and group")
     with lock_unit_directory():
         units = render(root, selected_release(root), user, group)
-        present, states = check_ownership(root, units)
+        obsolete = [service_unit(name) for name in SYSTEMD_ROWS
+                    if service_unit(name) not in units and os.path.lexists(UNIT_DIR / service_unit(name))]
+        present, states = check_ownership(root, [*units, *obsolete])
         changed = [name for name, content in units.items()
                    if name not in present or (UNIT_DIR / name).read_text() != content]
-        if changed and any(row["ActiveState"] not in {"inactive", "failed"} for row in states.values()):
+        if (changed or obsolete) and any(row["ActiveState"] not in {"inactive", "failed"} for row in states.values()):
             raise RuntimeError(f"stop {TARGET} before replacing its unit files")
         for name in changed:
             write_unit(UNIT_DIR / name, units[name])
+        for name in obsolete:
+            (UNIT_DIR / name).unlink()
         systemctl("daemon-reload", check=True)
         systemctl("enable", TARGET, check=True)
     print(f"{TARGET} enabled; run systemctl start {TARGET} to launch it")
 
 
 def uninstall(root):
-    units = [TARGET, *(service_unit(name) for name in reversed(SERVICES))]
+    units = [TARGET, *(service_unit(name) for name in reversed(SYSTEMD_ROWS))]
     with lock_unit_directory():
         present, states = check_ownership(root, units)
         loaded = [name for name in present if states[name]["FragmentPath"]]
@@ -345,7 +371,7 @@ def main():
     commands.add_parser("verify-systemd")
     args = parser.parse_args()
     if args.action == "verify-systemd":
-        verify(render(Path("/var/lib/fertile"), "a" * 40, "fertile", "fertile"))
+        verify(render(Path("/var/lib/fertile"), "a" * 40, "fertile", "fertile", include_optional=True))
     elif args.action == "install-systemd":
         install(args.root, args.user, args.group)
     elif args.action == "uninstall-systemd":
@@ -355,8 +381,19 @@ def main():
         if release is None:
             return 3
         print(release)
+    elif args.action == "_restart":
+        if os.geteuid() == 0:
+            raise PermissionError("run fertile restart as the non-root service account")
+        # The CLI uses Python isolated mode. Import only the controller
+        # shipped alongside this trusted systemd entry point.
+        sys.path.insert(0, str(REPO / "scripts"))
+        from hot_upgrade import lock, require_clear
+
+        with lock(args.root):
+            require_clear(args.root)
+            service_command(args.root, "restart", args.name)
     else:
-        service_command(args.root, args.action[1:], args.name)
+        service_command(args.root, "logs", args.name)
     return 0
 
 

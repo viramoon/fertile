@@ -1,6 +1,7 @@
 """Exercise render, lifecycle and CLI dispatch without using the host systemd manager."""
 from contextlib import redirect_stdout
 from io import StringIO
+import json
 import os
 from pathlib import Path
 import shutil
@@ -59,6 +60,28 @@ class Render(unittest.TestCase):
               patch.object(units.subprocess, "run", return_value=failure)):
             with self.assertRaises(subprocess.CalledProcessError):
                 units.verify(rendered)
+
+    def test_optional_artifacts_render_units_with_shared_limits_and_order(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            commit = "c" * 40
+            binary = root / "releases" / commit / "bin"
+            binary.mkdir(parents=True)
+            for name in ("finance-market-wal", "web-notifier"):
+                (binary / name).touch()
+            rendered = units.render(root, commit, "trader", "trading")
+            units.validate_units(rendered)
+            projector = rendered["fertile-finance-projector.service"]
+            self.assertIn("After=fertile-finance-collector.service\n", projector)
+            self.assertIn(f'{root}/data/finance-state/market-wal"', projector)
+            self.assertIn("TimeoutStopSec=60s\nLimitNOFILE=4096", projector)
+            notifier = rendered["fertile-web-notifier.service"]
+            self.assertIn("After=fertile-web.service fertile-postgres.service\n", notifier)
+            self.assertIn("TimeoutStopSec=75s\nLimitNOFILE=1024", notifier)
+            self.assertIn(" condition web-notifier\n", notifier)
+            self.assertNotIn("Requisite=fertile-web.service", notifier)
+            self.assertNotIn("fertile-finance-live-decision.service", rendered)
+            self.assertIn("fertile-web-notifier.service", rendered[units.TARGET])
 
 
 class Lifecycle(unittest.TestCase):
@@ -161,6 +184,37 @@ class Lifecycle(unittest.TestCase):
             units.managed_release(self.root)
         self.boot.rmdir()
         self.assertIsNone(units.managed_release(self.root))
+
+    def test_install_removes_only_retired_owned_optional_units(self):
+        binary = self.root / "releases" / self.commit / "bin"
+        binary.mkdir(parents=True)
+        notifier_bin = binary / "web-notifier"
+        notifier_bin.touch()
+        self.install()
+        notifier = self.directory / "fertile-web-notifier.service"
+        self.assertTrue(notifier.is_file())
+        notifier_bin.unlink()
+        self.install()
+        self.assertFalse(notifier.exists())
+        self.assertNotIn(notifier.name, (self.directory / units.TARGET).read_text())
+
+    def test_cli_restart_checks_shared_journal_before_contacting_manager(self):
+        journal = self.root / "state/hot-upgrade"
+        journal.mkdir(parents=True)
+        record_id = "1" * 32
+        entry = journal / f"{record_id}.json"
+        entry.write_text(json.dumps({"id": record_id, "version": 1, "status": "running",
+                                     "started_at": "2026-01-01T00:00:00Z"}))
+        argv = ["fertile", "_restart", "--root", str(self.root), "web"]
+        with (patch.object(sys, "argv", argv), patch.object(units, "service_command") as dispatch,
+              patch.object(units.os, "geteuid", return_value=1000)):
+            with self.assertRaisesRegex(RuntimeError, "unfinished hot-upgrade"):
+                units.main()
+            dispatch.assert_not_called()
+            entry.unlink()
+            self.assertEqual(units.main(), 0)
+            dispatch.assert_called_once_with(self.root, "restart", "web")
+        self.assertTrue((self.root / "run/control.lock").is_file())
 
 
 class Runtime(unittest.TestCase):

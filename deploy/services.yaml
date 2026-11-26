@@ -1,46 +1,115 @@
-# 自上而下启动，自下而上停止。路径解析为本次发布的绝对路径。
-services:
-  - name: postgres
-    enabled: true
-    command: ["${release}/fertile/scripts/postgres.sh", foreground]
-    requires_bins: [postgres, initdb, pg_isready]
-  - name: finance-api
-    enabled: true
-    directory: "${release}/finance"
-    command: ["${release}/bin/finance-api"]
-    live: "http://127.0.0.1:${finance_port}/healthz/live"
-    ready: "http://127.0.0.1:${finance_port}/healthz/ready"
-  - name: finance-collector
-    enabled: true
-    directory: "${release}/finance"
-    command: ["${release}/bin/finance-collector"]
-    requires_bins: ["${release}/runtime/venv/bin/python"]
-    live: "http://127.0.0.1:${collector_port}/healthz/live"
-    ready: "http://127.0.0.1:${collector_port}/healthz/ready"
-  - name: finance-backtest-worker
-    enabled: true
-    directory: "${release}/finance"
-    command: ["${release}/finance/scripts/finance-backtest-worker"]
-    requires_bins: ["${release}/runtime/venv/bin/python", uv]
-  - name: web
-    enabled: true
-    local_database_role: fertile_web
-    directory: "${release}/web"
-    env_file: web-database.env
-    env_file_optional: true
-    command: ["${release}/bin/web"]
-    live: "http://127.0.0.1:${web_port}/healthz/live"
-    ready: "http://127.0.0.1:${web_port}/healthz/ready"
-  - name: xvfb
-    enabled: true
-    command: ["${release}/fertile/scripts/ibgateway.sh", xvfb]
-    requires_bins: [Xvfb, xauth]
-    ib: true
-  - name: ib-gateway
-    enabled: true
-    command: ["${release}/fertile/scripts/ibgateway.sh", run]
-    requires_bins: ["${release}/bin/finance-ib"]
-    ib: true
-  - name: healthwatch
-    enabled: true
-    command: ["${release}/fertile/scripts/healthwatch"]
+{
+  "manifest_version": 2,
+  "services": [
+    {
+      "name": "postgres", "systemd": true, "role": "infrastructure", "startup": "postgres",
+      "command": ["${release}/fertile/scripts/postgres.sh", "foreground"],
+      "requires_bins": ["postgres", "initdb", "pg_isready"],
+      "volumes": {"${root}/data/postgres": "rw", "${run}/postgres": "rw"},
+      "limits": {"nofile": 4096}
+    },
+    {
+      "name": "finance-api", "systemd": true, "role": "reader", "after": ["postgres"],
+      "directory": "${release}/finance", "command": ["${release}/bin/finance-api"],
+      "volumes": {"${data}": "rw", "${research}": "ro"},
+      "limits": {"nofile": 4096},
+      "live": "http://127.0.0.1:${finance_port}/healthz/live",
+      "ready": "http://127.0.0.1:${finance_port}/healthz/ready"
+    },
+    {
+      "name": "finance-collector", "systemd": true, "role": "collector", "after": ["finance-api"],
+      "source": "${market_source}", "sources": ["ib", "replay"],
+      "directory": "${release}/finance", "command": ["${release}/bin/finance-collector"],
+      "requires_bins": ["${release}/runtime/venv/bin/python"],
+      "volumes": {"${data}": "rw"},
+      "limits": {"nofile": 4096},
+      "live": "http://127.0.0.1:${collector_port}/healthz/live",
+      "ready": "http://127.0.0.1:${collector_port}/healthz/ready"
+    },
+    {
+      "name": "finance-backtest-worker", "systemd": true, "role": "worker", "after": ["finance-collector"],
+      "directory": "${release}/finance", "command": ["${release}/finance/scripts/finance-backtest-worker"],
+      "requires_bins": ["${release}/runtime/venv/bin/python", "uv"],
+      "volumes": {"${data}": "rw", "${research}": "ro"},
+      "limits": {"nofile": 8192, "stop_seconds": 60}
+    },
+    {
+      "name": "web", "systemd": true, "role": "reader", "after": ["finance-backtest-worker", "postgres"],
+      "wants": ["postgres"], "local_database_role": "fertile_web",
+      "directory": "${release}/web", "command": ["${release}/bin/web"],
+      "env_file": "web-database.env", "env_file_optional": true,
+      "volumes": {"${run}/postgres": "rw", "${release}/static": "ro", "${root}/config": "ro"},
+      "limits": {"nofile": 4096},
+      "live": "http://127.0.0.1:${web_port}/healthz/live",
+      "ready": "http://127.0.0.1:${web_port}/healthz/ready"
+    },
+    {
+      "name": "finance-projector", "systemd": true, "role": "projector", "after": ["finance-collector"],
+      "availability": "finance-f3", "enable_setting": "FERTILE_ENABLE_FINANCE_PROJECTOR",
+      "availability_artifact": "${release}/bin/finance-market-wal",
+      "directory": "${release}/finance",
+      "command": [
+        "${release}/runtime/venv/bin/python", "-m", "fertile_finance.market_projector",
+        "--data-root", "${data}", "--wal-bin", "${release}/bin/finance-market-wal"
+      ],
+      "environment": {"PYTHONPATH": "${release}/finance/python"},
+      "requires_bins": ["${release}/bin/finance-market-wal"],
+      "volumes": {
+        "${data}/finance-state/market-wal": "ro",
+        "${data}/finance-state/market-projection": "rw",
+        "${data}/catalog/market-events": "rw"
+      },
+      "limits": {"nofile": 4096, "stop_seconds": 60}
+    },
+    {
+      "name": "finance-collector-binance", "systemd": true, "enabled": false, "role": "collector",
+      "source": "binance", "availability": "finance-f4-template",
+      "directory": "${release}/finance", "command": ["${release}/bin/finance-collector-binance"],
+      "volumes": {"${data}/finance-state/market-wal/binance": "rw"},
+      "limits": {"nofile": 4096}
+    },
+    {
+      "name": "finance-collector-hyperliquid", "systemd": true, "enabled": false, "role": "collector",
+      "source": "hyperliquid", "availability": "finance-f5-template",
+      "directory": "${release}/finance", "command": ["${release}/bin/finance-collector-hyperliquid"],
+      "volumes": {"${data}/finance-state/market-wal/hyperliquid": "rw"},
+      "limits": {"nofile": 4096}
+    },
+    {
+      "name": "finance-backtest-worker-f13", "systemd": true, "enabled": false, "role": "worker",
+      "availability": "finance-f13-template", "replaces": "finance-backtest-worker",
+      "directory": "${release}/finance", "command": ["${release}/finance/scripts/finance-backtest-worker"],
+      "volumes": {"${data}/finance-state/backtests": "rw", "${research}": "ro"},
+      "limits": {"nofile": 8192, "stop_seconds": 60}
+    },
+    {
+      "name": "finance-live-decision", "systemd": true, "enabled": false, "role": "decision",
+      "availability": "finance-f13-template",
+      "directory": "${release}/finance", "command": ["${release}/bin/finance-decision"],
+      "volumes": {"${data}/finance-state/market-wal": "ro", "${data}/finance-state/decisions": "rw"},
+      "limits": {"nofile": 4096}
+    },
+    {
+      "name": "web-notifier", "systemd": true, "role": "notifier", "after": ["web", "postgres"],
+      "availability": "web-w3", "enable_setting": "FERTILE_ENABLE_WEB_NOTIFIER",
+      "directory": "${release}/web", "command": ["${release}/bin/web-notifier"],
+      "requires_bins": ["/usr/bin/curl", "psql"],
+      "env_file": "web-database.env", "env_file_optional": true, "local_env_file": "web-notifier.env",
+      "volumes": {"${run}/postgres": "rw"},
+      "limits": {"nofile": 1024, "stop_seconds": 75}
+    },
+    {
+      "name": "xvfb", "role": "auxiliary", "ib": true,
+      "command": ["${release}/fertile/scripts/ibgateway.sh", "xvfb"],
+      "requires_bins": ["Xvfb", "xauth"]
+    },
+    {
+      "name": "ib-gateway", "role": "auxiliary", "ib": true, "after": ["xvfb"],
+      "command": ["${release}/fertile/scripts/ibgateway.sh", "run"],
+      "requires_bins": ["${release}/bin/finance-ib"]
+    },
+    {
+      "name": "healthwatch", "role": "auxiliary", "command": ["${release}/fertile/scripts/healthwatch"]
+    }
+  ]
+}

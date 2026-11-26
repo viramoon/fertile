@@ -49,6 +49,18 @@ def tree_digest(directory):
 
 def main():
     command, *args = sys.argv[1:]
+    if command == "optional-bins":
+        component, source = args
+        allowed = {
+            "finance": {"finance-decision", "finance-market-wal"},
+            "web": {"web-notifier"},
+        }[component]
+        packages = json.loads(Path(source).read_text())["packages"]
+        built = {target["name"] for package in packages for target in package["targets"]
+                 if "bin" in target["kind"] and not target.get("required-features")}
+        for name in sorted(allowed & built):
+            print(name)
+        return
     if command == "distribution":
         wheel, sha = installed_wheel()
         print(json.dumps({"wheel": wheel.name, "sha256": sha}))

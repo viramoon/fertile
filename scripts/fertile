@@ -13,7 +13,7 @@ case "${1:-}" in
   verify-systemd)
     exec /usr/bin/python3 -I "$scripts/systemd_units.py" "$@"
     ;;
-  status|restart|logs|up|ensure|ensure-up|down|stop|rollback)
+  status|restart|logs|up|ensure|ensure-up|down|stop|rollback|container)
     if [[ ! -x /usr/bin/python3 ]]; then
       : # A supervisord-only host can use the pinned control Python.
     elif release=$(/usr/bin/python3 -I "$scripts/systemd_units.py" _managed --root "$root"); then
@@ -47,4 +47,9 @@ if [[ -z ${FERTILE_CONTROL_PYTHON:-} && -z ${FERTILE_SUPERVISOR_BIN:-} ]]; then
 fi
 python=${FERTILE_CONTROL_PYTHON:-${FERTILE_SUPERVISOR_BIN:-$root/tools/supervisor/bin}/python}
 [[ -x "$python" ]] || { echo "Install the bootstrap toolchain and run scripts/setup-supervisor.sh" >&2; exit 1; }
+case "${1:-}" in
+  hot-upgrade|hot-upgrade-status|hot-upgrade-reconcile)
+    exec "$python" "$scripts/hot_upgrade_cli.py" "$@"
+    ;;
+esac
 exec "$python" "$scripts/supervision.py" "$@"

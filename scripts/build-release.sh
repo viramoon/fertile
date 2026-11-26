@@ -1,16 +1,25 @@
 #!/usr/bin/env bash
-# Build exactly the committed component revisions, then activate the complete directory.
+# Build exactly the committed component revisions and publish the complete directory.
 set -Eeuo pipefail
 umask 027
 trap 'echo "Build failed at ${BASH_SOURCE[0]}:$LINENO" >&2' ERR
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo=$(git -C "${FERTILE_SOURCE_DIR:-$script_dir/..}" rev-parse --show-toplevel)
 ref=HEAD
-case $# in
-  0) ;;
-  2) [[ $1 == --ref && -n $2 ]] || { echo 'usage: fertile build [--ref <commit>]' >&2; exit 2; }; ref=$2 ;;
-  *) echo 'usage: fertile build [--ref <commit>]' >&2; exit 2 ;;
-esac
+stage_only=false
+ref_set=false
+usage() { echo 'usage: fertile build [--ref <commit>] [--stage-only]' >&2; exit 2; }
+while (( $# )); do
+  case $1 in
+    --ref)
+      [[ $ref_set == false && $# -ge 2 && -n $2 ]] || usage
+      ref=$2; ref_set=true; shift 2 ;;
+    --stage-only)
+      [[ $stage_only == false ]] || usage
+      stage_only=true; shift ;;
+    *) usage ;;
+  esac
+done
 
 # shellcheck source=/dev/null
 source "$script_dir/runtime-root.sh"
@@ -24,6 +33,16 @@ export FERTILE_ROOT=$root
 mkdir -p "$root"/{run,releases,cache/build}
 exec 9>"$root/run/control.lock"
 flock -x 9
+if [[ $stage_only == false ]]; then
+  python3 -I -B -c 'import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from hot_upgrade import require_clear
+try:
+    require_clear(Path(sys.argv[2]))
+except (OSError, ValueError, RuntimeError) as error:
+    sys.exit(f"fertile: {error}")' "$script_dir" "$root"
+fi
 sha=$(git -C "$repo" rev-parse --verify --end-of-options "$ref^{commit}")
 release="$root/releases/$sha"
 [[ ! -e $root/current || -L $root/current ]] || { echo 'current must be a symbolic link' >&2; exit 1; }
@@ -68,7 +87,7 @@ checkout_at() {
 }
 
 build_payload() {
-  local output=$1 component url finance vendor vendor_sha vendor_cache vendor_tmp target example wheel
+  local output=$1 component url finance vendor vendor_sha vendor_cache vendor_tmp target example wheel optional binary
   for component in "${components[@]}"; do
     url=$(git -C "$repo" config --blob "$sha:.gitmodules" --get "submodule.$component.url")
     checkout_at "$scratch/$component" "$repo/$component" "${revisions[$component]}" "$url"
@@ -115,6 +134,15 @@ build_payload() {
     (cd "$scratch/$component" && CARGO_INCREMENTAL=0 SQLX_OFFLINE=true cargo build --release --locked --bins --target-dir "$target")
   done
   for component in finance-api finance-ib finance-collector web; do install -m 0755 "$target/release/$component" "$output/bin/$component"; done
+  # This target directory is shared across pinned component revisions. Stage
+  # optional executables only when the current source actually declares them.
+  for component in finance web; do
+    (cd "$scratch/$component" && cargo metadata --locked --no-deps --format-version 1) > "$scratch/$component-targets.json"
+    optional=$(python3 "$script_dir/release-manifest.py" optional-bins "$component" "$scratch/$component-targets.json")
+    while IFS= read -r binary; do
+      if [[ -n $binary ]]; then install -m 0755 "$target/release/$binary" "$output/bin/$binary"; fi
+    done <<<"$optional"
+  done
   (cd "$scratch/frontend" && pnpm install --frozen-lockfile && pnpm run build)
   cp -a "$scratch/frontend/dist/." "$output/static/"
   cp -a "$scratch/web/config" "$output/web/"
@@ -135,6 +163,10 @@ else
   python3 "$script_dir/release-manifest.py" verify "$stage" "${manifest_args[@]}"
   mv -T -- "$stage" "$release"
   stage=
+fi
+if [[ $stage_only == true ]]; then
+  echo "Staged $release"
+  exit 0
 fi
 switch=$(mktemp -d "$root/.switch-XXXXXXXX")
 ln -s -- "releases/$sha" "$switch/current"

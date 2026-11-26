@@ -39,6 +39,7 @@ fertile 以 git submodule 引入 finance、web、frontend；agent 是独立仓�
 - [唯一服务部署来源](../deploy/README.md)
 - [聚合服务清单](../deploy/service.yaml)
 - [普通服务器部署](../deploy/linux-server.md)
+- [热升级与本机接口](../deploy/hot-upgrade.md)
 - [重启重建](../deploy/bootstrap.md)
 - [运维索引](../ops/README.md)
 - [代码导出快照](../contracts/README.md)

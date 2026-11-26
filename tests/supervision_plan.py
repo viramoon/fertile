@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 from tempfile import TemporaryDirectory
 import sys
@@ -19,6 +20,7 @@ from urllib.response import addinfourl
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import supervision as ctl
+import service_releases
 import supervisor_drill as drill
 from runtime_root import resolve_root
 
@@ -76,6 +78,125 @@ class RuntimePlan(unittest.TestCase):
     def write(self, **extras):
         svc = {"name": "test", "directory": str(self.root), "command": ["/bin/true"], **extras}
         self.manifest.write_text(json.dumps({"services": [svc]}))
+
+    def releases(self):
+        production = ctl.SCRIPTS.parent
+        newest, previous = (self.root / "releases" / (commit * 40) for commit in ("a", "b"))
+        for release in (newest, previous):
+            (release / "fertile/scripts").mkdir(parents=True)
+            (release / "fertile/deploy").mkdir()
+            shutil.copytree(production / "deploy/supervisor", release / "fertile/deploy/supervisor")
+            shutil.copy(production / "scripts/supervision.py", release / "fertile/scripts/supervision.py")
+            shutil.copy(production / "deploy/services.yaml", release / "fertile/deploy/services.yaml")
+            (release / "fertile/scripts/prepare-web-db.sql").touch()
+            (release / "finance/config/collector").mkdir(parents=True)
+            (release / "finance/config/collector/cloudbox.yaml").write_text("source: replay\n")
+            (release / "web").mkdir()
+        (self.root / "current").symlink_to(newest)
+        return newest, previous
+
+    def rendered_programs(self, plan):
+        ctl.render(plan)
+        parser = configparser.RawConfigParser()
+        parser.read(self.run / "programs.conf")
+        return parser
+
+    def test_pinned_web_uses_selected_payload_without_reconfiguring_collector(self):
+        base, previous = self.releases()
+        old = ctl.manifest_rows(previous / "fertile/deploy/services.yaml")
+        old["web"] = {key: old["web"][key] for key in ("name", "directory", "command", "live", "ready")}
+        (previous / "fertile/deploy/services.yaml").write_text(json.dumps({"services": list(old.values())}))
+        with (patch.dict(os.environ, {"PATH": os.defpath, "FERTILE_MARKET_SOURCE": "replay"}, clear=True),
+              patch.object(ctl.shutil, "which", return_value="/bin/true")):
+            first = ctl.build_plan()
+            old_programs = self.rendered_programs(first)
+            service_releases.select(self.root, base, "web", previous)
+            second = ctl.build_plan()
+            new_programs = self.rendered_programs(second)
+            with patch.object(ctl.subprocess, "run") as run:
+                ctl.prepare_web(second)
+            run.assert_not_called()
+        web = second["services"]["web"]
+        self.assertEqual(web["release"], str(previous))
+        self.assertEqual(web["command"][0], str(previous / "bin/web"))
+        self.assertEqual(web["role"], "reader")
+        self.assertEqual(web["env"]["WEB_AUTO_MIGRATE"], "false")
+        self.assertEqual(web["env"]["WEB_STATIC_ROOT"], str(previous / "static"))
+        self.assertTrue(web["pinned"])
+        self.assertEqual(set(old_programs.sections()), set(new_programs.sections()))
+        self.assertNotEqual(dict(old_programs["program:web"]), dict(new_programs["program:web"]))
+        for section in set(old_programs.sections()) - {"program:web"}:
+            self.assertEqual(dict(old_programs[section]), dict(new_programs[section]))
+
+    def test_projector_and_notifier_capabilities_are_opt_in(self):
+        release, _ = self.releases()
+        secrets = self.root / "secrets"
+        secrets.mkdir()
+        config = secrets / "web-notifier.env"
+        config.write_text("WEB_SMTP_HOST=relay.example.invalid\nWEB_SMTP_FROM=notice@example.invalid\n"
+                          "WEB_SMTP_TO=owner@example.invalid\n")
+        config.chmod(0o600)
+        with (patch.dict(os.environ, {"PATH": os.defpath, "FERTILE_MARKET_SOURCE": "replay"}, clear=True),
+              patch.object(ctl.shutil, "which", return_value="/bin/true")):
+            defaults = ctl.build_plan()
+            services = defaults["services"]
+            self.assertEqual(services["finance-collector"]["source"], "replay")
+            for name in ("finance-projector", "web-notifier", "finance-collector-binance",
+                         "finance-collector-hyperliquid", "finance-live-decision", "finance-backtest-worker-f13"):
+                self.assertEqual(services[name]["skip"], "disabled")
+            enabled = ctl.build_plan(settings_overrides={"FERTILE_ENABLE_FINANCE_PROJECTOR": "1",
+                                                         "FERTILE_ENABLE_WEB_NOTIFIER": "1"})
+            programs = self.rendered_programs(enabled)
+            projector = enabled["services"]["finance-projector"]
+            notifier = enabled["services"]["web-notifier"]
+            self.assertEqual(projector["command"], [
+                str(release / "runtime/venv/bin/python"), "-m", "fertile_finance.market_projector",
+                "--data-root", str(self.root / "data/replay"), "--wal-bin", str(release / "bin/finance-market-wal"),
+            ])
+            self.assertEqual(projector["env"]["PYTHONPATH"], str(release / "finance/python"))
+            self.assertEqual(projector["volumes"][str(self.root / "data/replay/finance-state/market-wal")], "ro")
+            self.assertEqual(notifier["env"]["DATABASE_URL"], enabled["services"]["web"]["env"]["DATABASE_URL"])
+            self.assertEqual(programs["program:web-notifier"]["stopwaitsecs"], "75")
+            self.assertFalse(notifier["skip"])
+            with patch.object(ctl.subprocess, "run", return_value=Mock(returncode=0, stdout="t\n")) as psql:
+                ctl.prepare_notifier(enabled)
+                self.assertEqual(psql.call_args.kwargs["env"]["PGDATABASE"], notifier["env"]["PGDATABASE"])
+                self.assertEqual(psql.call_args.kwargs["env"]["PGUSER"], "fertile_web")
+                self.assertIn("replaces_id", psql.call_args.args[0][-1])
+                psql.return_value.stdout = "f\n"
+                with self.assertRaisesRegex(RuntimeError, "W3 database migrations"):
+                    ctl.prepare_notifier(enabled)
+        self.assertFalse(any(b"relay.example.invalid" in path.read_bytes()
+                             for path in self.run.rglob("*") if path.is_file()))
+
+    def test_container_uses_tini_and_a_foreground_supervisor(self):
+        self.write()
+        argv = ["/fixture/tini", "-s", "--", sys.executable, str(ctl.SCRIPTS / "supervision.py"), "_container"]
+        with patch.object(ctl.shutil, "which", return_value="/fixture/tini"):
+            self.assertEqual(ctl.container_command(), argv)
+        with patch.object(ctl.shutil, "which", return_value=None), self.assertRaisesRegex(ValueError, "install tini"):
+            ctl.container_command()
+        process = Mock()
+        process.wait.return_value = 24
+        process.poll.return_value = 24
+        with (patch.object(ctl, "daemon_pid", return_value=0), patch.object(ctl, "wait_daemon") as ready,
+              patch.object(ctl, "reconcile") as reconcile, patch.object(ctl.signal, "signal"),
+              patch.object(ctl.subprocess, "Popen", return_value=process) as start):
+            self.assertEqual(ctl.run_container(), 24)
+        self.assertEqual(start.call_args.args[0], [ctl.BINDIR / "supervisord", "-n", "-c", ctl.CONF])
+        self.assertEqual(start.call_args.kwargs["env"]["FERTILE_ROOT"], str(self.root))
+        ready.assert_called_once_with(process)
+        self.assertEqual(tuple(reconcile.call_args.args[0]["services"]), ("test",))
+
+    def test_rendered_launcher_applies_the_service_fd_limit(self):
+        self.write(command=[sys.executable, "-c", "import resource; print(resource.getrlimit(resource.RLIMIT_NOFILE))"],
+                   limits={"nofile": 640, "stop_seconds": 42})
+        programs = self.rendered_programs(ctl.build_plan())
+        result = subprocess.run(shlex.split(programs["program:test"]["command"]), cwd=self.root, capture_output=True,
+                                text=True, check=True, timeout=5,
+                                env={**os.environ, "FERTILE_ROOT": str(self.root)})
+        self.assertEqual(result.stdout, "(640, 640)\n")
+        self.assertEqual(programs["program:test"]["stopwaitsecs"], "42")
 
     def assert_probe(self, transport, url, agent):
         self.assertEqual(transport.call_count, 1, "the probe must contact only the configured URL")

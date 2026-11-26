@@ -9,6 +9,7 @@ Type=exec
 User=$user
 Group=$group
 Environment=$environment
+$condition
 $prepare
 ExecStart=$start
 $ready
@@ -17,7 +18,8 @@ RestartSec=3s
 StandardOutput=journal
 StandardError=journal
 TimeoutStartSec=120s
-TimeoutStopSec=30s
+TimeoutStopSec=${stop_seconds}s
+LimitNOFILE=$nofile
 KillMode=$kill_mode
 KillSignal=$kill_signal
 NoNewPrivileges=yes

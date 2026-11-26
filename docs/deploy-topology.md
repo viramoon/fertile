@@ -16,6 +16,6 @@
 
 ## 已实现的环境引导
 
-运行 `scripts/bootstrap-box.sh` 后执行 `source "$FERTILE_ROOT/env.sh"`。工具版本以 [toolchain.env](../deploy/toolchain.env) 为准。PostgreSQL 的 `data/postgres` 与 `run/postgres` 均相对于持久根。普通服务器可用 systemd 开机启动核心五项，云盒子及无 systemd 环境由 supervisord 启动，云盒子重启后由 Ruler 检查系统依赖并恢复服务。所有 CI 使用 GitHub 托管 runner。[普通服务器部署指南](../deploy/linux-server.md) [云盒子守护 ADR](adr/ADR-002-process-supervision.md)
+运行 `scripts/bootstrap-box.sh` 后执行 `source "$FERTILE_ROOT/env.sh"`。工具版本以 [toolchain.env](../deploy/toolchain.env) 为准。PostgreSQL 的 `data/postgres` 与 `run/postgres` 均相对于持久根。普通服务器可用 systemd 开机启动核心五项与已启用的扩展服务，容器由 tini 启动前台 supervisord，两者读取同一个进程清单。云盒子重启后由 Ruler 检查系统依赖并通过 supervisord 恢复服务。所有 CI 使用 GitHub 托管 runner。[普通服务器部署指南](../deploy/linux-server.md) [云盒子守护 ADR](adr/ADR-002-process-supervision.md)
 
 默认各 HTTP 服务只在环回监听，外部浏览器通过可选的 HTTPS 反向代理连接 web。PostgreSQL 与 finance 的内部端口保留在本机。公网检查需要运维显式配置。密钥与覆盖顺序见 [配置规范](configuration.md)，Gateway 版本、IBC 对比和 paper 4002 恢复步骤见 [Gateway 方案](ibkr-gateway.md)。

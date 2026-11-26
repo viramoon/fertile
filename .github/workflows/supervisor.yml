@@ -14,12 +14,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Prepare the isolated host drill tools
+        run: |
+          if ! command -v shellcheck >/dev/null || ! command -v tini >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y shellcheck tini
+          fi
       - name: Check shell entry points
         run: |
-          if ! command -v shellcheck >/dev/null; then
-            sudo apt-get update -qq
-            sudo apt-get install -y shellcheck
-          fi
           shellcheck scripts/fertile scripts/runtime-root.sh scripts/systemd-service.sh scripts/setup-supervisor.sh \
             scripts/build-release.sh scripts/postgres.sh \
             tests/build-atomicity.sh tests/chaos-restart.sh tests/simulate-reboot.sh
@@ -39,11 +41,14 @@ jobs:
           scripts/fertile verify-systemd
           "$FERTILE_CONTROL_PYTHON" -B tests/systemd.py
           "$FERTILE_CONTROL_PYTHON" -B tests/test_e2e_smoke.py
+          "$FERTILE_CONTROL_PYTHON" -B tests/hot_upgrade_test.py
+          "$FERTILE_CONTROL_PYTHON" -B tests/hot_upgrade_cli_test.py
       - name: Exercise rendering, restarts and whole-stack recovery
         run: |
           umask 077
           {
             "$RUNNER_TEMP/fertile-supervisor/bin/python" tests/supervision_plan.py
+            "$RUNNER_TEMP/fertile-supervisor/bin/python" tests/supervisor_process_test.py
             "$RUNNER_TEMP/fertile-supervisor/bin/python" -u tests/supervisor_ci.py
           } >"$RUNNER_TEMP/fertile-supervisor.log" 2>&1
       - name: Prepare the public drill result
