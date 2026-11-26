@@ -51,7 +51,7 @@ curl -fsS http://127.0.0.1:8090/api/v1/backtests/sample
 2. 检出获批提交并初始化递归子模块。运行 `scripts/fertile build --ref <fertile-commit>`，核对 `current/manifest.json` 的三个 gitlink 和完整静态目录。systemd 按普通服务器指南在构建前停旧 target，构建后重装指向新版的 unit。[systemd 版本切换](../deploy/linux-server.md#systemd)
 3. 受管 PostgreSQL 由 supervisord 的 `scripts/fertile ensure-up` 或 systemd 启动时的准备步骤以 `fertile_web` 运行新版 `web migrate`，成功后启动新版 web。使用外部 PostgreSQL 时，由数据库管理员安排显式迁移。以 web 运行账户加载服务所用的 `DATABASE_URL` 和 profile，设置 `WEB_CONFIG_DIR="$FERTILE_ROOT/current/web/config"`，执行新版 `current/bin/web migrate`，成功后再重启到新版 web。确认 SQLx 台账已记录 `20261126000000` 成功。
 4. 核对新版 web PID、`/healthz/ready` 和 `/api/v1/system/status`，打开终端页面并核对同源 JS/CSS 及两个许可证文件的响应内容。在部署复验窗口运行 `tests/e2e-smoke.sh local --paper-only`，确认可提交回测。官方历史日线作业按下节使用隔离队列。
-5. 降级到 W1 之前时，从升级前快照恢复独立的兼容数据库，保留已迁移的数据库和密文。旧版 SQLx 迁移器会拒绝台账中新增的迁移版本。使用新版控制器与兼容数据库切回旧制品，步骤见 [从升级前快照回滚并切回新版](#从升级前快照回滚并切回新版)。若还跨越 finance `7600be4`，为旧 finance 选择兼容的独立数据根或恢复首次写入四窗口摘要前的备份。
+5. 降级到 W1 之前时，从升级前快照恢复独立的兼容数据库，保留已迁移的数据库和密文。旧版 SQLx 迁移器会拒绝台账中新增的迁移版本。使用新版控制器与兼容数据库切回旧制品，步骤见 [从升级前快照回滚并切回新版](#从升级前快照回滚并切回新版)。若重装旧版 systemd unit，先记录并撤下 `runtime.env` 中已配置的 W1 变量，切回新版后恢复。若还跨越 finance `7600be4`，为旧 finance 选择兼容的独立数据根或恢复首次写入四窗口摘要前的备份。
 
 ## 部署后的隔离历史日线验收
 
