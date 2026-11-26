@@ -15,7 +15,7 @@ fertile v1 面向单人私用。付费数据、真实行情及其脱敏副本、
 
 ## 合成来源与规则格式
 
-数据 fixture 位于规则的 `fixture_root` 下。总仓用清单的 `fixtures` 对象登记，键为仓库相对路径。每条记录只接受表中的四个字段。[合成来源清单](../policy/synthetic-fixtures.json)
+总仓用清单的 `fixtures` 对象登记 `fixture_root` 下的数据 fixture，用 `documents` 对象登记经审查的合成 Markdown 文档。两者都用仓库相对路径作键，每条记录只接受表中的四个字段。同一路径只能登记一次。v1 旧清单省略 `documents` 时按空白名单处理。[合成来源清单](../policy/synthetic-fixtures.json)
 
 | 字段 | 含义 |
 | --- | --- |
@@ -32,9 +32,15 @@ fertile v1 面向单人私用。付费数据、真实行情及其脱敏副本、
 | --- | --- |
 | `max_blob_bytes`、`max_pr_bytes` | 从 Git 对象读取大小后再扫描内容。总仓每个 blob 上限 1 MiB，PR 标题和正文合计以及每条 Git 提交或 tag 消息上限 64 KiB。 |
 | `blocked_directory_pattern`、`blocked_filenames`、`blocked_extensions` | 对路径组件小写匹配，覆盖数据、catalog、截图、日志、导出、备份、转储与秘密目录，以及 LFS 配置、常见私有文件名与不透明格式。 |
-| `fixture_root`、`fixture_manifest`、`fixture_extensions`、`generator_extensions` | 选择合成来源清单、允许的 fixture 文本类型和生成器源文件类型。CSV、TSV、JSONL、NDJSON 以及 fixture 目录内的 JSON 必须登记。清单仅豁免行情形状检查，其他路径、大小和内容限制仍有效。 |
+| `fixture_root`、`fixture_manifest`、`fixture_extensions`、`generator_extensions` | 选择合成来源清单、允许的 fixture 文本类型和生成器源文件类型。CSV、TSV、JSONL、NDJSON 以及 fixture 目录内的 JSON 必须登记。fixture 登记只允许携带合成行情形状，其他限制仍有效。 |
 
-总仓同时检查 UTF-8 文本、文件签名、CSV、Markdown 行情表格和常见 JSON 行情记录。Markdown 引用中的表格与 CSV 也会被扫描。日志或 SQL 转储、文件名和正文中的常见凭据、嵌图、GitHub 附件链接、LFS 指针与 `.gitattributes` 中的 LFS 规则都在检查范围内。把二进制改名为文档或把指针换后缀仍会触发检查。总仓不接收不透明二进制、图片或录像文件，视觉对比在工作树外用合成界面生成和查看。扫描是特征匹配，评审仍须确认数据来源、截图与附件内容。诊断输出使用规则代码、输入类别或 Git 对象 ID，原始路径和匹配内容仅供本地核对。[总仓检查器](../scripts/data-guard.py)
+规则文件必须包含上述全部字段与整数版本 `1`。大小上限为正整数，路径为仓库相对路径，fixture 根以斜线结尾，目录模式为可编译且不匹配空组件的正则表达式。后缀与文件名列表必须是非空且无重复项的数组，使用小写字符串。缺字段、未知字段、错误类型、非法值或不支持的版本都会使检查失败。
+
+Markdown 表格和 HTML 表格依据列组合识别行情，支持中英文的标的、时间、价格、数量、成交、买卖报价和档位。大小写、空格、连字符、下划线与常见档位编号采用统一匹配。Markdown 引用中的表格和 CSV 也会被扫描。行情形状及嵌图默认拒绝，嵌图检查覆盖 Markdown 行内、完整引用、折叠引用、快捷引用和指向图片的引用定义，也覆盖 HTML 图像标签与内联 data URI。
+
+若需发布合成行情表或合成示意图，提交可审查的离线生成器，将完整的 `.md` 或 `.markdown` 文件按路径、SHA-256 和合成来源登记到 `documents`。图像例外只适用于以 Markdown 行内形式嵌入的 Base64 PNG，图像字节随文档摘要锁定。外部或单独引用的图片、通用 data URI、凭据、日志、LFS 和不透明二进制仍适用原检查。白名单只适用于登记的 Git 文件，PR 正文和 Git 消息按默认规则扫描。
+
+总仓还检查 UTF-8 文本、文件签名、常见 JSON 行情记录、日志或 SQL 转储、文件名和正文中的常见凭据、GitHub 附件链接、LFS 指针与 `.gitattributes` 中的 LFS 规则。扫描是特征匹配，评审仍须确认来源与内容。诊断输出使用规则代码、输入类别或 Git 对象 ID，原始路径和匹配内容仅供本地核对。[总仓检查器](../scripts/data-guard.py)
 
 ## 总仓接入
 

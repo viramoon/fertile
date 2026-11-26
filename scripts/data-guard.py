@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Offline data publication checks for the fertile Git repository and CI."""
 import argparse
+import base64
 import hashlib
+from html import unescape
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -9,21 +11,30 @@ import re
 import stat
 import subprocess
 import sys
+from unicodedata import normalize
+from urllib.parse import unquote
 
 
 RULES = "policy/data-guard.json"
 LICENSES = "policy/market-data-licenses.json"
 APPROVALS = "policy/market-data-approvals.json"
 REGULAR_FILE_MODES = {"100644", "100755"}
+EXTENSION_FIELDS = {"fixture_extensions", "generator_extensions", "blocked_extensions"}
+RULE_FIELDS = EXTENSION_FIELDS | {
+    "schema_version", "max_blob_bytes", "max_pr_bytes", "fixture_root", "fixture_manifest",
+    "blocked_directory_pattern", "blocked_filenames",
+}
+DOCUMENT_EXTENSIONS = {".md", ".markdown"}
 USES = {"display_live", "record_local", "derive_non_display", "backup_personal_drive"}
 OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 PRODUCT_REFERENCE = re.compile(r"https://[a-zA-Z0-9.-]+(?::443)?/[a-zA-Z0-9._~/-]*")
 PRICE = re.compile(r"(?:0|[1-9][0-9]{0,7})(?:\.[0-9]{1,6})?")
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 # Many of these headers are binary. Check ASCII headers too before decoding.
 MAGIC = (
     b"PAR1", b"PARE", b"SQLite format 3\0", b"PGDMP", b"ARROW1", b"ORC",
-    b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"%PDF-",
+    PNG_MAGIC, b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"%PDF-",
     b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08", b"\x1f\x8b", b"BZh",
     b"\xfd7zXZ\0", b"7z\xbc\xaf\x27\x1c", b"Rar!\x1a\x07", b"\x28\xb5\x2f\xfd",
     b"\x7fELF", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",
@@ -33,8 +44,9 @@ PATH_TOKEN = re.compile(CREDENTIAL_TOKEN_PATTERN, re.IGNORECASE)
 TEXT_RULES = {
     "lfs-pointer": r"(?im)^\s*version\s+https://git-lfs\.github\.com/spec/v1\s*$",
     "attachment": (
-        r"(?i)!\[[^\]\n]*\]\s*(?:\(|\[)|<\s*(?:img|picture|video|svg)\b"
-        r"|data:(?:image|video)/|(?:user-images|private-user-images)\.githubusercontent\.com/"
+        r"(?i)!\[[^\]\r\n]*\]\s*(?:\(|\[)|<\s*(?:img|picture|video|svg|image|source|embed|object|iframe)\b"
+        r"""|\bdata:(?:(?:image|video)/|[^\s<>'"`,()]*,)"""
+        r"|(?:user-images|private-user-images)\.githubusercontent\.com/"
         r"|(?m:^[ \t]*(?:iVBORw0KGg[opqr]|/9j/|R0lGOD|UEsDB|H4sI)[A-Za-z0-9+/]{32,}={0,2}[ \t]*$)"
         r"|github\.com/(?:user-attachments/|[^/\s]+/[^/\s]+/(?:files/|assets/|actions/runs/\d+/artifacts/))"
     ),
@@ -69,10 +81,37 @@ MARKET_ROW = re.compile(
 )
 MARKDOWN_QUOTE = re.compile(r"(?m)^(?:[ \t]*>[ \t]*)+")
 MARKDOWN_SEPARATOR = re.compile(r"\|?[ \t]*:?-+:?(?:[ \t]*\|[ \t]*:?-+:?)+[ \t]*\|?")
-MARKET_TABLE_KEYS = {"symbol", "ticker", "instrument", "instrument_id", "timestamp", "ts", "ts_event", "date",
-                     "标的", "合约", "时间戳", "日期"}
-MARKET_TABLE_VALUES = {"price", "size", "quantity", "bid", "ask", "bid_price", "ask_price",
-                       "open", "high", "low", "close", "volume", "价格", "数量", "成交量"}
+MARKDOWN_REFERENCE = re.compile(r"(?m)^[ \t]*\[([^\]\n]+)\]:[ \t]*(?:\r?\n[ \t]*)?<?([^<>\s]+)")
+MARKDOWN_IMAGE_LABEL = re.compile(r"!\[([^\]\r\n]*)\]")
+IMAGE_REFERENCE_SUFFIX = re.compile(r"(?i)\.(?:apng|avif|bmp|gif|heic|heif|ico|jpe?g|jxl|png|svgz?|tiff?|webp)(?:[?#]|$)")
+INLINE_PNG = re.compile(r"(?i)!\[[^\[\]<>\r\n]*\]\(data[:]image/png;base64,([A-Za-z0-9+/]+={0,2})\)")
+HTML_ROW = re.compile(r"(?is)<tr\b[^>]*>(.*?)</tr\s*>")
+HTML_CELL = re.compile(r"(?is)<t[dh]\b[^>]*>(.*?)</t[dh]\s*>")
+MARKET_CONTEXT_FIELDS = {
+    "symbol", "ticker", "instrument", "instrumentid", "contract", "timestamp", "time", "ts", "tsevent",
+    "date", "level", "depth", "booklevel", "orderbook", "quote", "trade", "tick", "side",
+    "标的", "代码", "证券代码", "合约", "时间", "时间戳", "日期", "档", "档位", "盘口", "深度", "方向", "成交", "报价",
+}
+PRICE_FIELDS = {
+    "price", "px", "last", "lastprice", "tradeprice", "quoteprice", "executionprice", "fillprice",
+    "open", "high", "low", "close", "openprice", "highprice", "lowprice", "closeprice", "mid",
+    "midprice", "spread", "vwap", "价格", "价", "报价", "报盘", "成交价", "成交价格", "最新价", "开盘价",
+    "收盘价", "最高价", "最低价", "中间价", "价差",
+}
+SIZE_FIELDS = {
+    "size", "qty", "quantity", "vol", "volume", "tradesize", "tradeqty", "tradevolume", "lots", "amount",
+    "trades", "tradecount", "ordercount", "数量", "量", "金额", "手数", "挂单量", "挂单数量", "成交数量", "成交量",
+    "成交额", "成交笔数", "笔数",
+}
+QUOTE_SIDES = {
+    "bid", "ask", "bestbid", "bestask", "buy", "sell", "offer", "bestoffer",
+    "买", "卖", "买方", "卖方", "买盘", "卖盘", "买入", "卖出",
+}
+MARKET_MEASUREMENTS = PRICE_FIELDS | SIZE_FIELDS | QUOTE_SIDES | {
+    prefix + metric
+    for prefix in QUOTE_SIDES | {"quote", "trade", "execution", "fill", "成交", "交易", "最新"}
+    for metric in PRICE_FIELDS | SIZE_FIELDS
+}
 GIT_ENV = {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_NO_LAZY_FETCH": "1"}
 
 
@@ -121,13 +160,17 @@ def read_rules(entries, required=True):
         if mode not in REGULAR_FILE_MODES:
             raise ValueError("rule file must be regular")
         rules = json.loads(git_blob(oid, 1048576), object_pairs_hook=unique_object)
-        if not isinstance(rules, dict):
-            raise ValueError("rules must be an object")
+        if not isinstance(rules, dict) or rules.keys() != RULE_FIELDS:
+            raise ValueError("invalid rule fields")
     except (Rejected, ValueError, RecursionError):
         raise Rejected("invalid-rule-file") from None
-    version = rules.get("schema_version")
+    version = rules["schema_version"]
     if type(version) is not int or version != 1:
         raise Rejected("unsupported-rule-version")
+    try:
+        validate_rule_fields(rules)
+    except (ValueError, RecursionError, re.error):
+        raise Rejected("invalid-rule-file") from None
     return rules
 
 
@@ -147,6 +190,43 @@ def repo_path(path):
                for part in path.split("/"))
 
 
+def validate_rule_fields(rules):
+    if any(type(rules[key]) is not int or rules[key] <= 0 for key in ("max_blob_bytes", "max_pr_bytes")):
+        raise ValueError("limits must be positive integers")
+    root, manifest = rules["fixture_root"], rules["fixture_manifest"]
+    if (not isinstance(root, str) or not root.endswith("/") or not repo_path(root[:-1])
+            or not repo_path(manifest) or not manifest.endswith(".json")):
+        raise ValueError("invalid fixture paths")
+    pattern = rules["blocked_directory_pattern"]
+    if not isinstance(pattern, str) or not pattern or re.compile(pattern).fullmatch(""):
+        raise ValueError("invalid directory pattern")
+    for field in EXTENSION_FIELDS | {"blocked_filenames"}:
+        values = rules[field]
+        if not isinstance(values, list) or not values or not all(isinstance(value, str) for value in values):
+            raise ValueError("invalid rule list")
+        if len(values) != len(set(values)):
+            raise ValueError("duplicate rule values")
+        if field in EXTENSION_FIELDS:
+            if any(not re.fullmatch(r"\.[a-z0-9]+", value) for value in values):
+                raise ValueError("invalid extension")
+        elif any(not repo_path(value) or "/" in value or value != value.lower() for value in values):
+            raise ValueError("invalid blocked filename")
+
+
+def market_columns(cells):
+    measurements = 0
+    context = False
+    for cell in cells:
+        label = normalize("NFKC", unescape(cell)).strip(" \t`*_").casefold()
+        label = re.sub(r"\s*(?:\([^)]*\)|\[[^\]]*\])$", "", label)
+        aliases = {re.sub(r"[\W_\d一二三四五六七八九十]+", "", part) for part in re.split(r"[/,、]", label)}
+        if aliases & MARKET_MEASUREMENTS:
+            measurements += 1
+        elif aliases & MARKET_CONTEXT_FIELDS:
+            context = True
+    return measurements >= 2 or (measurements == 1 and context)
+
+
 def contains_market_data(text):
     text = MARKDOWN_QUOTE.sub("", text)
     if (MARKET_HEADER.search(text) or MARKET_ROW.search(text)
@@ -155,16 +235,41 @@ def contains_market_data(text):
     previous = ""
     for line in text.splitlines():
         if "|" in line and MARKDOWN_SEPARATOR.fullmatch(line.strip()):
-            columns = {cell.strip(" \t`*_").casefold() for cell in previous.split("|")}
-            if columns & MARKET_TABLE_KEYS and columns & MARKET_TABLE_VALUES:
+            if market_columns(re.split(r"(?<!\\)\|", previous)):
                 return True
         previous = line
-    return False
+    return any(market_columns(re.sub(r"<[^>]*>", "", cell) for cell in HTML_CELL.findall(row))
+               for row in HTML_ROW.findall(text))
 
 
-def text_findings(text, market=True):
+def strip_inline_png(match):
+    try:
+        if base64.b64decode(match[1], validate=True).startswith(PNG_MAGIC):
+            return ""
+    except ValueError:
+        pass
+    return match[0]
+
+
+def contains_attachment(text, markdown):
+    if TEXT_RULES["attachment"].search(text) or (markdown and "![" in text):
+        return True
+    labels = set()
+    for label, target in MARKDOWN_REFERENCE.findall(MARKDOWN_QUOTE.sub("", text)):
+        if IMAGE_REFERENCE_SUFFIX.search(unquote(target)):
+            return True
+        labels.add(" ".join(label.casefold().split()))
+    return bool(labels) and any(" ".join(label.casefold().split()) in labels
+                                for label in MARKDOWN_IMAGE_LABEL.findall(text))
+
+
+def text_findings(text, market=True, document=False, markdown=True):
     for reason, rule in TEXT_RULES.items():
-        if rule.search(text):
+        if reason == "attachment":
+            attachments = INLINE_PNG.sub(strip_inline_png, text) if document else text
+            if contains_attachment(attachments, markdown):
+                yield reason
+        elif rule.search(text):
             yield reason
     if market and contains_market_data(text):
         yield "market-data-shape"
@@ -222,7 +327,7 @@ class Guard:
                     and path.startswith(self.rules["fixture_root"]))) and not fixture:
             yield "missing-synthetic-source"
 
-    def blob_findings(self, path, data, fixture):
+    def blob_findings(self, path, data, fixture, document=False):
         if (data.startswith(MAGIC) or data[257:262] == b"ustar"
                 or (data.startswith(b"RIFF") and data[8:12] in (b"WEBP", b"WAVE", b"AVI "))):
             yield "file-signature"
@@ -239,17 +344,32 @@ class Guard:
                 re.search(r"\b(?:filter|diff|merge)=lfs\b", line)
                 for line in text.splitlines() if not line.lstrip().startswith("#")):
             yield "lfs-attributes"
-        yield from text_findings(text, market=not fixture)
+        markdown = (PurePosixPath(path).suffix.lower() in DOCUMENT_EXTENSIONS
+                    or path in {"pr-metadata", "commit-message", "tag-annotation"})
+        yield from text_findings(text, market=not (fixture or document), document=document, markdown=markdown)
 
-    def fixture_entries(self, entries):
+    def source_entries(self, entries):
         manifest = self.rules["fixture_manifest"]
         if manifest not in entries:
-            return {}
+            return {}, {}
         try:
-            fixtures = schema(self.blob(entries[manifest][1]), "fixtures")
-            for path, entry in fixtures.items():
-                if (not repo_path(path) or not path.startswith(self.rules["fixture_root"])
-                        or PurePosixPath(path).suffix.lower() not in self.safe_fixtures
+            mode, oid = entries[manifest]
+            if mode not in REGULAR_FILE_MODES:
+                raise ValueError("manifest must be regular")
+            obj = json.loads(self.blob(oid), object_pairs_hook=unique_object)
+            if (not isinstance(obj, dict) or set(obj) - {"schema_version", "fixtures", "documents"}
+                    or type(obj.get("schema_version")) is not int or obj["schema_version"] != 1
+                    or not isinstance(obj.get("fixtures"), dict)
+                    or not isinstance(obj.get("documents", {}), dict)):
+                raise ValueError("invalid source manifest schema")
+            fixtures, documents = obj["fixtures"], obj.get("documents", {})
+            if fixtures.keys() & documents.keys():
+                raise ValueError("source path registered twice")
+            for path, entry in (fixtures | documents).items():
+                suffix = PurePosixPath(path).suffix.lower()
+                valid_scope = (suffix in DOCUMENT_EXTENSIONS if path in documents
+                               else suffix in self.safe_fixtures and path.startswith(self.rules["fixture_root"]))
+                if (not repo_path(path) or not valid_scope
                         or path not in entries or entries[path][0] not in REGULAR_FILE_MODES
                         or not isinstance(entry, dict)
                         or set(entry) != {"source", "generator", "seed", "sha256"}
@@ -260,12 +380,12 @@ class Guard:
                         or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])):
                     raise ValueError("invalid fixture")
                 generator = entry["generator"]
-                if (not repo_path(generator) or generator not in entries
+                if (not repo_path(generator) or generator == path or generator not in entries
                         or entries[generator][0] not in REGULAR_FILE_MODES
                         or PurePosixPath(generator).suffix not in self.rules["generator_extensions"]
                         or any(self.path_findings(generator, False))):
                     raise ValueError("invalid generator")
-            return fixtures
+            return fixtures, documents
         except (Rejected, ValueError, UnicodeError, RecursionError):
             raise Rejected("invalid-fixture-manifest") from None
 
@@ -310,13 +430,15 @@ class Guard:
         manifest = self.rules["fixture_manifest"]
         if require_policy and manifest not in entries:
             raise Rejected("missing-fixture-manifest")
-        fixtures = self.fixture_entries(entries)
+        fixtures, documents = self.source_entries(entries)
         self.check_license_records(entries, require_policy)
         for path, (mode, oid) in entries.items():
             if mode != "160000" and mode not in REGULAR_FILE_MODES:
                 raise Rejected("non-regular-file", oid)
             fixture = fixtures.get(path)
-            key = (path, oid, fixture["sha256"] if fixture else None)
+            document = documents.get(path)
+            source = fixture or document
+            key = (path, oid, source["sha256"] if source else None, bool(document))
             if key in self.checked_blobs:
                 continue
             try:
@@ -325,9 +447,9 @@ class Guard:
                 if mode == "160000":
                     continue  # The subrepo checks the blobs behind its linked revision.
                 data = self.blob(oid)
-                if fixture and hashlib.sha256(data).hexdigest() != fixture["sha256"]:
+                if source and hashlib.sha256(data).hexdigest() != source["sha256"]:
                     raise Rejected("synthetic-digest-mismatch")
-                for reason in self.blob_findings(path, data, fixture):
+                for reason in self.blob_findings(path, data, fixture, document=bool(document)):
                     raise Rejected(reason)
             except Rejected as error:
                 raise Rejected(error.reason, oid) from None

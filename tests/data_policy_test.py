@@ -124,6 +124,35 @@ class PublicationPolicy(unittest.TestCase):
                 self.assert_rejected(self.guard("range", self.base, candidate), "unsupported-rule-version")
                 self.assert_rejected(self.push_hook(candidate, self.base), "unsupported-rule-version")
 
+    def test_rule_schema_rejects_wrong_fields_and_types(self):
+        rules = json.loads((self.repo / RULES).read_bytes())
+        self.stage("reports/session.log", MARKER)
+        self.assert_rejected(self.guard("index"), "blocked-extension")
+        changes = (
+            {"blocked_extensions": ""}, {"blocked_extensions": [".log", None]},
+            {"blocked_extensions": []}, {"blocked_filenames": "env.sh"},
+            {"fixture_extensions": {".csv": True}}, {"generator_extensions": ".py"},
+            {"blocked_directory_pattern": []}, {"blocked_directory_pattern": "["},
+            {"fixture_root": "tests/fixtures"}, {"fixture_manifest": "../manifest.json"},
+            {"max_blob_bytes": True}, {"max_pr_bytes": "65536"}, {"max_pr_bytes": 0},
+            {"unexpected": MARKER},
+        )
+        for change in changes:
+            with self.subTest(field=next(iter(change))):
+                self.stage_json(RULES, rules | change)
+                self.assert_rejected(self.guard("index"), "invalid-rule-file")
+        missing = dict(rules)
+        del missing["blocked_filenames"]
+        self.stage_json(RULES, missing)
+        self.assert_rejected(self.guard("index"), "invalid-rule-file")
+        self.stage_json(RULES, rules | {"schema_version": "1"})
+        self.assert_rejected(self.guard("index"), "unsupported-rule-version")
+
+        self.stage_json(RULES, rules | {"blocked_extensions": ""})
+        bad = self.commit("Malformed v1 rules", unchecked=True)
+        self.assert_rejected(self.guard("range", self.base, bad), "invalid-rule-file")
+        self.assert_rejected(self.push_hook(bad, self.base), "invalid-rule-file")
+
     def test_paths_and_masquerading_file_signatures(self):
         cases = [
             ("notes/Data-Paper/part.txt", MARKER, "private-directory"),
@@ -188,6 +217,96 @@ class PublicationPolicy(unittest.TestCase):
                         self.assert_rejected(result, reason)
                     else:
                         self.assert_passed(result)
+
+    def test_order_book_fields_and_image_forms_require_registration(self):
+        head = self.commit_clean_change()
+        event = self.parent / "event.json"
+        tables = (
+            ("Symbol", "Bid Price", "Bid Size", "Ask Price", "Ask Size"),
+            ("Level", "BID", "ASK", "Size"),
+            ("档位", "买一价", "买盘数量", "卖一价", "卖盘数量"),
+            ("时间戳", "成交价格", "成交量"),
+            ("ticker", "`Best-Bid_Px [USD]`", "**AskQty**"),
+            ("价格", "数量"),
+            ("Bid / Ask", "Quote Size"),
+            ("成交金额", "交易数量"),
+        )
+        for columns in tables:
+            header = " | ".join(columns)
+            divider = " | ".join("---" for _ in columns)
+            row = " | ".join("41" for _ in columns)
+            self.assert_doc_and_pr(head, event, f"{header}\n{divider}\n{row}\n", "market-data-shape")
+        html_table = "<table><tr>" + "".join(f"<th>{cell}</th>" for cell in tables[0]) + "</tr></table>"
+        self.assert_doc_and_pr(head, event, html_table, "market-data-shape")
+
+        definition = "[preview]: <relative/synthetic.PNG?rev=1>"
+        image = "!" + "[preview]"
+        data_uri = "data" + ":;base64," + base64.b64encode(b"TG fixture").decode()
+        for body in (image + "\n\nAn ordinary paragraph.\n\n" + definition,
+                     definition + "\n\nAn ordinary paragraph.\n\n" + image,
+                     definition, image + "[]\n\n" + definition,
+                     "<" + 'IMG src="relative/preview">', f"[sample]({data_uri})"):
+            self.assert_doc_and_pr(head, event, body, "attachment")
+        self.assert_doc_and_pr(
+            head, event, "[guide]\n\n[guide]: docs/guide.md\n\n| Category | Notes |\n| --- | --- |\n", None,
+        )
+
+    def assert_doc_and_pr(self, head, event, body, reason):
+        self.stage("README.md", body)
+        event.write_text(json.dumps({"pull_request": {"title": "Review change", "body": body}}))
+        for result in (self.guard("index"), self.guard("range", self.base, head, "--pr-event", event)):
+            if reason:
+                self.assert_rejected(result, reason)
+            else:
+                self.assert_passed(result)
+
+    def test_document_allowlist_pins_path_digest_and_synthetic_provenance(self):
+        doc = "docs/market-example.md"
+        # Seed 41 selects the RGB values for a generated 1x1, metadata-free PNG.
+        generator = (
+            "import base64, struct, sys, zlib\n"
+            "seed = int(sys.argv[1])\n"
+            "def chunk(tag, data):\n"
+            "    return struct.pack('>I', len(data)) + tag + data + struct.pack('>I', zlib.crc32(tag + data))\n"
+            "header = struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0)\n"
+            "png = b'\\x89PNG\\r\\n\\x1a\\n' + chunk(b'IHDR', header)\n"
+            "png += chunk(b'IDAT', zlib.compress(bytes((0, seed, seed + 1, seed + 2)))) + chunk(b'IEND', b'')\n"
+            "print('!' + '[Synthetic pixel](data' + ':image/png;base64,' + base64.b64encode(png).decode() + ')')\n"
+            "print('\\nLevel | Bid | Ask\\n--- | --- | ---\\n1 | 41 | 42')\n"
+        )
+        self.stage(GENERATOR, generator)
+        sample = self.run_cmd([sys.executable, GENERATOR, "41"], check=True).stdout
+        self.stage(doc, sample)
+        self.assert_rejected(self.guard("index"), "attachment")
+        entry = dict(source="synthetic", generator=GENERATOR, seed="41",
+                     sha256=hashlib.sha256(sample.encode()).hexdigest())
+        manifest = {"schema_version": 1, "fixtures": {}, "documents": {doc: entry}}
+        self.stage_json(MANIFEST, manifest)
+        head = self.commit("Register an offline synthetic document")
+        self.assert_passed(self.push_hook(head, self.base))
+        self.assert_passed(self.guard("range", self.base, head))
+
+        event = self.parent / "event.json"
+        event.write_text(json.dumps({"pull_request": {"title": "Review change", "body": sample}}))
+        self.assert_rejected(self.guard("range", self.base, head, "--pr-event", event), "attachment")
+        self.stage("docs/copied-example.md", sample)
+        self.assert_rejected(self.guard("index"), "attachment")
+        self.git("rm", "--cached", "docs/copied-example.md")
+        modified = sample + "\n!" + "[External example](https://visual.example.invalid/example.png)"
+        self.stage(doc, modified)
+        self.assert_rejected(self.guard("index"), "synthetic-digest-mismatch")
+        entry["sha256"] = hashlib.sha256(modified.encode()).hexdigest()
+        self.stage_json(MANIFEST, manifest)
+        self.assert_rejected(self.guard("index"), "attachment")
+
+        private = sample + "\nWEB_ADMIN_TOKEN=" + MARKER
+        self.stage(doc, private)
+        entry["sha256"] = hashlib.sha256(private.encode()).hexdigest()
+        self.stage_json(MANIFEST, manifest)
+        self.assert_rejected(self.guard("index"), "credential")
+        entry["source"] = "external"
+        self.stage_json(MANIFEST, manifest)
+        self.assert_rejected(self.guard("index"), "invalid-fixture-manifest")
 
     def test_path_credentials_are_rejected_and_diagnostics_hide_filenames(self):
         credential = "gh" + "p_" + "TgDemo" * 6
