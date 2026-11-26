@@ -5,10 +5,12 @@ import json
 import os
 from pathlib import Path
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
+import zlib
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -88,6 +90,13 @@ class PublicationPolicy(unittest.TestCase):
         return self.run_cmd([".githooks/pre-push", "test", "/tmp/offline-remote"],
                             input=f"refs/heads/main {head} refs/heads/main {old}\n")
 
+    def review_sources(self, manifest):
+        # Model the separate review step by advancing the local integration ref.
+        self.stage_json(MANIFEST, manifest)
+        reviewed = self.commit("Review synthetic source digests")
+        self.git("update-ref", "refs/remotes/test/main", reviewed)
+        return reviewed
+
     def test_pre_commit_uses_index_even_with_a_different_working_copy(self):
         self.stage("README.md", b"PG" + b"DMP" + MARKER.encode())
         self.write("README.md", "A safe working copy")
@@ -152,6 +161,18 @@ class PublicationPolicy(unittest.TestCase):
         bad = self.commit("Malformed v1 rules", unchecked=True)
         self.assert_rejected(self.guard("range", self.base, bad), "invalid-rule-file")
         self.assert_rejected(self.push_hook(bad, self.base), "invalid-rule-file")
+
+    def test_directory_pattern_compile_errors_have_one_safe_diagnostic(self):
+        rules = json.loads((self.repo / RULES).read_bytes())
+        for pattern in ("[", MARKER + "a{" + "9" * 20 + "}", "(" * 2000 + MARKER + ")" * 2000):
+            self.stage_json(RULES, rules | {"blocked_directory_pattern": pattern})
+            result = self.guard("index")
+            self.assert_rejected(result, "invalid-rule-file")
+            self.assertEqual(result.stderr, "data-guard: invalid-rule-file\n")
+        bad = self.commit("Malformed directory pattern", unchecked=True)
+        for result in (self.guard("range", self.base, bad), self.push_hook(bad, self.base)):
+            self.assert_rejected(result, "invalid-rule-file")
+            self.assertEqual(result.stderr, "data-guard: invalid-rule-file\n")
 
     def test_paths_and_masquerading_file_signatures(self):
         cases = [
@@ -282,13 +303,17 @@ class PublicationPolicy(unittest.TestCase):
                      sha256=hashlib.sha256(sample.encode()).hexdigest())
         manifest = {"schema_version": 1, "fixtures": {}, "documents": {doc: entry}}
         self.stage_json(MANIFEST, manifest)
+        self.assert_rejected(self.guard("index"), "attachment")
+        self.git("rm", "--cached", doc)
+        reviewed = self.review_sources(manifest)
+        self.stage(doc, sample)
         head = self.commit("Register an offline synthetic document")
         self.assert_passed(self.push_hook(head, self.base))
-        self.assert_passed(self.guard("range", self.base, head))
+        self.assert_passed(self.guard("range", reviewed, head))
 
         event = self.parent / "event.json"
         event.write_text(json.dumps({"pull_request": {"title": "Review change", "body": sample}}))
-        self.assert_rejected(self.guard("range", self.base, head, "--pr-event", event), "attachment")
+        self.assert_rejected(self.guard("range", reviewed, head, "--pr-event", event), "attachment")
         self.stage("docs/copied-example.md", sample)
         self.assert_rejected(self.guard("index"), "attachment")
         self.git("rm", "--cached", "docs/copied-example.md")
@@ -300,13 +325,79 @@ class PublicationPolicy(unittest.TestCase):
         self.assert_rejected(self.guard("index"), "attachment")
 
         private = sample + "\nWEB_ADMIN_TOKEN=" + MARKER
-        self.stage(doc, private)
+        self.git("rm", "--cached", doc)
         entry["sha256"] = hashlib.sha256(private.encode()).hexdigest()
-        self.stage_json(MANIFEST, manifest)
+        self.review_sources(manifest)
+        self.stage(doc, private)
         self.assert_rejected(self.guard("index"), "credential")
         entry["source"] = "external"
         self.stage_json(MANIFEST, manifest)
         self.assert_rejected(self.guard("index"), "invalid-fixture-manifest")
+
+    def test_registered_png_must_have_complete_chunks_and_valid_scanlines(self):
+        # In-memory vectors derived from a generated 1x1 RGB image, seed 41.
+        magic = b"\x89PNG\r\n\x1a\n"
+
+        def chunk(kind, data=b""):
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+        header = magic + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+        scanline = zlib.compress(bytes((0, 41, 42, 43)))
+        pixels = chunk(b"IDAT", scanline)
+        end = chunk(b"IEND")
+        complete = header + pixels + end
+        invalid = {
+            "signature": magic,
+            "fake-payload": magic + MARKER.encode(),
+            "trailing-bytes": complete + MARKER.encode(),
+            "truncated": complete[:-2],
+            "bad-crc": complete[:-1] + bytes([complete[-1] ^ 1]),
+            "missing-image-data": header + end,
+            "bad-order": magic + pixels + header[len(magic):] + end,
+            "extra-chunk": header + pixels + chunk(b"tEXt", MARKER.encode()) + end,
+            "extra-stream": header + chunk(b"IDAT", scanline + scanline) + end,
+            "invalid-zlib": header + chunk(b"IDAT", MARKER.encode()) + end,
+            "wrong-row-size": header + chunk(b"IDAT", zlib.compress(bytes((0, 41)))) + end,
+            "bad-filter": header + chunk(b"IDAT", zlib.compress(bytes((5, 41, 42, 43)))) + end,
+        }
+        samples = {
+            f"docs/png-{case}.md": "!" + "[Synthetic PNG](data" + ":image/png;base64,"
+            + base64.b64encode(data).decode() + ")\n"
+            for case, data in ({"valid": complete} | invalid).items()
+        }
+        self.stage(GENERATOR, "# Mutation vectors come from tests/data_policy_test.py, seed 41.\n")
+        manifest = {"schema_version": 1, "fixtures": {}, "documents": {
+            path: dict(source="synthetic", generator=GENERATOR, seed="41",
+                       sha256=hashlib.sha256(sample.encode()).hexdigest())
+            for path, sample in samples.items()
+        }}
+        self.review_sources(manifest)
+        for path, sample in samples.items():
+            with self.subTest(path=path):
+                self.stage(path, sample)
+                result = self.guard("index")
+                if path.endswith("/png-valid.md"):
+                    self.assert_passed(result)
+                else:
+                    self.assert_rejected(result, "attachment")
+                self.git("rm", "--cached", path)
+
+    def test_candidate_approvals_never_replace_the_integration_base(self):
+        doc = "docs/candidate.md"
+        sample = "| Level | Bid | Ask |\n| --- | --- | --- |\n| 1 | 41 | 42 |\n"
+        self.stage(GENERATOR, "# Synthetic market fixture, seed 41.\n")
+        entry = dict(source="synthetic", generator=GENERATOR, seed="41",
+                     sha256=hashlib.sha256(sample.encode()).hexdigest())
+        self.stage_json(MANIFEST, {"schema_version": 1, "fixtures": {}, "documents": {doc: entry}})
+        self.stage(doc, sample)
+        self.assert_rejected(self.guard("index"), "market-data-shape")
+        unreviewed = self.commit("Simulate a branch with an unreviewed exception", unchecked=True)
+        self.git("update-ref", "refs/remotes/test/main", self.base)
+        self.assert_rejected(self.push_hook(unreviewed, "0" * len(unreviewed)), "market-data-shape")
+
+        tip = self.commit_clean_change()
+        self.assert_rejected(self.push_hook(tip, unreviewed), "market-data-shape")
+        self.assert_rejected(self.guard("range", self.base, tip), "market-data-shape")
 
     def test_path_credentials_are_rejected_and_diagnostics_hide_filenames(self):
         credential = "gh" + "p_" + "TgDemo" * 6
@@ -349,6 +440,10 @@ class PublicationPolicy(unittest.TestCase):
                    "print(f'TG-DEMO,{seed}.1250,2')\n")
         generated = self.run_cmd([sys.executable, GENERATOR, "41"], check=True).stdout.encode()
         self.assertEqual(generated, sample_rows())
+        self.assert_rejected(self.guard("index"), "market-data-shape")
+        self.git("rm", "--cached", FIXTURE)
+        self.review_sources(manifest)
+        self.stage(FIXTURE, generated)
         head = self.commit("Add a reproducible synthetic sample")
         self.assert_passed(self.push_hook(head, "0" * len(head)))
         self.stage(FIXTURE, b"modified\n")

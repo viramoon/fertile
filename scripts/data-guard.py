@@ -9,10 +9,12 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import struct
 import subprocess
 import sys
 from unicodedata import normalize
 from urllib.parse import unquote
+import zlib
 
 
 RULES = "policy/data-guard.json"
@@ -31,6 +33,7 @@ SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 PRODUCT_REFERENCE = re.compile(r"https://[a-zA-Z0-9.-]+(?::443)?/[a-zA-Z0-9._~/-]*")
 PRICE = re.compile(r"(?:0|[1-9][0-9]{0,7})(?:\.[0-9]{1,6})?")
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+MAX_PNG_SCANLINES = 16 * 1024 * 1024
 # Many of these headers are binary. Check ASCII headers too before decoding.
 MAGIC = (
     b"PAR1", b"PARE", b"SQLite format 3\0", b"PGDMP", b"ARROW1", b"ORC",
@@ -190,6 +193,14 @@ def repo_path(path):
                for part in path.split("/"))
 
 
+def compile_directory_pattern(pattern):
+    try:
+        return re.compile(pattern)
+    except Exception:
+        # Python can raise parser and resource exceptions beyond re.error for untrusted patterns.
+        raise Rejected("invalid-rule-file") from None
+
+
 def validate_rule_fields(rules):
     if any(type(rules[key]) is not int or rules[key] <= 0 for key in ("max_blob_bytes", "max_pr_bytes")):
         raise ValueError("limits must be positive integers")
@@ -198,7 +209,7 @@ def validate_rule_fields(rules):
             or not repo_path(manifest) or not manifest.endswith(".json")):
         raise ValueError("invalid fixture paths")
     pattern = rules["blocked_directory_pattern"]
-    if not isinstance(pattern, str) or not pattern or re.compile(pattern).fullmatch(""):
+    if not isinstance(pattern, str) or not pattern or compile_directory_pattern(pattern).fullmatch(""):
         raise ValueError("invalid directory pattern")
     for field in EXTENSION_FIELDS | {"blocked_filenames"}:
         values = rules[field]
@@ -242,9 +253,50 @@ def contains_market_data(text):
                for row in HTML_ROW.findall(text))
 
 
+def valid_inline_png(data):
+    """Validate the chunk chain and scanlines of a metadata-free, 8-bit PNG."""
+    if not data.startswith(PNG_MAGIC):
+        return False
+    pos = len(PNG_MAGIC)
+    compressed = bytearray()
+    stride = expected = 0
+    while pos + 12 <= len(data):
+        length, kind = struct.unpack_from(">I4s", data, pos)
+        end = pos + 8 + length
+        if end + 4 > len(data) or zlib.crc32(data[pos + 4:end]) != struct.unpack_from(">I", data, end)[0]:
+            return False
+        if pos == len(PNG_MAGIC):
+            if kind != b"IHDR" or length != 13:
+                return False
+            width, height, depth, color, compression, filters, interlace = struct.unpack_from(">IIBBBBB", data, pos + 8)
+            channels = {0: 1, 2: 3, 4: 2, 6: 4}.get(color)
+            if not width or not height or depth != 8 or not channels or any((compression, filters, interlace)):
+                return False
+            stride = 1 + width * channels
+            expected = height * stride
+            if expected > MAX_PNG_SCANLINES:
+                return False
+        elif kind == b"IDAT":
+            compressed.extend(data[pos + 8:end])
+        elif kind == b"IEND":
+            if length or end + 4 != len(data) or not compressed:
+                return False
+            try:
+                decoder = zlib.decompressobj()
+                rows = decoder.decompress(compressed, expected + 1)
+            except zlib.error:
+                return False
+            return (len(rows) == expected and decoder.eof and not decoder.unused_data
+                    and not decoder.unconsumed_tail and all(value <= 4 for value in rows[::stride]))
+        else:
+            return False
+        pos = end + 4
+    return False
+
+
 def strip_inline_png(match):
     try:
-        if base64.b64decode(match[1], validate=True).startswith(PNG_MAGIC):
+        if valid_inline_png(base64.b64decode(match[1], validate=True)):
             return ""
     except ValueError:
         pass
@@ -296,14 +348,15 @@ def tree_entries(oid):
 
 
 class Guard:
-    def __init__(self, rules):
+    def __init__(self, rules, trusted_sources=None):
         self.rules = rules
         self.limit = rules["max_blob_bytes"]
-        self.private_dir = re.compile(rules["blocked_directory_pattern"])
+        self.private_dir = compile_directory_pattern(rules["blocked_directory_pattern"])
         self.safe_fixtures = set(rules["fixture_extensions"])
         self.blocked_extensions = set(rules["blocked_extensions"])
         self.checked_blobs = set()
         self.checked_commits = set()
+        self.trusted_fixtures, self.trusted_documents = trusted_sources or ({}, {})
 
     def blob(self, oid):
         return git_blob(oid, self.limit)
@@ -370,7 +423,7 @@ class Guard:
                 valid_scope = (suffix in DOCUMENT_EXTENSIONS if path in documents
                                else suffix in self.safe_fixtures and path.startswith(self.rules["fixture_root"]))
                 if (not repo_path(path) or not valid_scope
-                        or path not in entries or entries[path][0] not in REGULAR_FILE_MODES
+                        or (path in entries and entries[path][0] not in REGULAR_FILE_MODES)
                         or not isinstance(entry, dict)
                         or set(entry) != {"source", "generator", "seed", "sha256"}
                         or entry["source"] != "synthetic"
@@ -438,7 +491,9 @@ class Guard:
             fixture = fixtures.get(path)
             document = documents.get(path)
             source = fixture or document
-            key = (path, oid, source["sha256"] if source else None, bool(document))
+            approved_fixture = fixture is not None and fixture == self.trusted_fixtures.get(path)
+            approved_document = document is not None and document == self.trusted_documents.get(path)
+            key = (path, oid, source["sha256"] if source else None, approved_fixture, approved_document)
             if key in self.checked_blobs:
                 continue
             try:
@@ -449,8 +504,10 @@ class Guard:
                 data = self.blob(oid)
                 if source and hashlib.sha256(data).hexdigest() != source["sha256"]:
                     raise Rejected("synthetic-digest-mismatch")
-                for reason in self.blob_findings(path, data, fixture, document=bool(document)):
+                for reason in self.blob_findings(path, data, approved_fixture, document=approved_document):
                     raise Rejected(reason)
+                if fixture and not approved_fixture:
+                    raise Rejected("unapproved-synthetic-source")
             except Rejected as error:
                 raise Rejected(error.reason, oid) from None
             self.checked_blobs.add(key)
@@ -471,19 +528,43 @@ class Guard:
         for reason in self.blob_findings(location, data, fixture=False):
             raise Rejected(reason, location)
 
-    def range(self, head, base):
+    def range(self, head, *bases):
         if git("rev-parse", "--is-shallow-repository").strip() != b"false":
             raise Rejected("shallow-history")
         self.commit(head, require_policy=True)
-        args = [head]
-        if base:
-            args.append("^" + base)
+        args = [head, *("^" + base for base in bases if base)]
         for oid in git("rev-list", *args).decode("ascii").splitlines():
             if oid != head:
                 self.commit(oid)
 
 
-def pre_push(changes):
+def trusted_source_entries(oid):
+    if oid:
+        entries = tree_entries(oid)
+        try:
+            rules = read_rules(entries, required=False)
+            if rules:
+                return Guard(rules).source_entries(entries)
+        except Rejected:
+            # Treat invalid predecessor policy as empty so it cannot grant exceptions
+            # or prevent a repair. Every candidate snapshot is validated separately.
+            pass
+    return {}, {}
+
+
+def merge_base(head, upstream):
+    if not upstream:
+        return None
+    result = git("merge-base", "--all", head, upstream, missing_ok=True)
+    bases = result.decode("ascii").splitlines() if result else []
+    return bases[0] if len(bases) == 1 else None
+
+
+def pre_push(changes, remote_name):
+    upstream_ref = f"refs/remotes/{remote_name}/main"
+    upstream = None
+    if git("check-ref-format", upstream_ref, missing_ok=True) is not None:
+        upstream = commit_oid(upstream_ref, missing_ok=True)
     for row in changes:
         fields = row.split()
         if len(fields) != 4 or not all(OID.fullmatch(fields[i]) for i in (1, 3)):
@@ -492,7 +573,8 @@ def pre_push(changes):
         if set(local) == {"0"}:
             continue
         head = commit_oid(local)
-        guard = Guard(read_rules(tree_entries(head)))
+        trusted_base = merge_base(head, upstream)
+        guard = Guard(read_rules(tree_entries(head)), trusted_source_entries(trusted_base))
         while local != head:
             tag = git("cat-file", "tag", local)
             guard.message(tag, "tag-annotation")
@@ -501,7 +583,7 @@ def pre_push(changes):
                 raise Rejected("invalid-tag-target")
             local = target
         base = commit_oid(remote, missing_ok=True) if set(remote) != {"0"} else None
-        guard.range(head, base)
+        guard.range(head, base, trusted_base)
 
 
 def commit_oid(ref, missing_ok=False):
@@ -557,7 +639,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("index")
-    commands.add_parser("pre-push")
+    push = commands.add_parser("pre-push")
+    push.add_argument("remote", nargs="?", default="origin")
     history = commands.add_parser("range")
     history.add_argument("base")
     history.add_argument("head")
@@ -577,15 +660,19 @@ def main():
             artifact(args.profile, args.output, args.timing)
         elif args.command == "index":
             entries = index_entries()
-            Guard(read_rules(entries)).check_tree(entries, require_policy=True)
+            rules = read_rules(entries)
+            trusted = trusted_source_entries(commit_oid("HEAD", missing_ok=True))
+            Guard(rules, trusted).check_tree(entries, require_policy=True)
         elif args.command == "pre-push":
-            pre_push(sys.stdin)
+            pre_push(sys.stdin, args.remote)
         else:
             head = commit_oid(args.head)
-            guard = Guard(read_rules(tree_entries(head)))
+            base = commit_oid(args.base)
+            trusted = trusted_source_entries(merge_base(head, base))
+            guard = Guard(read_rules(tree_entries(head)), trusted)
             if args.pr_event:
                 guard.message(pr_metadata(args.pr_event), "pr-metadata")
-            guard.range(head, commit_oid(args.base))
+            guard.range(head, base)
     except Rejected as error:
         location = f" at {json.dumps(error.location)}" if error.location else ""
         print(f"data-guard: {error.reason}{location}", file=sys.stderr)
