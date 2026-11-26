@@ -44,6 +44,8 @@ jobs:
           "$FERTILE_CONTROL_PYTHON" -B tests/hot_upgrade_test.py
           "$FERTILE_CONTROL_PYTHON" -B tests/hot_upgrade_cli_test.py
           "$FERTILE_CONTROL_PYTHON" -B tests/hot_upgrade_recovery_test.py
+      - name: Exercise the real tini container entrypoint and API handoff
+        run: '"$RUNNER_TEMP/fertile-supervisor/bin/python" -B tests/container_hot_upgrade_test.py --require-native'
       - name: Exercise rendering, restarts and whole-stack recovery
         run: |
           umask 077
@@ -60,3 +62,18 @@ jobs:
           name: supervisor-drill
           path: ${{ runner.temp }}/supervisor-drill.json
           if-no-files-found: error
+  systemd-native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build the disposable systemd test image
+        run: |
+          context="$RUNNER_TEMP/fertile-systemd-image"
+          mkdir -p "$context"
+          cp deploy/supervisor-requirements.txt "$context/"
+          docker build -f tests/systemd-process.Dockerfile -t fertile-systemd-drill "$context"
+      - name: Start and stop the rendered units in an isolated systemd manager
+        run: python3 -B tests/systemd_process_test.py --image fertile-systemd-drill

@@ -58,6 +58,8 @@ F3 投影候选使用隔离的投影状态和 catalog。用 `finance-market-wal 
 
 发生中断时先查看 `hot-upgrade-status`，依据实际管理器、服务发布、候选进程、队列及单写者归属核对状态，再执行 `scripts/fertile hot-upgrade-reconcile "$transaction_id" --hook "$approved_hook"`。操作账户负责清理外部启动的 projector 候选。只接受与前后发布之一相符的恢复证据。若目标服务已停止，hook 必须检查租约与未完成写入，并以 `safe_to_start:true` 允许控制器启动所选版本。supervisord 已退出时，恢复命令会重新拉起守护器，并按需启动该服务的依赖。其它进程待事务完成后走常规启动流程。
 
+若实例的 `ib` collector 依赖同一 supervisord 管理的 paper Gateway，恢复依次启动缺失的 Xvfb 和 Gateway，再启动 collector。collector 已运行时重试也会补齐停止的依赖。Gateway 登录或 2FA 尚未完成时，collector 保持未就绪，事务可在确认登录后重试。Replay 与由运维单独管理 Gateway 的实例沿用各自的启动流程。
+
 未完成的事务阻止两类守护器自行启动受影响服务。控制器仅在对应交接步骤或确认安全恢复后发放一次性启动许可。每次 reconcile 都要通过应用的 `reconcile-ready`，包括上次启动后就绪失败、重试时 PID 仍存在的情况。中断且未证实恢复的采集区间仍标记连续性未知。常规整栈切换与启动问题见[Ruler 手册](../ops/ruler-runbook.md#整栈维护)。
 
 若整个容器已退出，可在使用同一持久根和服务账户的维护进程中执行恢复。先确认原容器和守护器已经停止。恢复完成后退出维护环境，确认其守护器停止，再重启正常容器。
@@ -91,6 +93,9 @@ hook 是部署账户认可的绝对路径可执行文件，使用常规文件，
 
 ## 隔离验证
 
-使用锁定的控制端 Python 运行以下检查。Supervisor 进程演练在临时根运行真实守护器，tini 用例需要 tini 可执行文件。systemd 测试渲染 unit 并使用隔离管理器替身，也可用 `scripts/fertile verify-systemd` 静态验证 unit。[守护清单与模板](../tests/supervision_plan.py) · [Supervisor 进程演练](../tests/supervisor_process_test.py) · [systemd 模板演练](../tests/systemd.py)
+演练只使用临时根、合成输入和本机环回。守护 CI 及集成 CI 要求实际入口演练通过。依赖准备与演练分开执行。[守护 CI](../.github/workflows/supervisor.yml) · [集成 CI](../.github/workflows/integration.yml)
 
-热升级测试使用合成 WAL 与 SQLite 队列，复验读者切换期间采集持续、写者交接、半段恢复、兼容迁移和旧版回读。控制器测试还覆盖中断后的启动许可、应用就绪失败及重试、按产品分类缺口和 hook 响应边界。开发演练使用临时根、合成进程和守护器替身。[热升级事务演练](../tests/hot_upgrade_test.py) · [命令与管理器演练](../tests/hot_upgrade_cli_test.py) · [中断恢复](../tests/hot_upgrade_recovery_test.py)
+- `python -B tests/container_hot_upgrade_test.py --require-native` 以锁定的控制端 Python 运行真实 `scripts/fertile container` 入口。用进程树核对 tini、控制器和 supervisord，再用真实 `hot-upgrade` 切换及回退 API。核对候选读到的水位、原端口恢复以及同一 collector 的追加序列贯穿切换。集成 CI 用 `--finance-api` 和 `--finance-config` 传入构建产物及其配置，采集端仍使用合成生成器。[容器与热切换演练](../tests/container_hot_upgrade_test.py)
+- `python3 -B tests/systemd_process_test.py --image fertile-systemd-drill` 使用预先准备的镜像，在禁网的独立容器内运行 systemd。生产安装入口生成 unit，容器内管理器实际启动、重启和停止合成进程。核对 cgroup、运行账户、限额、collector PID 和 TERM 退出证据。只校验夹具时使用 `--validate-fixture`。[原生 systemd 演练](../tests/systemd_process_test.py)
+- `python3 -B tests/published_queue_readback.py --finance-source PATH --candidate BINARY` 从本地 Git 对象离线构建此前发布的 finance `7600be4`，与本次构建的 API 分别运行。先由旧版写入作业，扩展独立 SQLite 夹具，再经新版 API 写入另一作业。重启旧制品后，由其 HTTP 读回新版写入的作业并列出两条记录。缺少 socket 的环境可用 `--build-only` 核对两份制品。[已发布制品回读演练](../tests/published_queue_readback.py)
+- 快速回归覆盖合成水位、单写者释放、半段恢复、按产品记录缺口和中断重试。paper 冷恢复使用模拟 Gateway 和就绪状态。可用 `scripts/fertile verify-systemd` 检查渲染的 unit。[热升级事务演练](../tests/hot_upgrade_test.py) · [命令与管理器演练](../tests/hot_upgrade_cli_test.py) · [中断恢复](../tests/hot_upgrade_recovery_test.py)
