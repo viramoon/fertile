@@ -30,8 +30,10 @@ tests/chaos/network.sh --public-origin 'https://<your-origin>' --duration 120
 
 隔离网络命名空间中运行真实业务进程与 TCP 协议测试端。真实 Gateway 和 Xvfb 必须禁用，须提供拥有 127.0.0.1:4002 监听 socket 的测试端 PID。可选本机 HTTPS 测试入口由该命名空间的试验驱动在 active/cleared 事件时断开和恢复。巡检配置与 fixture origin 一致。此模式验证内核断线、真实重连、告警转换和 Parquet 回补。报告标记协议替身与本机 TLS。
 
+使用包装脚本运行演练，使用同一实例的控制端 Python 运行单元测试。[控制端 Python 依赖](../../deploy/linux-server.md#控制端-python-依赖)
+
 ~~~sh
 export FERTILE_SMOKE_FIXTURE_PID="$local_test_peer_pid"
 tests/chaos/network.sh --protocol-fixture --duration 120 --fixture-origin https://127.0.0.1:14443
-python3 tests/chaos/network_test.py -v
+"$FERTILE_ROOT/tools/supervisor/bin/python" tests/chaos/network_test.py -v
 ~~~

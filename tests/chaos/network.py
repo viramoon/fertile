@@ -15,7 +15,13 @@ import time
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-import yaml
+try:
+    import yaml
+except ModuleNotFoundError as error:
+    if error.name != "yaml":
+        raise
+    sys.exit("network drill: PyYAML is missing. Use tests/chaos/network.sh with the control Python "
+             "from scripts/setup-supervisor.sh, or ask an administrator to install python3-yaml on Debian/Ubuntu.")
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
