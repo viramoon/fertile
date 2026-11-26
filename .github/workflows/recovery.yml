@@ -49,3 +49,17 @@ jobs:
           export PATH="$RUNNER_TEMP/backup-postgres/bin:$PATH"
           pg_ctl --version
           python tests/backup_restore.py
+      - name: Exercise encrypted recovery points with a local remote
+        run: |
+          cd "$RUNNER_TEMP"
+          archive=rclone-v1.76.0-linux-amd64.zip
+          curl -fsSLo "$archive" --retry 3 "https://downloads.rclone.org/v1.76.0/$archive"
+          echo "b00f00b3266c3764413afe599d3ec316f6f43b3e0ea8a0bc1d186d2133e46df7  $archive" | sha256sum -c -
+          unzip -q "$archive"
+          export FERTILE_TEST_RCLONE="$RUNNER_TEMP/rclone-v1.76.0-linux-amd64/rclone"
+          export FERTILE_TEST_POSTGRES=1
+          export PATH="$RUNNER_TEMP/backup-postgres/bin:$PATH"
+          cd "$GITHUB_WORKSPACE"
+          python tests/backup_crypt_test.py
+          python tests/backup_remote_test.py
+          python tests/backup_wal.py
