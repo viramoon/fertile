@@ -24,6 +24,12 @@ bash tests/contract-drift.sh
 
 负向演练在一次性克隆中分别改动快照格式、生产者提交号、Rust 和 TypeScript 生成代码。生产者提交号用例涵盖找不到提交和提交存在但 Git 树不同，五次检查都须因对应差异失败。
 
+### 集成 CI 的生成器下载
+
+[跨仓集成工作流](../.github/workflows/integration.yml)从锁定的 web 生成脚本读取 Maven Central 下载地址、版本和 SHA-256，以 `fertile-openapi-generator-<版本>-<SHA-256>` 精确匹配 Actions 缓存。缓存路径只包含 runner 临时目录里的单个公开 JAR。命中时在本地校验 JAR，无需访问 Maven Central。校验失败会停止作业，遇到损坏的缓存可删除对应键后重跑。
+
+未命中时以 1、2、4 秒退避重试 HTTP 429、408、5xx 和常见网络故障，共最多四次尝试。每次连接最多等待 10 秒，单次下载最多 60 秒。下载先写入临时文件，通过 SHA-256 校验后才移入缓存路径并保存。后续契约检查和漂移演练共享 `OPENAPI_GENERATOR_JAR`，web 生成脚本仍执行自己的 SHA-256 校验。
+
 ## 更新
 
 1. 生产者完成接口变更并提交。通过 web 的 `scripts/gen-finance-client.sh from-finance` 或 frontend 的 `scripts/gen-web-client.sh from-web` 引入对应生产者的提交，审查生成差异并测试消费者。
