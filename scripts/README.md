@@ -17,3 +17,9 @@
 | scripts/release.sh --dry-run | 从 Git 和 GitHub 读取版本、包含的提交与 PR、关闭 issue，向标准输出写入预览。 |
 
 服务使用 [部署清单](../deploy/service.yaml)。操作步骤、备份与故障处理见 [Ruler 手册](../ops/ruler-runbook.md)，系统版本规则见 [发版文档](../docs/release.md)。
+
+## 本机历史验收
+
+官方四窗口验收使用 finance 的一次性入口 `fertile_finance.isolated_historical_job`。它从独立数据根和研究根启动专用 API 与 worker，并向空闲的环回端口提交。`tests/e2e-smoke.sh local` 的研究回测模式、`/backtests` 页面上的提交和经 8090 的 POST 都会写入现网队列，冒烟脚本还会先提交示例回测。[隔离验收官方四窗口历史作业](../ops/ruler-runbook.md#6-隔离验收官方四窗口历史作业)
+
+本机验收期间禁止修改 `runtime.env` 或 `env.sh`、重指 live API 或 worker、重启 live 服务，以及对 `data-paper` 或现网库 `web` 执行正式恢复。禁止运行 `scripts/fertile up`、`ensure`、`ensure-up`、`down` 或 `rollback`，这些命令会管理现网服务，并可能拉起 healthwatch 或调用 `ensure`。
