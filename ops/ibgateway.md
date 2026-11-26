@@ -1,10 +1,9 @@
 # IB Gateway 安装与恢复
 
-以下命令从 fertile 仓库根目录或部署中的 `current/fertile` 执行。生产路径默认为 `/home/box/fertile`。bootstrap 负责系统库，安装器单独安装 IB 软件。操作账户使用 `box`。
+以下步骤由运行账户从 fertile 仓库根目录或部署中的 `current/fertile` 执行，适用于 supervisord 管理本机 paper Gateway 的实例。先按 [bootstrap](../deploy/bootstrap.md) 安装系统库并确定持久根。普通服务器的 systemd 核心服务由运维另行提供 paper Gateway，见 [部署指南](../deploy/linux-server.md)。
 
 ```sh
-scripts/bootstrap-box.sh
-. /home/box/fertile/env.sh
+. "${FERTILE_ROOT:?先设置实例的持久根}/env.sh"
 scripts/install-ibgateway.sh
 scripts/install-ibgateway.sh
 scripts/install-ibgateway.sh --verify-only
@@ -14,7 +13,7 @@ scripts/install-ibgateway.sh --verify-only
 
 ## Paper 登录
 
-用 `install -d -m 700 /home/box/fertile/secrets` 建立私有目录，在 `umask 077` 的会话中用本地编辑器填写 `/home/box/fertile/secrets/ibkr-paper.env`。需要两行 `IBKR_USERNAME=完整用户名` 和 `IBKR_PASSWORD=完整密码`。等号右侧按字面读取，支持空格与符号，不加 shell 引号，不使用 export。运行用户必须拥有该常规文件，权限为 0600。不要把凭据写入命令参数、聊天、日志或 PR。缺少凭据时状态为 `needs_credentials`，supervisor 跳过两个进程。
+用 `install -d -m 700 "$FERTILE_ROOT/secrets"` 建立私有目录，在 `umask 077` 的会话中用本地编辑器填写 `$FERTILE_ROOT/secrets/ibkr-paper.env`。需要两行 `IBKR_USERNAME=完整用户名` 和 `IBKR_PASSWORD=完整密码`。等号右侧按字面读取，支持空格与符号，不加 shell 引号，不使用 export。运行用户必须拥有该常规文件，权限为 0600。不要把凭据写入命令参数、聊天、日志或 PR。缺少凭据时状态为 `needs_credentials`，supervisor 跳过两个进程。
 
 ```sh
 scripts/fertile ensure

@@ -12,13 +12,13 @@ profiles:
     persistent_root: /home/box/fertile
     account_policy: paper-only
   stable:
-    persistent_root: TBD # 迁移时确认目标挂载点
+    persistent_root: /var/lib/fertile
     account_policy: paper-only
 components:
   - name: finance
     submodule: finance
     manifest: finance/service.yaml
-    target: cloudbox
+    target: cloudbox # 当前压测部署，普通服务器使用 stable profile
     processes:
       finance-api: {command: current/bin/finance-api, host: 127.0.0.1, port: 8081}
       finance-collector: {command: current/bin/finance-collector, host: 127.0.0.1, port: 8082}
@@ -27,7 +27,7 @@ components:
   - name: web
     submodule: web
     manifest: web/service.yaml
-    target: cloudbox
+    target: cloudbox # 当前压测部署，普通服务器使用 stable profile
     command: current/bin/web serve
     migrate: current/bin/web migrate
     host: 127.0.0.1
@@ -57,29 +57,36 @@ infrastructure:
     paper_port: 4002
     account: paper
     read_only: true
-    credentials_file: /home/box/fertile/secrets/ibkr-paper.env
+    credentials_file: secrets/ibkr-paper.env # 相对于所选持久根目录
     install: scripts/install-ibgateway.sh
     check: scripts/ib-check.sh
     run: scripts/ibgateway.sh run
     display: scripts/ibgateway.sh xvfb
     state: data/ibgateway
     logs: logs/ibgateway
-paths:
-  root: /home/box/fertile
+paths: # 均相对于持久根，默认值见 profiles，可用 FERTILE_ROOT / FERTILE_BOX_HOME 覆盖。
   releases: releases
   active: current
   data: data
   research_catalog: data/research
+  config: config
   logs: logs
   run: run
+  secrets: secrets
+  tools: tools
   backups: backups
 operations:
   bootstrap: deploy/bootstrap.md
+  server_guide: deploy/linux-server.md
   runbook: ops/ruler-runbook.md
   health_checks: ops/health-checks.md
   supervisor: supervisord
+  systemd: deploy/systemd
   commands:
     build: scripts/fertile build
+    install_systemd: scripts/fertile install-systemd --root <root> --user <user> --group <group>
+    uninstall_systemd: scripts/fertile uninstall-systemd --root <root>
+    verify_systemd: scripts/fertile verify-systemd
     up: scripts/fertile up
     down: scripts/fertile down
     ensure: scripts/fertile ensure-up
@@ -87,7 +94,7 @@ operations:
     restart: scripts/fertile restart <service>
     logs: scripts/fertile logs <service>
     rollback: scripts/fertile rollback <commit>
-  restart_policy:
+  restart_policy: # supervisord 的选项，systemd 见 deploy/systemd
     autorestart: true
     stopsignal: TERM
     stopwaitsecs: 30

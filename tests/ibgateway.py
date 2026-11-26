@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "scripts"))
 MODULE = REPO / "scripts/ibgateway.py"
 spec = importlib.util.spec_from_file_location("gateway", MODULE)
 gw = importlib.util.module_from_spec(spec)
@@ -66,6 +67,14 @@ class PaperGateway(unittest.TestCase):
             secret.symlink_to(gw.INI)
             with self.assertRaisesRegex(gw.GatewayError, "invalid_credentials_permissions"):
                 gw.credentials(True)
+
+    def test_status_accepts_credentials_under_effective_root(self):
+        secret = self.root / "secrets/ibkr-paper.env"
+        secret.parent.mkdir()
+        secret.touch(mode=0o600)  # status checks metadata without reading credentials.
+        result = subprocess.run([REPO / "scripts/ibgateway.sh", "status"],
+                                env=self.env, capture_output=True, check=True)
+        self.assertEqual(json.loads(result.stdout), {"state": "stopped", "attempts": 0})
 
     def test_kernel_loopback_policy_and_scope(self):
         gw.POLICY.parent.mkdir(parents=True)

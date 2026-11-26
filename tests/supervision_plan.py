@@ -20,6 +20,7 @@ from urllib.response import addinfourl
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import supervision as ctl
 import supervisor_drill as drill
+from runtime_root import resolve_root
 
 
 PUBLIC_PROBE = "https://supervision.example.test/healthz/live"
@@ -33,6 +34,24 @@ def probe_response(url, location=None):
     response = addinfourl(BytesIO(), headers, url, 302 if location else 200)
     response.msg = "Found" if location else "OK"
     return response
+
+
+class RuntimeRoot(unittest.TestCase):
+    def test_shell_and_python_use_the_same_precedence(self):
+        resolver = Path(__file__).resolve().parents[1] / "scripts/runtime-root.sh"
+        cases = [
+            ({}, "/home/box/fertile"),
+            ({"FERTILE_PROFILE": "stable"}, "/var/lib/fertile"),
+            ({"FERTILE_PROFILE": "stable", "FERTILE_BOX_HOME": "/tmp/fertile-box/"}, "/tmp/fertile-box/fertile"),
+            ({"FERTILE_PROFILE": "stable", "FERTILE_BOX_HOME": "/tmp/fertile-box",
+              "FERTILE_ROOT": "/tmp/fertile-root"}, "/tmp/fertile-root"),
+        ]
+        for env, expected in cases:
+            with self.subTest(env=env), patch.dict(os.environ, env, clear=True):
+                shell = subprocess.check_output(["/bin/bash", "-c", 'source "$1"; fertile_root', "bash", resolver],
+                                                text=True).strip()
+                self.assertEqual(shell, expected)
+                self.assertEqual(resolve_root(), Path(expected))
 
 
 class RuntimePlan(unittest.TestCase):
@@ -119,6 +138,14 @@ class RuntimePlan(unittest.TestCase):
         self.write(env_file="ibkr-paper.env")
         with self.assertRaisesRegex(ValueError, "invalid service env_file"):
             ctl.build_plan()
+
+    def test_paper_credential_probe_uses_effective_root(self):
+        self.write(ib=True)
+        with (patch.dict(os.environ, {"FERTILE_ROOT": str(self.root), "FERTILE_MARKET_SOURCE": "ib"}),
+              patch.object(ctl, "check_secret", return_value="needs_credentials") as check):
+            plan = ctl.build_plan()
+        self.assertEqual(plan["services"]["test"]["skip"], "needs_credentials")
+        check.assert_called_once_with(self.root / "secrets/ibkr-paper.env")
 
     def test_restore_recovery_prevents_all_service_starts_and_switches(self):
         (self.run / "restore-journal.json").write_text("{}")

@@ -5,7 +5,9 @@ umask 077
 repo=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=/dev/null
 source "$repo/deploy/toolchain.env"
-root=${FERTILE_ROOT:-${FERTILE_BOX_HOME:-/home/box}/fertile}
+# shellcheck source=/dev/null
+source "$repo/scripts/runtime-root.sh"
+root=$(fertile_root)
 cache=$root/cache/downloads/ibgateway
 tools=$root/tools
 gateway=ibgateway-$IB_GATEWAY_VERSION-standalone-linux-x64.sh

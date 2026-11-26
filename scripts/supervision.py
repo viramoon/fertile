@@ -25,12 +25,27 @@ from urllib.parse import quote
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from xmlrpc.client import Fault, ServerProxy
 
-from supervisor.xmlrpc import SupervisorTransport
-import yaml
-
+try:
+    import yaml
+    from supervisor.xmlrpc import SupervisorTransport
+except ModuleNotFoundError as error:
+    advice = "Use scripts/fertile with the control Python from scripts/setup-supervisor.sh"
+    if error.name == "yaml":
+        sys.exit(f"fertile: PyYAML is missing. {advice}, "
+                 "or ask an administrator to install python3-yaml on Debian/Ubuntu.")
+    if error.name == "supervisor":
+        sys.exit(f"fertile: supervisor is missing. {advice}.")
+    raise
 
 SCRIPTS = Path(__file__).resolve().parent
-ROOT = Path(os.environ.get("FERTILE_ROOT", "/home/box/fertile")).resolve()
+IS_CHILD_LAUNCHER = __name__ == "__main__" and sys.argv[1:2] == ["_exec"]
+if IS_CHILD_LAUNCHER:
+    # Rendered launchers are standalone copies and inherit the resolved root.
+    ROOT = Path(os.environ["FERTILE_ROOT"]).resolve()
+else:
+    from runtime_root import resolve_root
+
+    ROOT = resolve_root().resolve()
 RUN = ROOT / "run"
 LOGS = ROOT / "logs"
 CONF = RUN / "supervisord.conf"
@@ -164,8 +179,8 @@ def market_data(settings):
     return source, data
 
 
-def build_plan():
-    release = release_path()
+def build_plan(*, release=None, names=None):
+    release = release_path() if release is None else release
     custom = os.environ.get("FERTILE_SERVICE_MANIFEST")
     manifest = Path(custom) if custom else release / "fertile/deploy/services.yaml"
     rows = yaml.safe_load(manifest.read_text())["services"]
@@ -196,6 +211,8 @@ def build_plan():
     expand = lambda item: Template(str(item)).substitute(fields)
     for row in rows:
         name = row["name"]
+        if names is not None and name not in names:
+            continue
         if not NAME.fullmatch(name) or name in services:
             raise ValueError(f"invalid or duplicate service name: {name}")
         if name in EXTERNAL_PROGRAMS:
@@ -236,7 +253,13 @@ def build_plan():
         env.update({k: expand(v) for k, v in row.get("environment", {}).items()})
         skip = "" if row.get("enabled", True) else "disabled"
         if not skip and row.get("ib"):
-            skip = "disabled" if source == "replay" else check_secret(Path("/home/box/fertile/secrets/ibkr-paper.env"))
+            secret_dir = ROOT / "secrets"
+            if source == "replay":
+                skip = "disabled"
+            elif secret_dir.resolve() != secret_dir:
+                skip = "invalid_credentials_permissions"
+            else:
+                skip = check_secret(secret_dir / "ibkr-paper.env")
         extra = [expand(s) for s in row.get("requires_bins", [])]
         if not skip and any(not shutil.which(binary, path=env.get("PATH")) for binary in [cmd[0], *extra]):
             skip = "missing_binary"
@@ -328,6 +351,7 @@ def start_daemon():
     if daemon_pid():
         return
     env = {k: os.environ[k] for k in INHERIT if k in os.environ}
+    env["FERTILE_ROOT"] = str(ROOT)
     subprocess.run([BINDIR / "supervisord", "-c", CONF], env=env, check=True)
     for _ in range(100):
         if daemon_pid():
@@ -483,6 +507,16 @@ def check_queue_compatibility(plan):
         raise ValueError("This bundle cannot read the existing research queue. Retain it and select a compatible data snapshot.")
 
 
+def prepare_data_root(plan):
+    if not plan["default"]:
+        return
+    data = Path(plan["data"])
+    if plan["create_data"] and data == ROOT / "data/replay" and (ROOT / "data").is_dir():
+        data.mkdir(exist_ok=True)
+    if not data.is_dir():
+        raise ValueError(f"configured data root is unavailable: {data}")
+
+
 def ensure():
     plan = build_plan()
     check_queue_compatibility(plan)
@@ -490,11 +524,7 @@ def ensure():
         active_programs(connection())
     svc = plan["services"]
     if plan["default"]:
-        data = Path(plan["data"])
-        if plan["create_data"] and data == ROOT / "data/replay" and (ROOT / "data").is_dir():
-            data.mkdir(exist_ok=True)
-        if not data.is_dir():
-            raise ValueError(f"configured data root is unavailable: {data}")
+        prepare_data_root(plan)
         if "postgres" in svc and not svc["postgres"]["skip"]:
             subprocess.run([Path(plan["release"]) / "fertile/scripts/postgres.sh", "init"],
                            env=svc["postgres"]["env"], check=True)
@@ -708,7 +738,7 @@ def main():
 
 if __name__ == "__main__":
     try:
-        if sys.argv[1:2] == ["_exec"]:
+        if IS_CHILD_LAUNCHER:
             run_child(*sys.argv[2:])
         else:
             main()

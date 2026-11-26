@@ -12,7 +12,9 @@ case $# in
   *) echo 'usage: fertile build [--ref <commit>]' >&2; exit 2 ;;
 esac
 
-root=${FERTILE_ROOT:-${FERTILE_BOX_HOME:-/home/box}/fertile}
+# shellcheck source=/dev/null
+source "$script_dir/runtime-root.sh"
+root=$(fertile_root)
 [[ $root == /* && $root != / ]] || { echo 'FERTILE_ROOT must be an absolute installation directory' >&2; exit 2; }
 if [[ -f $root/env.sh ]]; then
   # shellcheck source=/dev/null
@@ -92,7 +94,9 @@ build_payload() {
   [[ $vendor_sha == "$NAUTILUS_COMMIT" && $(node --version) == "v$NODE_VERSION" && $(pnpm --version) == "$PNPM_VERSION" ]]
   # The finance build checks its lock, upstream commit, wheel checksum and native extension.
   export FINANCE_BUILD_ROOT=${FINANCE_BUILD_ROOT:-$root/cache/finance}
-  bash "$finance/scripts/build.sh" | tee "$scratch/finance-build.log"
+  # The release builder already loaded the selected root's env.sh.
+  FINANCE_TOOLCHAIN_ENV=${FINANCE_TOOLCHAIN_ENV:-/dev/null} \
+    bash "$finance/scripts/build.sh" | tee "$scratch/finance-build.log"
   wheel=$("$FINANCE_BUILD_ROOT/venv/bin/python" "$script_dir/release-manifest.py" wheel "$vendor_sha")
   # The release gets its own relocatable environment, populated from uv's content-addressed
   # cache, including the exact local wheel. No venv is shared between running releases.

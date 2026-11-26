@@ -20,14 +20,25 @@ jobs:
             sudo apt-get update -qq
             sudo apt-get install -y shellcheck
           fi
-          shellcheck scripts/fertile scripts/setup-supervisor.sh scripts/build-release.sh scripts/postgres.sh \
+          shellcheck scripts/fertile scripts/runtime-root.sh scripts/systemd-service.sh scripts/setup-supervisor.sh \
+            scripts/build-release.sh scripts/postgres.sh \
             tests/build-atomicity.sh tests/chaos-restart.sh tests/simulate-reboot.sh
       - name: Verify isolated build failure preserves the current stack
         run: bash tests/build-atomicity.sh
+      - name: Check Python dependency hints without site packages
+        run: python3 -B tests/control_dependencies.py
       - name: Install the pinned supervisor
         run: |
           python3 -m venv "$RUNNER_TEMP/fertile-supervisor"
           "$RUNNER_TEMP/fertile-supervisor/bin/python" -m pip install -r deploy/supervisor-requirements.txt
+      - name: Verify rendered systemd units and exercise manager selection offline
+        env:
+          FERTILE_ROOT: ${{ runner.temp }}/fertile-systemd-fixture
+          FERTILE_CONTROL_PYTHON: ${{ runner.temp }}/fertile-supervisor/bin/python
+        run: |
+          scripts/fertile verify-systemd
+          "$FERTILE_CONTROL_PYTHON" -B tests/systemd.py
+          "$FERTILE_CONTROL_PYTHON" -B tests/test_e2e_smoke.py
       - name: Exercise rendering, restarts and whole-stack recovery
         run: |
           set -o pipefail

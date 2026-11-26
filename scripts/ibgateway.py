@@ -16,8 +16,10 @@ import tempfile
 import time
 from contextlib import contextmanager
 
-ROOT = Path(os.environ.get("FERTILE_ROOT", "/home/box/fertile"))
-SECRET = Path("/home/box/fertile/secrets/ibkr-paper.env")
+from runtime_root import resolve_root
+
+ROOT = resolve_root().resolve()
+SECRET = ROOT / "secrets/ibkr-paper.env"
 RUN = ROOT / "run/ibgateway"
 DATA = ROOT / "data/ibgateway"
 LOG = ROOT / "logs/ibgateway"
@@ -73,7 +75,7 @@ def locked(name, blocking=True):
 
 
 def credentials(read=False):
-    # An isolated validation root must never accidentally start a real paper login.
+    # Keep the credential lookup inside this deployment's private directory.
     if ROOT / "secrets/ibkr-paper.env" != SECRET or SECRET.parent.resolve() != SECRET.parent:
         raise GatewayError("needs_credentials")
     try:

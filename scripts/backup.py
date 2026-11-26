@@ -16,6 +16,8 @@ import tempfile
 import time
 import uuid
 
+from runtime_root import resolve_root
+
 STAMP = "%Y%m%dT%H%M%S.%fZ"
 BASE_TREES = {"finance-state", "config", "catalog"}
 ALLOWED_TREES = {*BASE_TREES, "research"}
@@ -81,7 +83,7 @@ def runtime_settings(path):
 
 class Box:
     def __init__(self, interrupted=None, *, restoring=False):
-        self.root = Path(os.getenv("FERTILE_ROOT", "/home/box/fertile")).resolve(strict=True)
+        self.root = resolve_root().resolve(strict=True)
         self.config = self.root / "config"
         overrides = runtime_settings(self.config / "backup.conf")
         allowed = {"FERTILE_BACKUP_CATALOG", "FERTILE_BACKUP_DAYS", "FERTILE_BACKUP_WEEKS",
@@ -583,7 +585,7 @@ def main():
                                      (args.target_data_root, args.target_database, args.target_research_root)):
             sub.error("specify both --target-data-root and --target-database")
     os.umask(0o077)
-    root = Path(os.getenv("FERTILE_ROOT", "/home/box/fertile")).resolve(strict=True)
+    root = resolve_root().resolve(strict=True)
     journal = root / "run/restore-journal.json"
     if args.action == "restore" and args.dry_run:
         box = Box(restoring=True)

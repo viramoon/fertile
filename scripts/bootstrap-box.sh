@@ -2,13 +2,92 @@
 # 在持久前缀中安装固定版本；系统包仅作为可重建的编译/运行依赖。
 set -Eeuo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-source "$repo/deploy/toolchain.env"
-box=${FERTILE_BOX_HOME:-/home/box}
-[[ "$box" = /* && "$box" != / && "$box" != *[!a-zA-Z0-9_./-]* ]] ||
-  { echo "FERTILE_BOX_HOME 必须是无空格的绝对持久路径，不能为 /" >&2; exit 2; }
 [[ "$(uname -s)" = Linux && "$(uname -m)" = x86_64 ]] ||
   { echo "当前安装器仅支持 Linux x86_64" >&2; exit 2; }
-root="$box/fertile"
+
+package_installed() {
+  [[ $(dpkg-query -W -f='${Status}' "$1" 2>/dev/null) = 'install ok installed' ]]
+}
+select_package() {
+  local package
+  for package in "$@"; do
+    if package_installed "$package" || LC_ALL=C apt-cache policy "$package" |
+      awk '$1 == "Candidate:" && $2 != "(none)" { available = 1 } END { exit !available }'; then
+      printf '%s\n' "$package"
+      return
+    fi
+  done
+  printf 'APT 中未找到可安装的系统包：%s\n' "$*" >&2
+  return 1
+}
+system_packages() {
+  local gtk asound
+  gtk=$(select_package libgtk-3-0t64 libgtk-3-0) || return
+  asound=$(select_package libasound2t64 libasound2) || return
+  printf '%s\n' build-essential ca-certificates curl xz-utils bzip2 git pkg-config \
+    libssl-dev zlib1g-dev libtinfo6 libxml2 libz3-4 bison flex \
+    xvfb xauth x11-utils unzip libxi6 libxrender1 libxtst6 libxext6 libfontconfig1 \
+    fonts-liberation "$gtk" "$asound" libnss3 libxrandr2 libxkbcommon0 \
+    libxcomposite1 libxdamage1 libxfixes3 libgbm1 libgl1
+}
+missing_system_packages() {
+  local selected package
+  selected=$(system_packages) || return
+  while IFS= read -r package; do
+    if ! package_installed "$package"; then printf '%s\n' "$package"; fi
+  done <<< "$selected"
+}
+apt_run() {
+  local apt=(apt-get)
+  if (( EUID != 0 )); then
+    command -v sudo >/dev/null || { echo "缺少系统依赖；请由管理员安装，或在有 sudo 的主机运行。" >&2; return 1; }
+    apt=(sudo -n --preserve-env=HTTP_PROXY,HTTPS_PROXY,NO_PROXY,http_proxy,https_proxy,no_proxy,SSL_CERT_FILE apt-get)
+  fi
+  "${apt[@]}" -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 "$@"
+}
+system_deps() {
+  local missing
+  local packages=()
+  if missing=$(missing_system_packages 2>/dev/null) && [[ -z $missing ]]; then
+    log "SKIP system-deps"
+    return
+  fi
+  # Fresh machines may have no package metadata, and upgrades can change candidate names.
+  apt_run update
+  missing=$(missing_system_packages)
+  if [[ -n $missing ]]; then
+    mapfile -t packages <<< "$missing"
+    apt_run install -y --no-install-recommends "${packages[@]}"
+  fi
+}
+
+if (( $# )); then
+  if [[ $# -ne 1 || $1 != --system-packages ]]; then
+    echo '用法：scripts/bootstrap-box.sh [--system-packages]' >&2
+    exit 2
+  fi
+  system_packages
+  exit
+fi
+
+source "$repo/deploy/toolchain.env"
+# shellcheck source=/dev/null
+source "$repo/scripts/runtime-root.sh"
+if [[ -z ${FERTILE_ROOT:-} && ${FERTILE_BOX_HOME:-} == / ]]; then
+  echo 'FERTILE_BOX_HOME 不能为 /' >&2
+  exit 2
+fi
+root=$(fertile_root)
+box=${FERTILE_BOX_HOME:-}
+if [[ -z $box && -z ${FERTILE_ROOT:-} && ${FERTILE_PROFILE:-} != stable ]]; then
+  box=${root%/fertile}
+fi
+[[ "$root" = /* && "$root" != *[!a-zA-Z0-9_./-]* ]] ||
+  { echo "持久根必须是无空格的绝对路径" >&2; exit 2; }
+root=$(realpath -m -- "$root")
+[[ "$root" != / && "$root" != *[!a-zA-Z0-9_./-]* ]] ||
+  { echo "持久根解析后不得包含空格或指向 /" >&2; exit 2; }
+export FERTILE_ROOT="$root"
 tools="$root/tools"
 cache="$root/cache"
 bin="$root/bin"
@@ -22,26 +101,6 @@ download() {
   curl --fail --location --retry 5 --retry-all-errors --retry-delay 2 \
     --connect-timeout 20 --max-time 1800 "$url" -o "$path.part"
   mv -- "$path.part" "$path"
-}
-system_deps() {
-  local packages=(build-essential ca-certificates curl xz-utils bzip2 git pkg-config
-    libssl-dev zlib1g-dev libtinfo6 libxml2 libz3-4 bison flex
-    xvfb xauth x11-utils unzip libxi6 libxrender1 libxtst6 libxext6 libfontconfig1
-    fonts-liberation libgtk-3-0t64 libasound2t64 libnss3 libxrandr2 libxkbcommon0
-    libxcomposite1 libxdamage1 libxfixes3 libgbm1 libgl1)
-  local missing=() p
-  for p in "${packages[@]}"; do
-    dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q '^install ok installed$' ||
-      missing+=("$p")
-  done
-  if (( ${#missing[@]} == 0 )); then log "SKIP system-deps"; return; fi
-  local apt=(apt-get)
-  if (( EUID != 0 )); then
-    command -v sudo >/dev/null || { echo "缺少系统依赖：${missing[*]}；请由管理员安装，或在有 sudo 的盒子运行。" >&2; return 1; }
-    apt=(sudo -n --preserve-env=HTTP_PROXY,HTTPS_PROXY,NO_PROXY,http_proxy,https_proxy,no_proxy,SSL_CERT_FILE apt-get)
-  fi
-  "${apt[@]}" -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-  "${apt[@]}" -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends "${missing[@]}"
 }
 system_deps
 
@@ -123,7 +182,8 @@ pg_dir="$tools/postgresql-$POSTGRES_VERSION"
 env_tmp=$(mktemp "$root/.env.XXXXXX")
 {
   printf '# 由 scripts/bootstrap-box.sh 生成；重新运行可重建。无密钥。\n'
-  printf 'export FERTILE_BOX_HOME=%q\nexport FERTILE_ROOT=%q\n' "$box" "$root"
+  if [[ -n $box ]]; then printf 'export FERTILE_BOX_HOME=%q\n' "$box"; fi
+  printf 'export FERTILE_ROOT=%q\n' "$root"
   for name in RUSTUP_HOME CARGO_HOME RUSTUP_TOOLCHAIN UV_PYTHON_INSTALL_DIR UV_CACHE_DIR; do
     printf 'export %s=%q\n' "$name" "${!name}"
   done

@@ -8,6 +8,7 @@ import signal
 import time
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import closing
@@ -25,6 +26,7 @@ except ModuleNotFoundError as error:
     pa = parquet = None
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "scripts"))
 spec = importlib.util.spec_from_file_location("backup", REPO / "scripts/backup.py")
 backup = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(backup)

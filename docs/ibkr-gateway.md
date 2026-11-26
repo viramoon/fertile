@@ -4,13 +4,13 @@
 
 ## 安装和持久化
 
-版本和两个 SHA256 固定在 [toolchain.env](../deploy/toolchain.env)。[安装器](../scripts/install-ibgateway.sh) 下载指定版本的 gnzsnz/ib-gateway-docker 安装包归档与 IbcAlpha 的 IBC zip，逐个校验后先在同一文件系统解包，再安装到 `tools/ibgateway/<版本>` 及 `tools/ibc/<版本>`。默认根目录为 `/home/box/fertile`。Gateway 使用安装包自带的 JRE。[bootstrap](../deploy/bootstrap.md) 负责重装可丢弃的 Xvfb、X11、字体及 AWT 依赖。
+版本和两个 SHA256 固定在 [toolchain.env](../deploy/toolchain.env)。[安装器](../scripts/install-ibgateway.sh) 下载指定版本的 gnzsnz/ib-gateway-docker 安装包归档与 IbcAlpha 的 IBC zip，逐个校验后先在同一文件系统解包，再安装到持久根的 `tools/ibgateway/<版本>` 及 `tools/ibc/<版本>`。Gateway 使用安装包自带的 JRE。持久根、Xvfb、X11、字体及 AWT 依赖见 [bootstrap](../deploy/bootstrap.md)。
 
 Jts 设置、IB 自身保存的认证状态位于 `data/ibgateway`，限次重试与进程身份位于 `run/ibgateway`，脱敏事件位于 `logs/ibgateway/events.jsonl`。以上状态由运行用户拥有。用于 IBC 的 0600 配置仅在启动与运行期间存在。应排除整个凭据目录、IB 登录状态及运行时配置的备份和上传。
 
 ## 访问边界
 
-服务只读取 `/home/box/fertile/secrets/ibkr-paper.env`。IBC 固定 paper、只读、端口 4002、拒绝未经许可的连接；Xvfb 使用本地 Unix socket 和私有 Xauthority cookie。IBC `BindAddress` 控制的是 IBC 自身的命令服务，不能用来声明 API 的监听地址。命令服务已关闭。
+服务从 `$FERTILE_ROOT/secrets/ibkr-paper.env` 读取凭据。IBC 固定 paper、只读、端口 4002，并拒绝未经许可的连接。Xvfb 使用本地 Unix socket 和私有 Xauthority cookie。IBC `BindAddress` 控制的是 IBC 自身的命令服务，不能用来声明 API 的监听地址。命令服务已关闭。
 
 安装器使用系统 C 编译器构建 [Linux 监听限制](../deploy/ibgateway/loopback.c)，仅对 IBC/JVM 子进程设置 `LD_PRELOAD`。Gateway 的 IPv4 4002 绑定固定为 127.0.0.1；实盘 4001 和 IPv6 的 4002 绑定会失败。启动器在提交凭据前通过同一动态加载环境实际执行绑定，加载或验证失败即停止。健康检查还会检查内核 IPv4/IPv6 监听表。发现非回环 4002 或实盘 4001 时，Gateway 停止并要求人工处理。规则不会变更盒子的防火墙或其他服务的环境。
 

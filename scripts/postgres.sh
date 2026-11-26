@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-root=${FERTILE_ROOT:-${FERTILE_BOX_HOME:-/home/box}/fertile}
+scripts=$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")
+# shellcheck source=/dev/null
+source "$scripts/runtime-root.sh"
+root=$(fertile_root)
 if [[ -f "$root/env.sh" ]]; then
   # shellcheck disable=SC1091
   source "$root/env.sh"
