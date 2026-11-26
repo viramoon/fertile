@@ -26,9 +26,9 @@ class UserAgentTests(unittest.TestCase):
         with patch.object(watch, "build_opener") as build_opener:
             opener = build_opener.return_value
             opener.open.return_value = response
-            self.assertEqual(watch.public_ready("https://fertile.viramoon.com", 1)["state"], "ok")
+            self.assertEqual(watch.public_ready("https://public.example.test", 1)["state"], "ok")
             request = opener.open.call_args.args[0]
-            self.assertEqual(request.full_url, "https://fertile.viramoon.com/healthz/ready")
+            self.assertEqual(request.full_url, "https://public.example.test/healthz/ready")
             self.assertEqual(request.get_header("User-agent"), f"fertile-healthwatch/{self.version}")
 
     def test_webhook_sends_versioned_user_agent(self):
@@ -179,7 +179,10 @@ class HealthwatchTest(unittest.TestCase):
     def test_settings_and_independent_disk_failure(self):
         config = self.root / "watch.yaml"
         config.write_text("public_origin: https://test.invalid\nbackup_at_utc: null\n")
-        with patch.dict(os.environ, {"FERTILE_HEALTH_CONFIG": str(config), "FERTILE_PUBLIC_ORIGIN": "https://chosen.invalid"}):
+        with patch.dict(os.environ, {"FERTILE_HEALTH_CONFIG": str(config)}, clear=True):
+            self.assertEqual(watch.settings(self.root)["public_origin"], "https://test.invalid")
+        with patch.dict(os.environ, {"FERTILE_HEALTH_CONFIG": str(config),
+                                    "FERTILE_PUBLIC_ORIGIN": "https://chosen.invalid"}, clear=True):
             conf = watch.settings(self.root)
         self.assertEqual(conf["public_origin"], "https://chosen.invalid")
         conf.update(disk_path=str(self.root / "missing"), public_origin=None)
@@ -195,6 +198,49 @@ class HealthwatchTest(unittest.TestCase):
         self.assertEqual(checks["public:ready"]["state"], "skipped")
         self.assertEqual(checks["backup:age"]["state"], "failed")
         self.assertEqual(checks["healthwatch:runtime"]["state"], "ok")
+
+    def test_default_settings_skip_public_http_and_alerts(self):
+        with patch.dict(os.environ, {}, clear=True):
+            conf = watch.settings(self.root)
+        self.assertIsNone(conf["public_origin"])
+        services = {"supervisor": "RUNNING", "services": {}}
+        delivery = watch.Delivery(self.root, self.alerts.path)
+        with patch.object(watch, "services", return_value=services), \
+             patch.object(watch, "build_opener") as build_opener:
+            checks = watch.observe(self.root, conf, watch.Backup(self.root), delivery, once=True)
+        build_opener.assert_not_called()
+        self.assertEqual(checks["public:ready"], {"state": "skipped", "detail": "public origin not configured"})
+        self.alerts.notify(self.dt, {"public:ready": checks["public:ready"]})
+        self.assertEqual(flow(self.alerts.path), [])
+
+    def test_explicit_settings_probe_public_readiness(self):
+        origin = "https://production.example.test:8443/"
+        config = self.root / "watch.yaml"
+        config.write_text(f"public_origin: {origin}\n")
+        sources = ({"FERTILE_PUBLIC_ORIGIN": origin}, {"FERTILE_HEALTH_CONFIG": str(config)})
+        services = {"supervisor": "RUNNING", "services": {}}
+        delivery = watch.Delivery(self.root, self.alerts.path)
+        for env in sources:
+            with self.subTest(source=next(iter(env))):
+                with patch.dict(os.environ, env, clear=True):
+                    conf = watch.settings(self.root)
+                with patch.object(watch, "services", return_value=services), \
+                     patch.object(watch, "http_json", return_value=(200, {
+                         "status": "ready", "checks": [{"ok": True, "required": True}],
+                     })) as http_json:
+                    checks = watch.observe(self.root, conf, watch.Backup(self.root), delivery, once=True)
+                http_json.assert_called_once_with(origin.rstrip("/") + "/healthz/ready", conf["timeout_seconds"])
+                self.assertEqual(checks["public:ready"]["state"], "ok")
+
+    def test_invalid_public_origin_is_rejected_before_sampling(self):
+        for origin in ("http://test.invalid", "https://", "https://test.invalid/path", "https://test.invalid?",
+                       "https://test.invalid#", "https://@test.invalid", "https://test.invalid:",
+                       "https://test.invalid:0", "https://test.invalid:65536", "https://test.invalid:abc",
+                       "https://test.invalid\\other", "https://test.invalid/%20", "https://test.invalid\n",
+                       "https://[::1]test.invalid"):
+            with self.subTest(origin=origin), patch.dict(os.environ, {"FERTILE_PUBLIC_ORIGIN": origin}, clear=True):
+                with self.assertRaisesRegex(ValueError, "public_origin must be an HTTPS origin"):
+                    watch.settings(self.root)
 
     def test_market_age_missing_endpoint_and_disabled_collector(self):
         with serving() as api:

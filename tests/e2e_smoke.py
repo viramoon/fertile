@@ -19,9 +19,11 @@ from uuid import uuid4
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from http_origin import parse_https_origin
+
 CLI = ROOT / "scripts/fertile"
 USER_AGENT = "fertile-e2e-smoke/" + (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-PUBLIC_ORIGIN = "https://fertile.viramoon.com"
 CORE = {"postgres", "finance-api", "finance-collector", "finance-backtest-worker", "web", "healthwatch"}
 PAPER_SERVICES = {"xvfb", "ib-gateway"}
 JOB = {"strategy": "DemoStrategy", "instrument": "6EH4.XCME", "start": "2024-01-01T23:02:00Z",
@@ -43,10 +45,10 @@ def log(event, **fields):
 
 
 def public_origin(value):
-    origin = value.removesuffix("/")
-    if origin != PUBLIC_ORIGIN:
-        raise argparse.ArgumentTypeError(f"pass the Ruler-managed HTTPS origin {PUBLIC_ORIGIN}")
-    return origin
+    try:
+        return parse_https_origin(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from None
 
 
 def token_from(path):
@@ -389,7 +391,8 @@ def main():
     local_profile.add_argument("--protocol-fixture", action="store_true",
                                help="isolated loopback IB wire test only; requires FERTILE_SMOKE_FIXTURE_PID")
     public = modes.add_parser("public")
-    public.add_argument("origin", type=public_origin, help="explicitly confirmed HTTPS origin")
+    public.add_argument("origin", nargs="?", type=public_origin, metavar="HTTPS_ORIGIN",
+                        help="explicitly configured HTTPS origin (required)")
     for profile in (local_profile, public):
         profile.add_argument("--paper-only", action="store_true",
                              help="allow an IB market in recovery; locally skip Gateway, xvfb and healthwatch readiness")
@@ -398,6 +401,9 @@ def main():
         mode.add_argument("--research-instrument", help="also submit a historical job for this exact imported instrument")
         mode.add_argument("--research-kind", choices=("historical", "fixture"))
     args = parser.parse_args()
+    if args.mode == "public" and args.origin is None:
+        public.error("public requires an explicit HTTPS origin. This machine is for local stress testing. "
+                     "Run public smoke only on a server whose operators explicitly configured its own origin.")
     require(bool(args.research_instrument) == bool(args.research_kind),
             "provide both --research-instrument and --research-kind")
     require(1 <= args.timeout_seconds <= 1800, "invalid total deadline")

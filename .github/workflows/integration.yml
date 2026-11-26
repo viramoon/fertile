@@ -155,8 +155,7 @@ jobs:
           source "$FERTILE_ROOT/env.sh"
           umask 077
           mkdir -p "$FERTILE_ROOT/config" "$FERTILE_ROOT/secrets"
-          printf '%s\n' FERTILE_MARKET_SOURCE=replay "FERTILE_HEALTH_CONFIG=$FERTILE_ROOT/config/healthwatch-ci.yaml" > "$FERTILE_ROOT/config/runtime.env"
-          echo 'public_origin: null' > "$FERTILE_ROOT/config/healthwatch-ci.yaml"
+          printf '%s\n' FERTILE_MARKET_SOURCE=replay > "$FERTILE_ROOT/config/runtime.env"
           python3 - <<'PYTHON'
           import os
           import secrets

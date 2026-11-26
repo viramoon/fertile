@@ -4,22 +4,26 @@
 
 脚本验证同一个 collector 先失去就绪、后重订阅并补齐连续分钟线，同时核对合成试验或维护窗口的告警与恢复。前后用实际 Parquet 读回验证时间戳唯一。临时规则带独立标签，正常结束或控制器退出后由守护清除。不会清空防火墙规则。
 
-## 目标盒子
+## 本地压力测试机
 
-确认 Gateway 已登录、会话身份为 DU，官方交易日历处于开盘时段且距收盘足够久。先跑完整本地冒烟。若 SaaS 或代理的长连接周期性中断，另记录断线频率、reconnect/backoff、恢复水位和失败区间。
+本机只做本地部署复验与压力测试，网络演练默认只发起本机检查。`--paper-only` 也可显式要求本地模式。执行纸面行情断网演练时，确认 Gateway 已登录、会话身份为 DU，官方交易日历处于开盘时段且距收盘足够久。若 SaaS 或代理的长连接周期性中断，另记录断线频率、reconnect/backoff、恢复水位和失败区间。
 
 ~~~sh
 source /home/box/fertile/env.sh
 scripts/ib-check.sh
 scripts/fertile status --json
-tests/e2e-smoke.sh local
-tests/chaos/network.sh --paper-only --duration 120
+tests/e2e-smoke.sh local --paper-only
+tests/chaos/network.sh --duration 120
 ~~~
 
-Ruler 完成 fertile.viramoon.com → 127.0.0.1:8090 的路由后，可以在同一演练中独立校验公网入口。脚本比对本地与公网 web 身份，检查 HTTPS 就绪，故障只对 paper 连接施加。共享站点、隧道进程、隧道凭据、DNS 和现场恢复仍由 Ruler 管理。
+演练本身要求实时 paper 行情和初始服务就绪，恢复后会运行完整的本地冒烟。
+
+## 未来生产服务器的可选公网校验
+
+由运维为该服务器显式设置 `FERTILE_PUBLIC_ORIGIN` 或在巡检覆盖文件设置 `public_origin` 后，使用匹配的 HTTPS origin 运行以下命令。脚本比对本地与公网 web 进程身份，分别检查 HTTPS 就绪和冒烟。故障只对本机 paper 连接施加。
 
 ~~~sh
-tests/chaos/network.sh --public-origin https://fertile.viramoon.com --duration 120
+tests/chaos/network.sh --public-origin 'https://<your-origin>' --duration 120
 ~~~
 
 ## 隔离协议试验

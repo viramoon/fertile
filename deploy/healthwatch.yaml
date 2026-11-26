@@ -1,4 +1,4 @@
-# Site overrides use FERTILE_HEALTH_CONFIG. The tunnel origin is inherited from deploy/service.yaml.
+# 巡检覆盖经 FERTILE_HEALTH_CONFIG 加载。公网探针仅由覆盖文件或 FERTILE_PUBLIC_ORIGIN 显式启用。
 interval_seconds: 30
 timeout_seconds: 3
 disk_min_free_bytes: 2147483648

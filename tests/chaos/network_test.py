@@ -1,5 +1,6 @@
 """Scope, alert and netfilter cleanup safeguards for the Linux network drill."""
 from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
 import select
@@ -8,29 +9,115 @@ import sys
 from tempfile import TemporaryDirectory
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 from types import SimpleNamespace
 
 import network
 
 
+def flags(**options):
+    values = dict(protocol_fixture=False, paper_only=False, public_origin=None, fixture_origin=None,
+                  duration=120, session_open=None, session_close=None)
+    values.update(options)
+    return SimpleNamespace(**values)
+
+
+def plan_for(env):
+    return {"services": {"healthwatch": {"env": env}}}
+
+
 class NetworkDrillTests(unittest.TestCase):
     def test_local_fixture_cannot_reach_a_candidate_public_origin(self):
-        flags = SimpleNamespace(protocol_fixture=True, paper_only=False, public_origin=None,
-                                fixture_origin="https://www.viramoon.com")
+        args = flags(protocol_fixture=True, fixture_origin="https://outside.invalid")
+        plan = plan_for({"FERTILE_PUBLIC_ORIGIN": args.fixture_origin})
         with self.assertRaisesRegex(RuntimeError, "127.0.0.1"):
-            network.public_target(flags, flags.fixture_origin)
-        flags.fixture_origin = "https://127.0.0.1:18443"
-        self.assertEqual(network.public_target(flags, flags.fixture_origin), flags.fixture_origin)
-        with self.assertRaises(RuntimeError):
-            network.public_target(flags, "https://www.viramoon.com")
-        flags.protocol_fixture, flags.fixture_origin = False, None
-        flags.public_origin = "https://fertile.viramoon.com"
+            network.public_target(args, plan)
+        args.fixture_origin = "https://127.0.0.1:18443"
+        with self.assertRaisesRegex(RuntimeError, "must agree"):
+            network.public_target(args, plan)
+        self.assertEqual(network.public_target(args, plan_for({"FERTILE_PUBLIC_ORIGIN": args.fixture_origin})),
+                         args.fixture_origin)
+        args.public_origin = "https://web.example.test"
+        with self.assertRaisesRegex(RuntimeError, "protocol fixture must never use a public domain"):
+            network.public_target(args, plan)
+
+    def test_public_check_requires_cli_opt_in_and_matching_healthwatch_origin(self):
+        origin = "https://web.example.test"
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / "healthwatch.yaml"
+            plan = plan_for({"FERTILE_HEALTH_CONFIG": str(path)})
+            self.assertIsNone(network.public_target(flags(), plan))  # No overlay reads without opt-in.
+            path.write_text("public_origin: https://WEB.example.test:443/\n")
+            self.assertIsNone(network.public_target(flags(paper_only=True), plan))
+            self.assertEqual(network.public_target(flags(public_origin=origin), plan), origin)
+            plan["services"]["healthwatch"]["env"]["FERTILE_PUBLIC_ORIGIN"] = "https://other.invalid"
+            with self.assertRaisesRegex(RuntimeError, "must match"):
+                network.public_target(flags(public_origin=origin), plan)
+            self.assertIsNone(network.public_target(flags(), plan))
         with self.assertRaisesRegex(RuntimeError, "match"):
-            network.public_target(flags, "https://www.viramoon.com")
-        self.assertEqual(network.public_target(flags, flags.public_origin), flags.public_origin)
-        flags.paper_only, flags.public_origin = True, None
-        self.assertIsNone(network.public_target(flags, "https://fertile.viramoon.com"))
+            network.public_target(flags(public_origin=origin), plan_for({}))
+        with self.assertRaisesRegex(RuntimeError, "paper-only mode does not take a public origin"):
+            network.public_target(flags(paper_only=True, public_origin=origin), plan_for({"FERTILE_PUBLIC_ORIGIN": origin}))
+
+    def test_shell_rejects_invalid_public_origin_before_opening_the_drill_lock(self):
+        with TemporaryDirectory() as folder:
+            env = dict(os.environ, FERTILE_ROOT=folder, FERTILE_CONTROL_PYTHON=sys.executable)
+            for value in ("http://web.example.test", "https://user@web.example.test",
+                          "https://web.example.test/path", "https://web.example.test:65536"):
+                with self.subTest(value=value):
+                    proc = subprocess.run([network.HERE / "network.sh", "--public-origin", value],
+                                          env=env, capture_output=True, text=True, timeout=5)
+                    self.assertEqual(proc.returncode, 2, proc.stderr)
+                    self.assertIn("--public-origin", proc.stderr)
+                    self.assertIn("HTTPS origin", proc.stderr)
+
+    def test_network_baseline_probes_public_web_only_with_explicit_opt_in(self):
+        class BaselineComplete(RuntimeError):
+            pass
+
+        origin = "https://web.example.test"
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            release = root / "release"
+            release.mkdir()
+            (root / "current").symlink_to(release)
+            (root / "run").mkdir()
+            alerts = root / "logs/alerts"
+            alerts.mkdir(parents=True)
+            (alerts / "alerts.jsonl").touch()
+            config = root / "collector.yaml"
+            config.write_text("source: ib\nbar_spec: 1-MINUTE-LAST\ncatalog: catalog\ninstruments: [T.SIM]\n"
+                              "max_age_seconds: 120\n")
+            for relative in ("catalog/.finance-collector/source.json", "finance-state/collector/catalog.json"):
+                path = root / relative
+                path.parent.mkdir(parents=True)
+                path.write_text('{"source":"ib"}')
+            plan = plan_for({"FERTILE_PUBLIC_ORIGIN": origin})
+            plan["release"] = str(release)
+            plan["services"]["finance-collector"] = {"env": {"FERTILE_DATA_ROOT": str(root),
+                                                                 "FINANCE_COLLECTOR_CONFIG": str(config)}}
+            (root / "run/services.json").write_text(json.dumps(plan))
+            active = dict.fromkeys(("healthwatch", "postgres", "finance-backtest-worker", "ib-gateway"), {})
+            for service, port in (("finance-api", 8081), ("finance-collector", 8082), ("web", 8090)):
+                active[service] = {"ready_url": f"http://127.0.0.1:{port}/healthz/ready", "ready": 200}
+            minute = time.time_ns() // network.NS_MINUTE * network.NS_MINUTE
+            with (patch.object(network, "ROOT", root), patch.object(network, "session", return_value=None),
+                  patch.object(network.drill, "running_initial", return_value=(1, active, {})),
+                  patch.object(network.healthwatch, "webhook_url", return_value=None),
+                  patch.object(network, "marks", return_value={"T.SIM": minute}),
+                  patch.object(network, "local_market", return_value={"T.SIM"}),
+                  patch.object(network, "catalog_window"), patch.object(network, "paper_probe", side_effect=BaselineComplete),
+                  patch.object(network.healthwatch, "public_ready", return_value={"state": "ok"}) as ready,
+                  patch.object(network.healthwatch, "http_json", return_value=(200, {"web": {"started_at": "now"}})) as http):
+                with self.assertRaises(BaselineComplete):
+                    network.run(flags())
+                ready.assert_not_called()
+                http.assert_not_called()
+                with self.assertRaises(BaselineComplete):
+                    network.run(flags(public_origin=origin))
+                ready.assert_called_once_with(origin, 4)
+                self.assertEqual(http.call_args_list, [call("http://127.0.0.1:8090/api/v1/system/status", 3, local=True),
+                                                      call(origin + "/api/v1/system/status", 5)])
 
     def test_early_close_and_weekend_do_not_count_as_trading(self):
         class Clock(datetime):

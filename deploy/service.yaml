@@ -50,7 +50,8 @@ infrastructure:
     managed_by: Maas · Ruler
     external: true
     ingress: http://127.0.0.1:8090
-    public_origin: https://fertile.viramoon.com
+    # 本机仅做本地压测。未来生产服务器由运维显式配置其 HTTPS 入口。
+    public_origin: null
   ib_gateway:
     host: 127.0.0.1
     paper_port: 4002
