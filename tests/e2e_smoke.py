@@ -85,6 +85,7 @@ def origin_key(parsed):
 class HTTP:
     def __init__(self, origin, local):
         self.origin = origin
+        self.local = local
         self._origin_key = origin_key(urlsplit(origin))
         self.opener = build_opener(NoRedirect(), *([ProxyHandler({})] if local else []))
 
@@ -106,10 +107,13 @@ class HTTP:
             response = self.opener.open(req, timeout=10)
         except HTTPError as err:
             # Never print upstream bodies or sensitive header values, including on redirects.
-            with err:
-                raise SmokeError(f"{verb} {parsed.path} returned HTTP {err.code}, expected {expected}") from None
+            if err.code != expected:
+                with err:
+                    raise SmokeError(f"{verb} {parsed.path} returned HTTP {err.code}, expected {expected}") from None
+            response = err
         with response:
-            require(response.status == expected, f"{verb} {parsed.path} returned HTTP {response.status}")
+            require(response.status == expected,
+                    f"{verb} {parsed.path} returned HTTP {response.status}, expected {expected}")
             body = response.read(512 if asset else 1_048_577)
             media = response.headers.get_content_type().lower()
             log("http", method=verb, path=parsed.path, status=response.status,
@@ -236,6 +240,18 @@ def check_assets(http):
         require(media in allowed and data.strip() and not data.lstrip().startswith(b"<"), f"invalid {kind} asset")
 
 
+def check_licenses(http):
+    for name, heading, marker in (
+        ("LICENSE", b"Apache License", b"Version 2.0, January 2004"),
+        ("NOTICE", b"TradingView Lightweight Charts", b"TradingView, Inc."),
+    ):
+        path = f"/third-party/lightweight-charts/{name}"
+        media, body = http.read(path, asset=True)
+        require(media in {"application/octet-stream", "text/plain"} and body.lstrip().startswith(heading)
+                and marker in body, f"{path} did not return the expected license text")
+        http.read("/static" + path, expected=404, asset=True)
+
+
 def timestamp(value):
     require(isinstance(value, str), "missing timestamp")
     stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -312,6 +328,8 @@ def smoke(http, secret, skipped, protocol_fixture=False, *, paper_only=False):
         require(market["source"] == "replay", "required external services are unavailable for paper acceptance")
         log("replay external services skipped", services=skipped)
     check_assets(http)
+    if http.local:
+        check_licenses(http)
 
     key = "e2e-" + uuid4().hex
     log("submitting example job")

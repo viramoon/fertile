@@ -40,11 +40,15 @@ check_producer_revision() {
   pin=$(cat "$work/$producer.commit")
   recorded_tree=$(git -C "$root/$producer" rev-parse --verify "$recorded^{tree}")
   pin_tree=$(git -C "$root/$producer" rev-parse --verify "$pin^{tree}")
-  if [[ $recorded_tree != "$pin_tree" ]]; then
+  if [[ $recorded_tree == "$pin_tree" ]]; then
+    printf '%s: recorded %s and gitlink %s share tree %s\n' "$producer" "$recorded" "$pin" "$pin_tree"
+  elif [[ $producer == web ]] && git -C "$root/$producer" merge-base --is-ancestor "$recorded" "$pin"; then
+    # Static-only web upgrades can keep the client derived from an ancestor.
+    printf '%s\n' "$recorded" > "$work/web-recorded.commit"
+  else
     printf '%s: recorded %s commit %s has a different tree from gitlink %s\n' "$marker" "$producer" "$recorded" "$pin" >&2
     return 1
   fi
-  printf '%s: recorded %s and gitlink %s share tree %s\n' "$producer" "$recorded" "$pin" "$pin_tree"
 }
 
 check_producer_revision finance "$root/web/openapi/finance.commit"
@@ -58,16 +62,30 @@ check_clients() {
   bash "$root/frontend/scripts/gen-web-client.sh" --check "$snapshots/web.openapi.json"
 }
 
-if ! $write; then check_clients "$root/contracts"; fi
-for repo in finance web; do
-  pin=$(cat "$work/$repo.commit")
-  mkdir "$work/$repo"
-  git -C "$root/$repo" archive "$pin" | tar -x -C "$work/$repo"
+export_contract() {
+  local repo=$1 source=$2 pin package
+  pin=$(cat "$work/$source.commit")
+  mkdir "$work/$source"
+  git -C "$root/$repo" archive "$pin" | tar -x -C "$work/$source"
   package=$repo
   [[ $repo != finance ]] || package=finance-api
   # An archive has no Git metadata. Give web/build.rs the exact producer revision.
-  (cd "$work/$repo" && GIT_CEILING_DIRECTORIES="$work" GITHUB_SHA="$pin" cargo run --quiet --locked --release -p "$package" -- export-openapi) > "$work/$repo.openapi.json"
+  (cd "$work/$source" && GIT_CEILING_DIRECTORIES="$work" GITHUB_SHA="$pin" cargo run --quiet --locked --release -p "$package" -- export-openapi) > "$work/$source.openapi.json"
+}
+
+if ! $write; then check_clients "$root/contracts"; fi
+for repo in finance web; do
+  export_contract "$repo" "$repo"
 done
+if [[ -f $work/web-recorded.commit ]]; then
+  export_contract web web-recorded
+  if ! cmp -s "$work/web-recorded.openapi.json" "$work/web.openapi.json"; then
+    echo 'frontend/openapi/web.commit: recorded web ancestor and gitlink export different OpenAPI bytes' >&2
+    exit 1
+  fi
+  printf 'web: recorded ancestor %s and gitlink %s export identical OpenAPI bytes\n' \
+    "$(cat "$work/web-recorded.commit")" "$(cat "$work/web.commit")"
+fi
 if $write; then
   # Do not replace either snapshot until both producer exports and clients agree.
   check_clients "$work"

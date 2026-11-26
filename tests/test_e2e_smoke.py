@@ -22,6 +22,11 @@ import e2e_smoke as check
 
 TEST_HOST = "deployment.invalid"
 TEST_ORIGIN = f"https://{TEST_HOST}"
+LICENSE_DIR = "/third-party/lightweight-charts/"
+LICENSE_FIXTURES = {
+    LICENSE_DIR + "LICENSE": ("text/plain", b"   Apache License\nVersion 2.0, January 2004\n"),
+    LICENSE_DIR + "NOTICE": ("application/octet-stream", b"TradingView Lightweight Charts\nCopyright TradingView, Inc.\n"),
+}
 
 
 class Site(BaseHTTPRequestHandler):
@@ -41,6 +46,9 @@ class Site(BaseHTTPRequestHandler):
             self.send(200, "export default 1", "text/javascript")
         elif self.path == "/a.css":
             self.send(200, "body{color:#222}", "text/css")
+        elif self.path in LICENSE_FIXTURES:
+            media, body = LICENSE_FIXTURES[self.path]
+            self.send(200, body.decode(), media)
         elif self.path == "/healthz/live":
             self.send(200, {"status": "ok"})
         elif self.path == "/healthz/ready":
@@ -315,7 +323,8 @@ class PaperSmokeTests(unittest.TestCase):
             "/api/v1/backtests/5": {"id": 5, "request": check.JOB, "status": "succeeded", "summary": summary},
         }
         assets = {"/": ("text/html", b'<script type="module" src="/a.js"></script><link rel="stylesheet" href="/a.css">'),
-                  "/a.js": ("text/javascript", b"export default 1"), "/a.css": ("text/css", b"body{}")}
+                  "/a.js": ("text/javascript", b"export default 1"), "/a.css": ("text/css", b"body{}"),
+                  **LICENSE_FIXTURES}
         assets.update(asset_responses or {})
         requests = []
         version = (Path(__file__).resolve().parents[1] / "VERSION").read_text().strip()
@@ -353,6 +362,29 @@ class PaperSmokeTests(unittest.TestCase):
                 self.assertIn((host, "/api/v1/backtests", "POST"), requests)
                 self.assertIn((host, "/a.js", "GET"), requests)
                 self.assertIn((host, "/a.css", "GET"), requests)
+
+    def test_only_local_smoke_checks_both_license_urls_and_static_prefix(self):
+        local_requests = self.exercise_cli("local", "--paper-only")
+        public_requests = self.exercise_cli("public", TEST_ORIGIN, "--paper-only")
+        for path in LICENSE_FIXTURES:
+            for selector in (path, "/static" + path):
+                self.assertIn(("127.0.0.1:8090", selector, "GET"), local_requests)
+                self.assertNotIn((TEST_HOST, selector, "GET"), public_requests)
+
+    def test_local_smoke_rejects_spa_fallback_at_either_license_url(self):
+        for path in LICENSE_FIXTURES:
+            for media in ("text/html", "text/plain"):
+                with self.subTest(path=path, media=media), \
+                     self.assertRaisesRegex(check.SmokeError, f"{path} did not return the expected license text"):
+                    self.exercise_cli("local", "--paper-only", asset_responses={path: (media, b"<!doctype html>")})
+
+    def test_local_smoke_requires_404_at_both_static_prefixed_license_urls(self):
+        for path in LICENSE_FIXTURES:
+            wrong_path = "/static" + path
+            with self.subTest(path=wrong_path), \
+                 self.assertRaisesRegex(check.SmokeError, f"GET {wrong_path} returned HTTP 200, expected 404"):
+                self.exercise_cli("local", "--paper-only",
+                                  asset_responses={wrong_path: ("text/html", b"<!doctype html>")})
 
     def test_public_paper_smoke_skips_injected_cross_origin_assets(self):
         html = (b'<script type="module" src="a.js"></script>'
