@@ -36,7 +36,7 @@ source "${FERTILE_ROOT:-${FERTILE_BOX_HOME:-/home/box}/fertile}/env.sh"
 curl -fsS http://127.0.0.1:8090/api/v1/backtests/sample
 ~~~
 
-## finance 327bae28 升级
+## finance eb659615 升级
 
 | 再部署项目 | 操作 |
 | --- | --- |
@@ -54,13 +54,13 @@ curl -fsS http://127.0.0.1:8090/api/v1/backtests/sample
 
 ### 1. 确认部署版本并建立独立目录
 
-在专门的 Bash 会话中逐段执行，每条命令成功后再继续。以下示例使用已部署且 manifest 锁定目标 finance 提交的制品。若校验失败，停止并请 Ruler 提供对应制品。源码构建方式见 finance 原手册。两个隔离根都要存在、互不包含，路径各级使用实体目录。[finance 隔离入口](https://github.com/viramoon/finance/blob/327bae28fd8c1f56c44bdcfb086589eaea9583b2/RUNBOOK.md#隔离验收官方历史作业) [finance 作业说明](https://github.com/viramoon/finance/blob/327bae28fd8c1f56c44bdcfb086589eaea9583b2/docs/backtest-jobs.md#隔离运行官方历史作业)
+在专门的 Bash 会话中逐段执行，每条命令成功后再继续。以下示例使用已部署且 manifest 锁定目标 finance 提交的制品。若校验失败，停止并请 Ruler 提供对应制品。源码构建方式见 finance 原手册。两个隔离根都要存在、互不包含，路径各级使用实体目录。[finance 隔离入口](https://github.com/viramoon/finance/blob/eb6596152db18b64c957a06754924daf77ce4687/RUNBOOK.md#隔离验收官方历史作业) [finance 作业说明](https://github.com/viramoon/finance/blob/eb6596152db18b64c957a06754924daf77ce4687/docs/backtest-jobs.md#隔离运行官方历史作业)
 
 ```bash
 umask 077
 FERTILE_ROOT=/home/box/fertile
 release=$(readlink -f -- "$FERTILE_ROOT/current") || exit
-grep -F '"finance": "327bae28fd8c1f56c44bdcfb086589eaea9583b2"' "$release/manifest.json" || exit
+grep -F '"finance": "eb6596152db18b64c957a06754924daf77ce4687"' "$release/manifest.json" || exit
 cd "$release/finance" || exit
 export FINANCE_PYTHON="$release/runtime/venv/bin/python"
 export PYTHONPATH=python PYTHONDONTWRITEBYTECODE=1
@@ -73,7 +73,7 @@ mkdir -p -- "$FINANCE_ISOLATED_DATA" "$FERTILE_RESEARCH_ROOT" "$FINANCE_HISTORY_
 
 ### 2. 下载并记录公开历史数据
 
-确认来源允许下载、使用和本地归档。Yahoo 使用 finance 的 `download_yahoo_daily`，默认提供明确的 User-Agent。遇到 429、408、5xx 或连接失败时，按退避策略在 query1 和 query2 间切换并遵守 `Retry-After` 的等待预算。失败时保留脱敏错误，按供应商要求稍后重试。下面的 IBM 日期仅供演示，旧 SPY 的下载参数见下一节。记录获取日期、来源、实际首尾、条数和缺口。Ken French（含 FF5 下载示例）、FRED 及公开历史 catalog 导入命令见原手册。[finance 手工归档步骤](https://github.com/viramoon/finance/blob/327bae28fd8c1f56c44bdcfb086589eaea9583b2/RUNBOOK.md#手工保存公开历史数据)
+确认来源允许下载、使用和本地归档。Yahoo 使用 finance 的 `download_yahoo_daily`，默认提供明确的 User-Agent。遇到 429、408、5xx 或连接失败时，按退避策略在 query1 和 query2 间切换并遵守 `Retry-After` 的等待预算。失败时保留脱敏错误，按供应商要求稍后重试。下面的 IBM 日期仅供演示，旧 SPY 的下载参数见下一节。记录获取日期、来源、实际首尾、条数和缺口。Ken French（含 FF5 下载示例）、FRED 及公开历史 catalog 导入命令见原手册。[finance 手工归档步骤](https://github.com/viramoon/finance/blob/eb6596152db18b64c957a06754924daf77ce4687/RUNBOOK.md#手工保存公开历史数据)
 
 ```bash
 "$FINANCE_PYTHON" -m fertile_finance.download_yahoo_daily \
@@ -100,7 +100,7 @@ legacy_backup=$(
 ) && printf '%s\n' "$legacy_backup/catalog"
 ```
 
-在 `$legacy_backup` 记录来源目录和提供方、标的 `SPY.XNAS`、实际首尾和条数、原消费方、固定 21:00 UTC 时间口径、OHLCV 和复权口径。下载覆盖旧交易日的 SPY 源 OHLCV、调整收盘价和公司行为。输入核实后的旧归档首尾，以及新 Yahoo 存档的实际观测截止日。finance 迁移示例默认使用 ARCA Bar 类型，本机按示例指引通过 `--help` 选用 `--bar-type SPY.XNAS-1-DAY-LAST-EXTERNAL`。[finance SPY 迁移说明](https://github.com/viramoon/finance/blob/327bae28fd8c1f56c44bdcfb086589eaea9583b2/catalog/README.md#既有-spy-固定-2100-utc-数据)
+在 `$legacy_backup` 记录来源目录和提供方、标的 `SPY.XNAS`、实际首尾和条数、原消费方、固定 21:00 UTC 时间口径、OHLCV 和复权口径。下载覆盖旧交易日的 SPY 源 OHLCV、调整收盘价和公司行为。输入核实后的旧归档首尾，以及新 Yahoo 存档的实际观测截止日。finance 迁移示例默认使用 ARCA Bar 类型，本机按示例指引通过 `--help` 选用 `--bar-type SPY.XNAS-1-DAY-LAST-EXTERNAL`。[finance SPY 迁移说明](https://github.com/viramoon/finance/blob/eb6596152db18b64c957a06754924daf77ce4687/catalog/README.md#既有-spy-固定-2100-utc-数据)
 
 ```bash
 read -r -p '旧 SPY 首日 (YYYY-MM-DD): ' spy_first_session
@@ -135,7 +135,7 @@ spy_target="$acceptance_root/spy-data"
 
 **官方四窗口作业不使用 FRED。** 无需 FRED series ID、`cosd` 或 `coed`。已导入的 2024 年 `DGS10` 共 261 条，其覆盖与验收无关。官方作业也无需 Ken French 日频，Sharpe 固定 `rf=0`，结果标记为 `rf_source="rf=0"`。
 
-独立研究如需把 `DGS10` 对齐旧 SPY 最长样本，按 finance 手册的可选命令设置 `cosd=1993-01-29`，将 `coed` 填为核实后的 SPY 归档实际末日。下例的末日仅演示。下载后核对日频、年化百分比单位、实际首尾和缺值，再导入新的独立数据根。若要保留该研究归档，在验收清理前将其转存到独立的持久位置。[finance 可选重拉及导入](https://github.com/viramoon/finance/blob/327bae28fd8c1f56c44bdcfb086589eaea9583b2/RUNBOOK.md#可选扩展-fred-归档以对齐-spy-样本)
+独立研究如需把 `DGS10` 对齐旧 SPY 最长样本，按 finance 手册的可选命令设置 `cosd=1993-01-29`，将 `coed` 填为核实后的 SPY 归档实际末日。下例的末日仅演示。下载后核对日频、年化百分比单位、实际首尾和缺值，再导入新的独立数据根。若要保留该研究归档，在验收清理前将其转存到独立的持久位置。[finance 可选重拉及导入](https://github.com/viramoon/finance/blob/eb6596152db18b64c957a06754924daf77ce4687/RUNBOOK.md#可选扩展-fred-归档以对齐-spy-样本)
 
 ```bash
 export FINANCE_FRED_FIRST_DATE=1993-01-29
@@ -169,7 +169,7 @@ PY
 
 ### 5. 转换并审核导入研究快照
 
-使用经许可的 NYSE 上市 USD 股票或 ETF 日线。选择无拆股且有连续 XNYS 会话的区间，原始 OHLC 未按现金分红复权、价格可精确表示到美分，成交量为整股。转换器从 Yahoo 源 quote 生成 CSV 和血缘，遇到无法精确表示到美分的价格或区间内的拆股会退出。核对来源、价格口径、公司行为、实际首尾、条数、缺口、`adjustment_as_of` 及 CSV SHA-256 后再运行导入。如果 Yahoo 数据无法满足要求，改用经审核的供应商原始 CSV 并填实际 `--source`，不得自行舍入或补缺。若输入已在 `HistoricalCatalog`，按 finance 文档使用其中的 `--historical-data-root` / `--series-id` 示例。已发布的标的目录不可覆盖，重试导入用新的独立研究根。[finance 日线准备和导入](https://github.com/viramoon/finance/blob/327bae28fd8c1f56c44bdcfb086589eaea9583b2/docs/historical-backtest.md#准备数据)
+使用经许可的 NYSE 上市 USD 股票或 ETF 日线，确保 XNYS 会话连续、成交量为整股，并排除现金分红复权。下例使用经审核的无拆股原始 OHLCV，从 Yahoo 源 quote 生成 CSV 和血缘。转换器接受与最近美分的绝对差不超过 `0.00002 USD` 的 OHLC 报价，将其归一到美分，并以 `normalized_price_count` 记录数值改变的 OHLC 字段数。超出容差时转换会退出。导入前核对来源、价格口径、公司行为、实际首尾、条数、缺口、`adjustment_as_of` 和 CSV SHA-256。若输入已在 `HistoricalCatalog`，按 finance 文档使用 `--historical-data-root` / `--series-id`。[finance 日线准备和导入](https://github.com/viramoon/finance/blob/eb6596152db18b64c957a06754924daf77ce4687/docs/historical-backtest.md#准备数据)
 
 ```bash
 "$FINANCE_PYTHON" -m fertile_finance.convert_research_csv \
@@ -188,9 +188,11 @@ sha256sum "$FINANCE_HISTORY_ARCHIVE/ibm.csv"
   --source "Yahoo Finance chart IBM" --raw-split-free-reviewed
 ```
 
+跨拆股时，先用供应商资料、公司行为记录和拆股日前后的独立样本审核，确认 Yahoo 已将 OHLCV 统一到同一拆股后股份口径，并核对从请求起点到存档截止日的事件。使用同一 `adjustment_as_of` 的行情，转换时传入 `--yahoo-split-normalized-evidence` 记录审核依据。转换器保留最后一个相关拆股日前的源报价精度，自该日起应用美分容差。核对 CSV 和血缘后，以 `--yahoo-split-normalized-lineage` 导入。此选项与上例的 `--raw-split-free-reviewed` 互斥，证据不足时将验收记为未验证。经审核的无拆股供应商原始 CSV 也可用于上例的原始入口，`--source` 填实际来源。禁止合成或补造数据、擅自舍入或改价。已发布的标的目录不可覆盖，重试导入用新的独立研究根。[finance 跨拆股审核和命令](https://github.com/viramoon/finance/blob/eb6596152db18b64c957a06754924daf77ce4687/docs/historical-backtest.md#跨拆股的-ibm-长历史)
+
 ### 6. 隔离验收官方四窗口历史作业
 
-按已导入标的的覆盖范围调整日期和标的。请求区间至少包含 `slow_period + 1` 个连续 XNYS 会话，示例使用默认慢线 30 日。示例端口 18081 必须空闲，可省略 `--port 18081` 让运行器自动选高位端口。避开 8081、8090 和 8082。运行器启动本次专用的环回 finance-api 和 worker，提交一个 `SmaCrossover` 并轮询终态，队列为 `$FINANCE_ISOLATED_DATA/finance-state/backtests/jobs.sqlite3`。运行结束或中断后回收本次进程并释放端口。[finance 官方隔离命令](https://github.com/viramoon/finance/blob/327bae28fd8c1f56c44bdcfb086589eaea9583b2/RUNBOOK.md#隔离验收官方历史作业)
+按已导入标的的覆盖范围调整日期和标的。请求区间至少包含 `slow_period + 1` 个连续 XNYS 会话，示例使用默认慢线 30 日。示例端口 18081 必须空闲，可省略 `--port 18081` 让运行器自动选高位端口。避开 8081、8090 和 8082。运行器启动本次专用的环回 finance-api 和 worker，提交一个 `SmaCrossover` 并轮询终态，队列为 `$FINANCE_ISOLATED_DATA/finance-state/backtests/jobs.sqlite3`。运行结束或中断后回收本次进程并释放端口。[finance 官方隔离命令](https://github.com/viramoon/finance/blob/eb6596152db18b64c957a06754924daf77ce4687/RUNBOOK.md#隔离验收官方历史作业)
 
 ```bash
 "$FINANCE_PYTHON" -m fertile_finance.isolated_historical_job \
@@ -203,7 +205,7 @@ sha256sum "$FINANCE_HISTORY_ARCHIVE/ibm.csv"
 退出码为零后检查 `job.json` 的 `status=succeeded`、请求和摘要策略均为 `SmaCrossover`，标的与日期匹配本次请求，`summary.research.dataset` 与快照清单一致。非零时保留错误、终态 JSON（若有）和隔离队列供诊断。
 
 - 核对 `summary.research.windows` 依序为 `50y`、`10y`、`5y`、`longest_sample`，`requested_years` 分别为 50、10、5、`null`。记录每行请求起点、实际及日历覆盖首尾、观测数、应有和缺失交易日、覆盖状态及 `rf_source`。覆盖不足时 `metrics=null`，有值的绩效使用十进制字符串。示例的一年区间应使三个固定窗口覆盖不足，最长样本按 warmup 后的实际净值序列核对。
-- 核对 `summary.research.audit.fills` 等于 `summary.total_orders`。抽查 `recent_fills` 的信号日、执行日与 `executed_at`，确认在下一 XNYS 会话收盘成交，股数、价格和佣金与配置及模拟规则相符。记录零量 bar、阻塞计数和成交样本。零成交时保留计数，需验证逐笔时选经审核且能触发成交的区间重跑。[finance 成交与绩效口径](https://github.com/viramoon/finance/blob/327bae28fd8c1f56c44bdcfb086589eaea9583b2/docs/historical-backtest.md#信号执行和绩效)
+- 核对 `summary.research.audit.fills` 等于 `summary.total_orders`。抽查 `recent_fills` 的信号日、执行日与 `executed_at`，确认在下一 XNYS 会话收盘成交，股数、价格和佣金与配置及模拟规则相符。记录零量 bar、阻塞计数和成交样本。零成交时保留计数，需验证逐笔时选经审核且能触发成交的区间重跑。[finance 成交与绩效口径](https://github.com/viramoon/finance/blob/eb6596152db18b64c957a06754924daf77ce4687/docs/historical-backtest.md#信号执行和绩效)
 
 ### 7. 留存证据并清理
 

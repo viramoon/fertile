@@ -6,7 +6,7 @@
 
 finance 的源码 wheel 缓存键包含 `uv.lock` 与构建脚本。缓存键变化且无可用缓存时，为源码构建预留时间。fertile 使用盒子 bootstrap 提供的工具链，发布 venv 按冻结锁文件安装服务所需依赖。
 
-独立运行因子分析时，可使用 finance 的 `scripts/bootstrap-research.sh` 准备工具链。它生成的 `FINANCE_TOOLCHAIN_ENV` 用于选择 finance 构建工具链。源码构建完成后，按上游步骤在独立构建 venv 中同步 `research` 组的 SciPy 和 statsmodels，保留已安装的 Nautilus 源码 wheel。[finance 研究环境](https://github.com/viramoon/finance/blob/327bae28fd8c1f56c44bdcfb086589eaea9583b2/python/README.md#研究环境)
+独立运行因子分析时，可使用 finance 的 `scripts/bootstrap-research.sh` 准备工具链。它生成的 `FINANCE_TOOLCHAIN_ENV` 用于选择 finance 构建工具链。源码构建完成后，按上游步骤在独立构建 venv 中同步 `research` 组的 SciPy 和 statsmodels，保留已安装的 Nautilus 源码 wheel。[finance 研究环境](https://github.com/viramoon/finance/blob/eb6596152db18b64c957a06754924daf77ce4687/python/README.md#研究环境)
 
 `$FERTILE_ROOT/releases/<fertile-commit>/` 下包括 bin、finance（配置、队列 SQL、Python、真实上游 CSV 示例）、web/config、static、runtime/venv 和 fertile/scripts、fertile/deploy、fertile/VERSION。healthwatch 从发布目录的 VERSION 读取 HTTP User-Agent 版本。manifest.json 记录三个组件的 SHA、Nautilus 源码与 wheel 摘要，以及各目录的 SHA256。相同提交再次 build 时验证安装目录和 Python 原生包，确认通过后复用。日常数据、日志和密钥保存在版本目录之外。
 
