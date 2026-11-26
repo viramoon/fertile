@@ -1,6 +1,6 @@
 # ADR-002　云盒子的进程守护
 
-状态为已采用，适用于 cloudbox。PID 1 是 tini。只有 /home/box 持久，重启后需要重新建立运行进程。
+状态为已采用，适用于 cloudbox。PID 1 是 tini。只有 `/home/box` 持久，重启后需要重新建立运行进程。普通服务器可选择 systemd 或 supervisord，见 [部署指南](../../deploy/linux-server.md)。
 
 ## 选择
 

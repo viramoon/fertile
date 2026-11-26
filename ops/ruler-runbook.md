@@ -1,6 +1,6 @@
 # Maas · Ruler 云盒子操作手册
 
-常规发布依据已验证的 fertile tag。当前高可用联调使用指定的 fertile 集成提交，其 gitlink 锁定 finance、web 和 frontend。所有命令从总仓库根目录运行。保留上一次可用的构建和备份，再切换代码或数据格式。
+常规发布依据已验证的 fertile tag。当前压测使用指定的 fertile 集成提交，其 gitlink 锁定 finance、web 和 frontend。所有命令从总仓库根目录运行。保留上一次可用的构建和备份，再切换代码或数据格式。本文的生命周期和灾备命令适用于 supervisord。Ubuntu 24.04 或 Debian 12 服务器的 systemd 安装、启动、卸载和 HTTPS 配置见 [普通服务器部署指南](../deploy/linux-server.md)。
 
 本机只做本地压力测试。fertile 的入口为 `http://127.0.0.1:8090`，现有网站使用 `127.0.0.1:8080`。本机原有的 fertile 公网入口已移除，部署复验和巡检只走本地。Ruler 负责目标盒子部署、现有网站、Cloudflare 隧道、DNS 和线上恢复。fertile 的脚本只管理本项目进程和持久目录。部署不安装开机钩子、shell 启动项或主机定时任务。
 
@@ -8,8 +8,8 @@
 
 ## 首次启动
 
-1. 用 box 用户将源码 checkout 到 /home/box/fertile-source。初始化三个私有子模块及 Nautilus 源码。核对目标提交和 profile。
-2. 按 [bootstrap](../deploy/bootstrap.md) 安装锁定的工具，执行 source /home/box/fertile/env.sh。确认磁盘剩余足以构建 Rust、Python wheel、前端与备份。
+1. 以部署账户 checkout 选定的提交。初始化三个私有子模块及 Nautilus 源码，核对目标提交和 profile。
+2. 按 [bootstrap](../deploy/bootstrap.md) 安装锁定的工具，执行 `source "$FERTILE_ROOT/env.sh"`。确认磁盘剩余足以构建 Rust、Python wheel、前端与备份。
 3. 按 web 手册确认静态目录、数据库角色和管理令牌。凭据文件只允许属主读写。[web RUNBOOK](https://github.com/viramoon/web/blob/main/RUNBOOK.md)
 4. 在本机 Gateway 完成 paper 登录前，独立记录本机服务状态、paper 账号和行情连续性。开发演练可显式选 replay，并为回放与真实行情分别安排持久数据根。
 
@@ -24,10 +24,10 @@ curl -fsS http://127.0.0.1:8090/api/v1/system/status
 
 当前版本目录的 bin/ 下放编译产物，static/ 存放同一批次的 Vite dist。finance 与 web 各自读取版本目录内的配置，PostgreSQL、队列和 catalog 保留于持久数据目录。首次准备示例摘要时，加载同一个环境与数据根，再从当前 release 中执行以下命令。
 
-`scripts/fertile data-root` 使用与 supervisor 相同的解析规则。已导出的 `FERTILE_DATA_ROOT` 优先，其次读取 `$FERTILE_ROOT/config/runtime.env`。例如在文件中填写 `FERTILE_DATA_ROOT=/home/box/fertile/data-paper` 即可使用独立的 paper 数据根。两处都未设置时，IB 使用 `$FERTILE_ROOT/data`，replay 使用 `$FERTILE_ROOT/data/replay`。
+`scripts/fertile data-root` 使用与 supervisor 相同的解析规则。已导出的 `FERTILE_DATA_ROOT` 优先，其次读取 `$FERTILE_ROOT/config/runtime.env`。使用独立的 paper 数据目录时，在该文件中填入实际绝对路径。两处都未设置时，IB 使用 `$FERTILE_ROOT/data`，replay 使用 `$FERTILE_ROOT/data/replay`。
 
 ~~~sh
-source "${FERTILE_ROOT:-${FERTILE_BOX_HOME:-/home/box}/fertile}/env.sh"
+source "${FERTILE_ROOT:?先设置实例的持久根}/env.sh"
 (
   FERTILE_DATA_ROOT=$(scripts/fertile data-root) || exit
   export FERTILE_DATA_ROOT FINANCE_BUILD_ROOT="$FERTILE_ROOT/current/runtime"
@@ -58,7 +58,7 @@ curl -fsS http://127.0.0.1:8090/api/v1/backtests/sample
 
 ```bash
 umask 077
-FERTILE_ROOT=/home/box/fertile
+FERTILE_ROOT=${FERTILE_ROOT:-${FERTILE_BOX_HOME:-/home/box}/fertile}
 release=$(readlink -f -- "$FERTILE_ROOT/current") || exit
 grep -F '"finance": "327bae28fd8c1f56c44bdcfb086589eaea9583b2"' "$release/manifest.json" || exit
 cd "$release/finance" || exit
@@ -85,10 +85,10 @@ mkdir -p -- "$FINANCE_ISOLATED_DATA" "$FERTILE_RESEARCH_ROOT" "$FINANCE_HISTORY_
 
 ### 3. 单独备份并迁移旧 SPY
 
-本机 `scripts/backup.sh` 的行情与队列备份范围为活动 `FERTILE_DATA_ROOT`（`data-paper`）。旧 SPY 固定 21:00 UTC 日线在非活动 `/home/box/fertile/data/catalog/data/bar/SPY.XNAS-1-DAY-LAST-EXTERNAL`，对应 equity 在同一 catalog 的 `data/equity/SPY.XNAS`，两者均不在日常快照内。确认旧 catalog 已无写入方后，先将日线和 equity 复制到独立持久目录，再对副本迁移。原件保留并保持只读。[单独备份说明](backup.md#非活动旧-spy-catalog-的单独备份)
+本机 `scripts/backup.sh` 的行情与队列备份范围为活动 `FERTILE_DATA_ROOT`（`data-paper`）。旧 SPY 固定 21:00 UTC 日线在非活动 `$FERTILE_ROOT/data/catalog/data/bar/SPY.XNAS-1-DAY-LAST-EXTERNAL`，对应 equity 在同一 catalog 的 `data/equity/SPY.XNAS`，两者均不在日常快照内。确认旧 catalog 已无写入方后，先将日线和 equity 复制到独立持久目录，再对副本迁移。原件保留并保持只读。[单独备份说明](backup.md#非活动旧-spy-catalog-的单独备份)
 
 ```bash
-legacy_catalog=/home/box/fertile/data/catalog
+legacy_catalog="$FERTILE_ROOT/data/catalog"
 legacy_backup_parent="$HOME/fertile-legacy-spy-backups"
 legacy_backup=$(
   mkdir -p -- "$legacy_backup_parent" &&
@@ -228,6 +228,8 @@ fi
 
 ## 启停、诊断与回滚
 
+`status`、`logs` 和 `restart` 按当前持久根选择已安装且可连接的 systemd 管理器，其他实例沿用 supervisord。下面的停机、恢复和回滚步骤用于云盒子。
+
 ```sh
 scripts/fertile status --json
 scripts/fertile logs finance-api
@@ -247,7 +249,7 @@ scripts/fertile rollback <previous-fertile-commit>
 1. 暂停接单，等运行中的作业结束，记录新版和升级前快照。载入工具环境，确认当前数据根、库名和 PostgreSQL 端口。先把旧快照保存在自动轮转目录外，避免保全新版时触发清理。以下各段在同一个 Bash 会话逐段执行，每条命令成功后再继续。
 
    ```bash
-   source /home/box/fertile/env.sh
+   source "${FERTILE_ROOT:?先设置实例的持久根}/env.sh"
    new_sha=$(basename -- "$(readlink -f -- "$FERTILE_ROOT/current")")
    new_data=$(scripts/fertile data-root)
    new_db=web  # 现场若配置了 FERTILE_WEB_DATABASE，填对应库名
@@ -318,7 +320,7 @@ scripts/fertile rollback <previous-fertile-commit>
 
 ## 管理令牌
 
-web 使用持久目录 secrets/web.env 中唯一的 WEB_ADMIN_TOKEN 赋值，文件权限为 0600。已有令牌由管理员管理；新盒子可用下面的命令在本地生成首次令牌，遇到已有文件会直接退出。令牌用于经 web 提交回测，前端和公开只读查询均无需持有它。
+web 使用 `$FERTILE_ROOT/secrets/web.env` 中唯一的 `WEB_ADMIN_TOKEN` 赋值，文件须由运行账户持有且权限为 0600。已有令牌由管理员管理。新实例可用下面的命令生成首次令牌，遇到已有文件会退出。提交回测等写操作需要 `Authorization: Bearer <token>`，只读看板和公开查询无需令牌。
 
 ~~~sh
 umask 077
@@ -386,7 +388,7 @@ python3 tests/chaos/services.py reboot
 在本机上述测试通过后，保留 healthwatch 的持续采样，尽量覆盖一个美股正常交易时段。先核实采样显示的发布提交、数据源和公网探针的跳过状态。将起点设为一条真实样本的 UTC 时间，等待至少一天，最后一条样本必须覆盖所选终点。
 
 ~~~sh
-root=/home/box/fertile
+root=${FERTILE_ROOT:?先设置实例的持久根}
 start=$(tail -1 "$root/logs/healthwatch/samples.jsonl" | python3 -c 'import json,sys; print(json.load(sys.stdin)["timestamp"])')
 printf '%s\n' "$start" > "$root/run/soak-start.utc"
 # 至少 24 小时后，在包含上述起点的同一部署上执行

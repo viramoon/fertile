@@ -9,7 +9,7 @@
 本机只做本地部署复验与压力测试，网络演练默认只发起本机检查。`--paper-only` 也可显式要求本地模式。执行纸面行情断网演练时，确认 Gateway 已登录、会话身份为 DU，官方交易日历处于开盘时段且距收盘足够久。若 SaaS 或代理的长连接周期性中断，另记录断线频率、reconnect/backoff、恢复水位和失败区间。
 
 ~~~sh
-source /home/box/fertile/env.sh
+source "${FERTILE_ROOT:?先设置实例的持久根}/env.sh"
 scripts/ib-check.sh
 scripts/fertile status --json
 tests/e2e-smoke.sh local --paper-only

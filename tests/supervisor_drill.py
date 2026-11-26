@@ -14,9 +14,12 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 SOURCE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SOURCE / "scripts"))
+from runtime_root import resolve_root
+
 CLI = SOURCE / "scripts/fertile"
 USER_AGENT = "fertile-supervisor-drill/" + (SOURCE / "VERSION").read_text(encoding="utf-8").strip()
-ROOT = Path(os.environ.get("FERTILE_ROOT", Path(os.environ.get("FERTILE_BOX_HOME", "/home/box")) / "fertile")).resolve()
+ROOT = resolve_root().resolve()
 SKIPPED = {"disabled", "missing_binary", "needs_credentials"}
 
 

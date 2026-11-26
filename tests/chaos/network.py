@@ -197,7 +197,7 @@ def run(args):
     if args.protocol_fixture:
         # Keep a loopback TLS fixture on loopback even if the calling shell sets a proxy.
         os.environ["no_proxy"] = os.environ["NO_PROXY"] = "127.0.0.1,::1,localhost"
-        e2e_smoke.require_fixture_environment(root, Path(os.environ.get("FERTILE_BOX_HOME", "/home/box")))
+        e2e_smoke.require_fixture_environment(root)
         require(all(skipped.get(n) == "disabled" for n in ("ib-gateway", "xvfb")),
                 "fixture requires disabled real Gateway and display")
     require(all(not active[n].get("ready_url") or active[n]["ready"] == 200 for n in required),

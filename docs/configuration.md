@@ -4,14 +4,15 @@
 
 ## 持久运行配置
 
-Ruler 在运行根 config/runtime.env 中填写每行一个非敏感 KEY=VALUE。主管按允许的变量列表加载；显式传给控制命令的同名变量优先。每次启动、恢复、巡检需要一致的设置，长期配置请保存在文件中。
+在运行根 `config/runtime.env` 中配置每行一个非敏感 `KEY=VALUE`。控制器按允许的变量列表加载。supervisord 模式下，显式传给控制命令的同名变量优先。systemd 服务各自从文件加载运行参数。长期配置保存在文件中，启动、恢复、巡检使用相同的设置。
 
 | 参数 | 生效位置 |
 | --- | --- |
-| FERTILE_BOX_HOME、FERTILE_ROOT | bootstrap 默认使用 /home/box，生成的 env.sh 设置运行根 /home/box/fertile。 |
+| FERTILE_ROOT、FERTILE_BOX_HOME | 先取已导出的 `FERTILE_ROOT`，其次取 `$FERTILE_BOX_HOME/fertile`。两者均未设置时，若已导出 `FERTILE_PROFILE=stable` 则取 `/var/lib/fertile`，否则取 `/home/box/fertile`。bootstrap 生成的 `env.sh` 保存实际路径。选择持久根发生在读取 `runtime.env` 之前。 |
 | FERTILE_MARKET_SOURCE | 默认 ib。测试使用 replay，独立存入 data/replay。生产源与回放源切换需核对 catalog 与队列目录。 |
-| FERTILE_PROFILE、FERTILE_DATA_ROOT | 选择服务配置和持久数据目录。显式挂载必须存在。 |
-| FINANCE_API_PORT、FINANCE_COLLECTOR_PORT、WEB_PORT | 默认在本机监听 8081、8082、8090。8080 由现有网站使用。 |
+| FERTILE_PROFILE、FERTILE_DATA_ROOT | 选择服务配置和持久数据目录。默认 profile 为 `cloudbox`。普通服务器在运行文件中设置 `FERTILE_PROFILE=stable`。显式数据挂载必须存在。 |
+| FINANCE_API_PORT、FINANCE_COLLECTOR_PORT、WEB_PORT | 默认在 `127.0.0.1` 监听 8081、8082、8090。8080 保留给现有网站。 |
+| FERTILE_POSTGRES_PORT | 受管 PostgreSQL 的 Unix socket 端口编号，默认 5432。 |
 | FERTILE_RESEARCH_ROOT | 默认为当前 FERTILE_ROOT 下的 data/research，API、worker、备份共用。可显式设置为该目录本身或其具体子目录，恢复到独立数据根时也可设为 `$FERTILE_DATA_ROOT/research`。使用具体的绝对路径。 |
 | FERTILE_WEB_DATABASE | 受管本机 web 的数据库名称，默认 `web`。可通过控制器命令环境临时选择已恢复的库。使用普通 PostgreSQL 库名，开头为字母或下划线，随后可含字母、数字或下划线，最多 63 字符。 |
 | FINANCE_COLLECTOR_CONFIG、IB_GATEWAY_ADDRESS | 指向当前行情源的配置和本机 paper 接口 127.0.0.1:4002。 |
@@ -19,7 +20,7 @@ Ruler 在运行根 config/runtime.env 中填写每行一个非敏感 KEY=VALUE�
 | FERTILE_PUBLIC_ORIGIN | 运维显式启用公网巡检的 HTTPS origin，如 `https://<your-origin>`。非空环境变量优先于覆盖文件。 |
 | FERTILE_BACKUP_DAYS、FERTILE_BACKUP_WEEKS、FERTILE_BACKUP_REMOTE | 本地保留周期与可选 rclone remote 名。详细设置见 [备份](../ops/backup.md)。 |
 
-主管为 web 注入同一 release 的 WEB_STATIC_ROOT、finance HTTP 地址和 PostgreSQL socket。本机 web 使用独立的 fertile_web PostgreSQL 登录角色，通过 Unix socket peer 映射认证。运行时角色仅在其私有迁移 schema、app 和 blog 内具有相应权限，首次 SQLx 迁移的数据库 CREATE 权限由主管临时授予并收回。管理员备份继续使用原 peer 身份。外部 DATABASE_URL 放在 web-database.env，使用外部连接时保留 `FERTILE_WEB_DATABASE` 默认值。迁移、权限和停库恢复按 [Ruler 手册](../ops/ruler-runbook.md) 操作。
+控制器为 web 注入同一 release 的 WEB_STATIC_ROOT、finance HTTP 地址和 PostgreSQL socket。本机 web 使用独立的 fertile_web PostgreSQL 登录角色，通过 Unix socket peer 映射认证。运行时角色仅在其私有迁移 schema、app 和 blog 内具有相应权限，首次 SQLx 迁移的数据库 CREATE 权限由控制器临时授予并收回。管理员备份继续使用原 peer 身份。外部 DATABASE_URL 放在 `secrets/web-database.env`，使用外部连接时保留 `FERTILE_WEB_DATABASE` 默认值。实例日常操作见 [普通服务器部署指南](../deploy/linux-server.md) 与 [Ruler 手册](../ops/ruler-runbook.md)。
 
 本机只做本地压力测试和部署复验。保持 `FERTILE_PUBLIC_ORIGIN` 未设置，巡检覆盖文件中的 `public_origin` 省略或设为 `null`。公网采样记录为跳过，部署冒烟使用 `tests/e2e-smoke.sh local --paper-only`。未来的生产服务器由运维配置自己的 HTTPS origin。公网冒烟还需在 `tests/e2e-smoke.sh public` 后显式传入该 origin。[巡检与告警](../ops/monitoring.md)
 
@@ -33,9 +34,9 @@ Ruler 在运行根 config/runtime.env 中填写每行一个非敏感 KEY=VALUE�
 
 | 文件 | 使用者与内容 |
 | --- | --- |
-| secrets/web.env | 仅 web 管理接口和授权的运维冒烟读取。文件中只有 WEB_ADMIN_TOKEN。 |
+| secrets/web.env | 可选。文件中只有 `WEB_ADMIN_TOKEN`。只读看板可匿名访问，提交回测等写操作需要 `Authorization: Bearer <token>`。 |
 | secrets/web-database.env | 可选，web 专用的 DATABASE_URL。 |
-| /home/box/fertile/secrets/ibkr-paper.env | 仅 Gateway 的 IBC 包装器读取 IBKR_USERNAME、IBKR_PASSWORD。健康检查只输出服务器时间和 DU 账户前缀。 |
+| secrets/ibkr-paper.env | 路径相对于 `$FERTILE_ROOT`。仅 Gateway 的 IBC 包装器读取 IBKR_USERNAME、IBKR_PASSWORD。健康检查只输出服务器时间和 DU 账户前缀。 |
 | secrets/alerts.env | 可选 ALERT_WEBHOOK_URL。默认告警写本机 JSONL。 |
 | 共享网站与隧道 | Maas · Ruler 管理现有网站、隧道、DNS 和凭据。fertile 只提供 127.0.0.1:8090 的源站。 |
 

@@ -1,10 +1,10 @@
 # fertile 发版与集成规则
 
-只有 fertile 对外带版本。总仓库 gitlink、同一次构建的静态文件和两个后端产物共同决定一次部署。发布部署与回滚由 Maas · Ruler 按已验证的 fertile tag 操作。当前 ha-runthrough 使用明确提交联调，版本维持 0.0.0。
+只有 fertile 对外带版本。总仓库 gitlink、同一次构建的静态文件和两个后端产物共同决定一次部署。发布部署与回滚由 Maas · Ruler 按已验证的 fertile tag 操作。集成联调使用明确提交，当前版本维持 0.0.0。
 
 ## 验证固定提交
 
-先将子仓库提交合并到各自的远端 main，再更新总仓的三个 gitlink。fertile 的 ha-runthrough 分支与主线均按子仓库 main 验证锁定提交。
+先将子仓库提交合并到各自的远端 main，再更新总仓的三个 gitlink。fertile 按子仓库 main 验证锁定提交。
 
 ~~~sh
 git submodule update --init --recursive

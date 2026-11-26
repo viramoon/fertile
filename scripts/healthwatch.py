@@ -21,6 +21,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 import yaml
 
 from http_origin import parse_https_origin
+from runtime_root import resolve_root
 
 SCRIPTS = Path(__file__).resolve().parent
 USER_AGENT = "fertile-healthwatch/" + (SCRIPTS.parent / "VERSION").read_text(encoding="utf-8").strip()
@@ -383,7 +384,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true", help="sample and record once; skip scheduled backup")
     args = parser.parse_args()
-    root = Path(os.environ.get("FERTILE_ROOT", "/home/box/fertile"))
+    root = resolve_root()
     if not root.is_absolute() or not root.is_dir():
         parser.error("FERTILE_ROOT must be an existing absolute directory")
     run(root, settings(root), args.once)

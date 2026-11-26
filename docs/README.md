@@ -9,7 +9,7 @@
 
 原始需求与历史讨论留在 issue，PR 说明实现过程，文档只保留当前结论；仓库之外不维护第二份文档。文档统一用中文。目录中的 README 说明职责与边界，不代表该模块已经实现。
 
-`TBD` 必须紧跟待确认事项、确认依据或负责阶段，不能用空文件代替说明。deploy/service.yaml 和 deploy/services.yaml 给出运行清单；按 Ruler 手册和各服务 RUNBOOK 部署。
+`TBD` 必须紧跟待确认事项、确认依据或负责阶段，不能用空文件代替说明。deploy/service.yaml 和 deploy/services.yaml 给出运行清单。普通服务器按部署指南操作，云盒子按 Ruler 手册和各服务 RUNBOOK 部署。
 
 ## 系统共同约定
 
@@ -27,7 +27,7 @@ fertile 以 git submodule 引入 finance、web、frontend；agent 是独立仓�
 - **部署**：服务部署以 [fertile deploy/](https://github.com/viramoon/fertile/tree/main/deploy) 为唯一准绳。agent 的 deploy-map.yaml 只管 skill / prompt / 工作流分发，涉及服务只引用 fertile。
 - **契约**：finance、web 的 OpenAPI 从代码导出（Rust 侧用 utoipa），快照存放于 [fertile contracts/](https://github.com/viramoon/fertile/tree/main/contracts)，CI 比对差异；不手写契约，不手改生成客户端。web ↔ finance 走 HTTP，frontend 只调用 web。实际导出和再生检查使用 scripts/contract-diff.sh。
 - **配置**：部署环境使用 `config/base.yaml` + `config/cloudbox.yaml` 或 `config/stable.yaml`，profile 与运行模式是两个独立维度。finance 的运行模式为 Backtest / Sandbox / Live；paper 与实盘是 Live 下不同账户配置。本阶段云电脑只用 IBKR paper；未来迁移专用机器的实盘需另行验证。
-- **路径与恢复**：按只有 `/home/box` 持久处理。所有运行时路径从配置读取，默认根目录位于 `/home/box` 下，不硬编码 `/srv`、`/etc`。系统级改动纳入可重复执行的初始化设计。环境约束见 [fertile ADR-001](https://github.com/viramoon/fertile/blob/main/docs/adr/ADR-001-cloud-box-network-constraints.md)。
+- **路径与恢复**：云盒子只有 `/home/box` 按持久处理。普通服务器 `stable` 默认使用 `/var/lib/fertile`。两种模式均可覆盖持久根，工具和服务状态从该根解析。云盒子环境约束见 [ADR-001](adr/ADR-001-cloud-box-network-constraints.md)。
 - **健康**：finance、web 提供 `/healthz`，区分 `live`（进程存活）与 `ready`（关键依赖可用且数据新鲜）。web/frontend 故障不影响 finance 交易核心，finance 不依赖 Cloudflare Tunnel。
 
 ## 本仓库文档索引
@@ -38,6 +38,7 @@ fertile 以 git submodule 引入 finance、web、frontend；agent 是独立仓�
 - [环境与网络约束](adr/ADR-001-cloud-box-network-constraints.md)
 - [唯一服务部署来源](../deploy/README.md)
 - [聚合服务清单](../deploy/service.yaml)
+- [普通服务器部署](../deploy/linux-server.md)
 - [重启重建](../deploy/bootstrap.md)
 - [运维索引](../ops/README.md)
 - [代码导出快照](../contracts/README.md)
