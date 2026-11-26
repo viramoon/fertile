@@ -26,6 +26,8 @@ except ModuleNotFoundError as error:
     sys.exit("healthwatch: PyYAML is missing. Use scripts/healthwatch with the control Python "
              "from scripts/setup-supervisor.sh, or ask an administrator to install python3-yaml on Debian/Ubuntu.")
 
+from backup import backup_settings
+from backup_remote import point_time, read_state, status_fields
 from http_origin import parse_https_origin
 from runtime_root import resolve_root
 
@@ -200,6 +202,7 @@ class Backup:
         self.last_attempt = root / "run/healthwatch-backup-attempt"
         self.child = None
         self.exit_status = None
+        self.remote = RemoteBackup(root)
 
     def schedule(self, conf, instant, latest, once):
         at = conf["backup_at_utc"]
@@ -222,6 +225,64 @@ class Backup:
             return result("ok", "backup started")
         return result("failed", "backup produced no completed snapshot; awaiting retry" if self.exit_status in (None, 0)
                       else "backup exited " + str(self.exit_status))
+
+
+class RemoteBackup:
+    def __init__(self, root):
+        self.root = root
+        self.children = {}
+
+    def schedule(self, kind, instant, due, latest):
+        child = self.children.get(kind)
+        exit_status = None
+        if child is not None:
+            exit_status = child.poll()
+            if exit_status is None:
+                return result("ok", "encrypted backup running")
+            del self.children[kind]
+        completed = point_time(latest) if latest else None
+        if instant < due or completed and due <= completed <= instant:
+            return result("ok", "encrypted backup scheduled")
+        path = self.root / f"run/healthwatch-remote-{kind}-attempt"
+        previous = float(path.read_text()) if path.exists() else 0
+        if instant.timestamp() - previous < COOLDOWN and (completed is None or completed.timestamp() < previous):
+            detail = "encrypted backup awaiting retry" if exit_status in (None, 0) else f"encrypted backup exited {exit_status}"
+            return result("failed", detail)
+        atomic_text(path, str(instant.timestamp()))
+        with (self.root / "logs/healthwatch/backup.log").open("ab") as log:
+            self.children[kind] = subprocess.Popen(
+                [sys.executable, SCRIPTS / "backup_remote.py", kind], stdin=subprocess.DEVNULL,
+                stdout=log, stderr=subprocess.STDOUT, env={**os.environ, "FERTILE_ROOT": str(self.root)},
+            )
+        return result("ok", "encrypted backup started")
+
+    def observe(self, conf, instant, once):
+        kinds = ("full", "hourly")
+        checks = {}
+        try:
+            name = backup_settings(self.root).get("FERTILE_BACKUP_REMOTE")
+            if name:
+                state = read_state(self.root, name)
+                fields = status_fields(state, instant)
+                checks["backup:remote_age"] = measured(not fields["alert"], "encrypted recovery point", **fields)
+            else:
+                checks["backup:remote_age"] = result("skipped", "encrypted backup disabled")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            checks["backup:remote_age"] = result("failed", "encrypted backup status unavailable")
+            return checks
+        at = conf["backup_at_utc"]
+        for kind in kinds:
+            key = f"backup:remote_{kind}"
+            if not name or once or at is None:
+                checks[key] = result("skipped", "one-shot sampler" if once else "encrypted backup scheduling disabled")
+                continue
+            due = (datetime.combine(instant.date(), clock.fromisoformat(at), UTC) if kind == "full"
+                   else instant.replace(minute=0, second=0, microsecond=0))
+            try:
+                checks[key] = self.schedule(kind, instant, due, state.get(kind))
+            except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+                checks[key] = result("failed", "encrypted backup scheduler error")
+        return checks
 
 
 class Alerts:
@@ -348,6 +409,7 @@ def observe(root, conf, backup, delivery, once):
     except (OSError, ValueError) as exc:
         checks.setdefault("backup:age", result("failed", "snapshot directory unavailable"))
         checks["backup:schedule"] = result("failed", "backup scheduler error: " + type(exc).__name__)
+    checks.update(backup.remote.observe(conf, instant, once))
     checks["webhook:delivery"] = delivery.result
     checks["healthwatch:runtime"] = result("ok", "sample recorded")
     return checks

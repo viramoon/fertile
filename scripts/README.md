@@ -17,6 +17,10 @@
 | scripts/fertile rollback SHA | 校验既有版本并切换，重新加载受影响服务。 |
 | scripts/fertile rollback --switch-only SHA | supervisor 已停时，校验既有版本并切换 `current`，由后续 `ensure-up` 启动。 |
 | scripts/backup.sh | 将活动库、队列、catalog 和公开配置备份到持久目录。 |
+| python3 scripts/backup_remote.py full / hourly | 通过 `rclone crypt` 发布独立日全量或基于已验证父点的小时增量。 |
+| python3 scripts/backup_remote.py status [--cached] | 输出最后可恢复到的时间、点 ID、年龄及告警状态。`--cached` 使用本机上次观测。 |
+| python3 scripts/backup_remote.py restore POINT | `POINT` 使用确切点 ID 或 `latest`。`--snapshot-to PATH` 重建独立快照。`--target-data-root PATH --target-database NAME` 执行正式隔离恢复。 |
+| python3 scripts/backup_remote.py prune | 在有近期成功恢复凭据时按日、周和父链规则清理远端。详见 [异地备份](../ops/backup.md#私人-google-drive-加密备份)。 |
 | scripts/restore.sh SNAPSHOT --target-data-root PATH --target-database NAME | 校验快照并恢复到显式目标。`--dry-run` 只读校验，在指定目标时也检查占用。`--overwrite` 在正式恢复时允许覆盖，在 dry-run 时警告非空目标的处理方式。`--target-research-root` 单独指定研究 catalog。参见 [备份操作](../ops/backup.md)。 |
 | scripts/check-submodules.sh [--ref BRANCH] | 检查三个 gitlink、干净的递归工作树、远端分支上已推送的提交，默认 main。 |
 | scripts/contract-diff.sh | 从两个生产者代码导出 OpenAPI，并重跑两端客户端生成检查。 |

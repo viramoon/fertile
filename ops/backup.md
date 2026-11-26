@@ -10,6 +10,76 @@
 - 保存持久目录 `$FERTILE_ROOT/config/` 中的非机密配置。部署代码、锁定依赖和默认配置由 release/gitlink 提供。密钥须放在 `$FERTILE_ROOT/secrets/` 或对应的密钥目录。这些目录、Cloudflare 凭据、Gateway 登录状态均在备份范围之外。配置中的私有密钥文件名和额外的 `.env` 被排除，唯一公开环境配置是 `config/runtime.env`。该文件及普通 YAML 不应包含密钥。
 - PG 的逻辑快照与 finance 的快照各自一致，对账时应保留原作业 ID 和幂等键。快照没有跨两个存储的共同事务时点。仅保留本机备份时，整机或整块持久盘丢失就无法恢复。
 
+## 私人 Google Drive 加密备份
+
+异地备份默认关闭。启用后，日全量默认于 UTC 03:00 创建，每份全量可独立恢复。小时增量以已验证的恢复点为父点，记录增删与变更。PG 与 SQLite 继续使用本机快照的逻辑导出与在线备份方式。每个存储的快照截点独立，恢复后应按作业、策略版本、事件位置与幂等键对账。
+
+上传和读取校验均经 `rclone crypt`。加密覆盖内容、文件名、目录名和清单。工具核对文件集合、长度和 SHA256，在数据对象通过校验后发布恢复点清单。上传失败不会发布新恢复点。保留策略默认选择最近 7 个 UTC 日点、4 个 ISO 周点及这些恢复点所依赖的备份。外部生命周期规则请勿直接作用于该专用备份目录。
+
+### 首次启用
+
+由 vira 选择私人 Drive 账户，确认共享配额中可供备份使用的容量，并选择离线恢复密钥保管方式。容量估算应包含每日完整集、小时增量、短期失败重试和保留窗口。按实际快照大小和带宽测量首次全量所需时间。仅将获准用于私人加密备份的数据纳入异地备份。启用前核对传统采集 catalog、研究 catalog 和持久业务状态的配置路径及对应许可。
+
+真实 OAuth 和 `crypt` 密码及独立盐只在部署机的 `$FERTILE_ROOT/secrets/backup-rclone.conf` 中配置。秘密目录由运行账户持有，权限为 `0700`，配置文件为同一账户持有的 `0600` 普通文件。非机密备份选项放 `$FERTILE_ROOT/config/backup.conf`。在本机 rclone 配置中创建命名的私人 `drive` 后端，将 `root_folder_id` 指向专用备份目录，再创建包装该后端的 `crypt` 目标。该根只存放同一套 `crypt` 配置写入的内容，避免其他文件或其他密钥写入的目录导致解密目录名时失败。备份目录下使用 `filename_encryption = standard`、`directory_name_encryption = true` 和默认的内容加密，配置 `password` 和独立的 `password2`。配置文件内 rclone 混淆后的密码和盐仍按明文密钥保管。
+
+把离线副本与部署盘分开保管。恢复材料包括 `crypt` 密码、盐、文件名加密参数、Drive 账户及专用目录的定位信息，以及在新主机重新取得该 Drive 读权限的方法。在隔离空目录验证可用后记录演练日期与结果。更换密码或盐时，为新配置分配独立的 Drive 目录和命名目标，保有旧密钥及其对应恢复点，直至在新目标上验证独立全量。更换 OAuth 或底层目录后，先执行实时 `status` 刷新本机观测再恢复调度。缓存按命名目标区分，沿用相同目标名时，底层目录变更前应暂停发布，并移除旧的 `run/backup-remote-status.json` 及 `run/backup-remote-restore.json`。切换完成后重新验证恢复。
+
+### 调度、状态与轮转
+
+首次启用后先手工运行一次 `full`，建立小时增量的起点。一个远端归一个发布实例，使用同一 `FERTILE_ROOT` 协调发布和轮转。supervisord 实例通过 healthwatch 调度。日全量默认在 UTC 03:00，小时增量在整点到期。到期任务可补跑。失败后按 15 分钟间隔重试。全量与小时任务可分别上传，各自的恢复点按截点发布。普通服务器按需为两个命令编排独立的 systemd timer，分别使用 `OnCalendar=*-*-* 03:00:00 UTC` 和 `OnCalendar=*-*-* *:00:00 UTC`，设 `Persistent=true`。对应的 oneshot 服务以实例运行账户执行，显式指定同一 `FERTILE_ROOT` 和发布目录，并为任务提供 PG 客户端路径。每台实例使用一种调度方式。
+
+```bash
+python3 scripts/backup_remote.py full
+python3 scripts/backup_remote.py hourly
+python3 scripts/backup_remote.py status
+python3 scripts/backup_remote.py status --cached
+```
+
+`status` 实时读取远端候选恢复链的清单和数据对象，解密后核对长度和 SHA256。候选链损坏时报告更早的已验证恢复点，若无完整链则返回空水位。每次小时备份也会核验选用的父链，再上传本次新增或变更的对象。状态和父链校验以流式读取计算对象摘要。估算小时窗口时应计入完整候选链的读取带宽，上传读回和正式恢复另需暂存空间。
+
+`status --cached` 和 healthwatch 从 `run/backup-remote-status.json` 读取最近观测，采样无需远端请求。小时任务确认已有点从远端消失或无法通过完整性检查后会更新缓存，即使该次任务未能发布新点。没有有效全量时，缓存中的全量时间为空，日全量按调度规则补跑。远端访问故障导致实时检查无法确认状态时，保留最近已知观测并标记降级，供排障使用。
+
+`last_recoverable_at` 为最后可恢复到的 UTC 时间，`last_recoverable_point` 为可传给恢复命令的点 ID。`age_seconds` 是距该时间的秒数。没有合格点、时间在未来、点龄超过 3600 秒或出现降级时，`alert` 为真。`degraded` 表示远端观测或恢复链出现故障。`last_full_at`、`last_hourly_at` 分别是可用于调度判断的日全量与小时点时间。时间为 UTC，时间和年龄缺值时为 `null`。恢复点时间用于衡量整盘丢失时的恢复进度，行情源自身的缺口和恢复耗时分别记录。
+
+日点和周点均从独立全量中选择。保留最近 7 个有全量的 UTC 日期及其小时链、最近 4 个有全量的 ISO 周各自最新的全量、最新可恢复点的父链和演练凭据所引用的父链。执行 `python3 scripts/backup_remote.py prune` 显式轮转。日全量在满足轮转条件时也尝试轮转。两种方式均要求最近 7 天内成功完成一次实际隔离恢复。每次轮转先核对远端清单、父链与对象清册，再流式解密并校验所有保留点及其依赖对象的当前 SHA256。所有校验通过后才开始删除。估算轮转窗口时应计入读取这些数据的带宽和独占锁持有时间。Drive 默认删除到回收站，空间不足时先检查共享配额、回收站和备份规模。将容量调整交给运维。
+
+上传故障后重试会使用新恢复点。无提交清单的对象不会成为恢复点。通过轮转检查后，工具清理超过七天的此类对象。检查发现远端清册异常、保留链对象损坏或读取故障时，本次轮转在删除前终止，保留旧恢复点和未提交对象供排查。本机通常会在命令退出时清理 `$FERTILE_ROOT/backups/.remote-*` 暂存，强制终止后可能留下残余。确认无备份或恢复进程使用对应暂存目录，再按现场空间需求处理。
+
+### 远端文件与 F3 接口
+
+解密视图中，`commits/<点 ID>.json` 是已提交的恢复点清单。点 ID 为开始采集的 UTC 时间，格式 `YYYYMMDDTHHMMSS.ffffffZ`。清单 v1 的 `format` 为整数 `1`，`id` 为点 ID，`kind` 为 `full` 或 `hourly`。`parent` 是 `null` 或包含父点 `id` 和清单 `sha256` 的对象。`snapshot` 包含本机 `snapshot.json` 的元数据，`snapshot.captured_at` 以相同的时间格式记录已采集的 `postgres`、`finance-state`、`catalog`、`config`、`research` 各自完成时刻。`files` 按相对路径映射为 `{ "sha256": "…", "bytes": 整数 }`，`deleted` 是移除的相对路径数组。`objects/<点 ID>/<SHA256>` 保存本点新写入的不可变对象。小时点继承父点的未变对象，全量的对象都可在本点取得。恢复端按父链核对对象名称、大小、摘要和重建的本机快照。远端清单与本机状态 JSON 为 CLI/文件接口。 [命令索引](../scripts/README.md)
+
+F3 接口使用 `finance-market-wal --data-root <FERTILE_DATA_ROOT>` 的 `products` 与 `manifest`，并消费封段清单 v1 和清单枚举的文件。该接口必须返回获准用于私人 Drive 备份的已封段前缀。活动段、内部 checkpoint、锁和可重建的 market projection 不进入异地包。配置了 F3 的实例需提供 `FERTILE_BACKUP_WAL_BIN`。默认检查 CLI 枚举的全部产品，其中任一产品缺少许可即停止发布。许可混合时，用 `FERTILE_BACKUP_WAL_PRODUCTS` 以逗号分隔列出获准备份的准确 `source/product` 对。所选产品不存在或缺少 `ProductPolicy` 许可时停止发布。
+
+生产者活跃时先由其 `seal_for_backup()` 发布封段。备份 CLI 此时读取可见的已封段前缀。写者已停时，可向 `full` 或 `hourly` 传 `--seal-wal` 让 CLI 封段。快照内 `wal/manifests/<source>/<product>.json` 保留 F3 清单，`wal/segments/` 内依清单相对路径保存段文件。`snapshot.wal` 按源、产品记录十进制字符串 `sealed_through`。正式恢复核对这些截点，通过 F3 的 `restore --manifest PATH` 在暂存根激活 WAL。核对业务前在隔离根重放投影。 [F3 WAL 接口](https://github.com/viramoon/finance/pull/47)
+
+### 从远端恢复到指定水位
+
+在独立的运行根准备工具、PG 实例和密钥配置，为业务恢复选择快照记录的行情源。密钥丢失时从离线保管处取回命名加密配置所需信息。用 `status` 查最新可恢复点的 ID，或从既有运行记录查历史点 ID。显式指定点 ID 时只读取该点及其父链，独立日全量可在其他清单损坏时恢复。使用 `latest` 时，工具由新到旧验证候选链，较新的清单或对象损坏时回退到仍可验证的点。验证通过后才写入恢复目标。以下第一步只重建普通快照，路径必须为尚不存在的具体绝对目录。
+
+```bash
+python3 scripts/backup_remote.py restore "$point" --snapshot-to "$snapshot_dir"
+scripts/restore.sh "$snapshot_dir" --dry-run
+python3 scripts/backup_remote.py restore "$point" \
+  --target-data-root "$empty_data_root" --target-database "$empty_db"
+```
+
+正式恢复选择已停止写入的独立空数据根和目标库。成功后在 `run/backup-remote-restore.json` 写入用于轮转的演练凭据。已安装 release 的快照通过 `snapshot.release` 记录 fertile 与三个子仓提交，可据此选择对应的 F2 策略注册表版本。核对 PG 业务表、outbox 去重键、策略版本、SQLite 作业与幂等键、Parquet 清单、各产品封段截点和已知行情缺口。记录恢复点时刻、独立恢复耗时和业务核对结果。链中断时检查密钥与对象完整性，选择较早的完整链或一个独立全量。保留损坏现场供追查。
+
+### 隔离演练
+
+演练使 rclone `crypt` 包住一次性 `/tmp` 的 `local` 后端，现场生成测试密钥和盐。用例覆盖加密链恢复、上传失败、断链、缺失密钥和容量不足，以及无关清单损坏、等长对象篡改与全量丢失后的水位。检查底层 local 目录中的名称和原始字节，确认备份文件名、清单和合成数据均已加密。使用合成或回放数据，沿用 IBKR paper 只读边界。
+
+```bash
+export FERTILE_TEST_RCLONE=/absolute/path/to/rclone
+python3 -B tests/backup_crypt_test.py
+python3 -B tests/backup_remote_test.py
+python3 -B tests/backup_wal.py
+python3 -B tests/backup_schedule.py
+```
+
+将 PostgreSQL 17 的服务端和客户端工具加入 `PATH` 并设 `FERTILE_TEST_POSTGRES=1`，可在 `backup_remote_test.py` 中一并演练独立 Unix socket 上的空库恢复。`FERTILE_BACKUP_TEST_WAL` 可选择指定本地 F3 CLI 的绝对路径，用合成封段验证真实 CLI 的恢复和再读取。`backup_schedule.py` 使用控制端的 PyYAML，模拟时钟和子进程检查日、小时调度及告警。
+
 ## 非活动旧 SPY catalog 的单独备份
 
 日常 `scripts/backup.sh` 的行情与队列备份以当前活动 `FERTILE_DATA_ROOT` 为准。本机活动根是 `data-paper`，因此日常快照不包含非活动 catalog 下 `$FERTILE_ROOT/data/catalog/data/bar/SPY.XNAS-1-DAY-LAST-EXTERNAL` 的固定 21:00 UTC 日线及同一 catalog 下的 `data/equity/SPY.XNAS`。
@@ -42,9 +112,22 @@ legacy_backup=$(
 | `FERTILE_BACKUP_DAYS` | 7 | 最近几个有备份的 UTC 日期各保留当日最新一份，最小 1 |
 | `FERTILE_BACKUP_WEEKS` | 4 | 最近几个有备份的 ISO 周各保留当周最新一份，可设 0 |
 | `FERTILE_BACKUP_CATALOG` | `$FERTILE_DATA_ROOT/catalog` | 自定义 collector catalog 时指向实际已挂载的绝对路径 |
-| `FERTILE_BACKUP_REMOTE` | 空 | 可选的已命名 rclone remote，例如 `archive:fertile`；启用时先在盒子外配置好 rclone 的认证与加密 |
+| `FERTILE_BACKUP_REMOTE` | 空 | 启用异地备份时填已命名的 `crypt` 目标，例如 `archive:fertile`。 |
+| `FERTILE_BACKUP_RCLONE` | `/usr/bin/rclone` | rclone v1.76.0 可执行文件的绝对路径。 |
+| `FERTILE_BACKUP_WAL_BIN` | 空 | F3 实例填写 `finance-market-wal` 可执行文件的绝对路径。检测到 F3 数据时需要该配置。 |
+| `FERTILE_BACKUP_WAL_PRODUCTS` | 未设置 | 可选，逗号分隔的 `source/product` 精确列表。省略时要求 F3 枚举的所有产品均获准备份。 |
 
-保留集合取日备份与周备份的并集。按周或按日重复命中的同一快照只占一份。清理仅针对本机已有完整快照；对象存储保留策略由其生命周期规则负责。启用远端复制时，命令在本机发布后执行 `rclone copy`。远端失败会返回非零，本机已完成的快照仍可恢复。
+本机保留集合取日备份与周备份的并集。按周或按日重复命中的同一快照只占一份。本机 `scripts/backup.sh` 发布和轮转本机快照，远端发布由 `scripts/backup_remote.py` 执行。旧配置若曾设 `FERTILE_BACKUP_REMOTE`，启用前先迁移到已命名的 `crypt` 目标和专用本机配置文件。旧远端快照可通过原有归档途径恢复，新链由新日全量起步。
+
+部署前可在 `config/backup.conf` 保留以下占位，待账户、权限和离线保管条件确认后再填写 `crypt` 目标。
+
+```dotenv
+FERTILE_BACKUP_REMOTE=
+FERTILE_BACKUP_RCLONE=/usr/bin/rclone
+# 启用时将 FERTILE_BACKUP_REMOTE 填为命名目标，例如 archive:fertile。
+# 接入 F3 时再设置 FERTILE_BACKUP_WAL_BIN 的绝对路径。
+# 混合许可实例为 FERTILE_BACKUP_WAL_PRODUCTS 填写获准的 source/product。
+```
 
 ## 恢复步骤
 

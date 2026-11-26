@@ -22,6 +22,10 @@ STAMP = "%Y%m%dT%H%M%S.%fZ"
 BASE_TREES = {"finance-state", "config", "catalog"}
 ALLOWED_TREES = {*BASE_TREES, "research"}
 SIDECARS = ("-wal", "-shm", "-journal")
+BACKUP_SETTINGS = {"FERTILE_BACKUP_CATALOG", "FERTILE_BACKUP_DAYS", "FERTILE_BACKUP_WEEKS",
+                   "FERTILE_BACKUP_REMOTE", "FERTILE_BACKUP_RCLONE", "FERTILE_BACKUP_WAL_BIN",
+                   "FERTILE_BACKUP_WAL_PRODUCTS"}
+F3_TREES = {"finance-state": {"market-wal", "market-projection"}, "catalog": {"market-events"}}
 
 
 def utc_stamp():
@@ -81,18 +85,22 @@ def runtime_settings(path):
     return settings
 
 
+def backup_settings(root):
+    settings = runtime_settings(root / "config/backup.conf")
+    require(settings.keys() <= BACKUP_SETTINGS, "unknown config/backup.conf key")
+    return {**settings, **{key: os.environ[key] for key in BACKUP_SETTINGS if key in os.environ}}
+
+
 class Box:
-    def __init__(self, interrupted=None, *, restoring=False):
+    def __init__(self, interrupted=None, *, restoring=False, quiet=False):
         self.root = resolve_root().resolve(strict=True)
         self.config = self.root / "config"
-        overrides = runtime_settings(self.config / "backup.conf")
-        allowed = {"FERTILE_BACKUP_CATALOG", "FERTILE_BACKUP_DAYS", "FERTILE_BACKUP_WEEKS",
-                   "FERTILE_BACKUP_REMOTE"}
-        require(overrides.keys() <= allowed, "unknown config/backup.conf key")
+        overrides = backup_settings(self.root)
         settings = {**runtime_settings(self.config / "runtime.env"), **overrides, **os.environ}
         if interrupted:
             settings.update(interrupted["location"])
         self.fds = []
+        self.quiet = quiet
         self.source = settings.get("FERTILE_MARKET_SOURCE", "ib")
         require(self.source in {"ib", "replay"}, "invalid FERTILE_MARKET_SOURCE")
         default = self.root / ("data/replay" if self.source == "replay" else "data")
@@ -122,11 +130,14 @@ class Box:
         self.days = int(settings.get("FERTILE_BACKUP_DAYS", 7))
         self.weeks = int(settings.get("FERTILE_BACKUP_WEEKS", 4))
         require(self.days >= 1 and self.weeks >= 0, "retention requires days>=1 and weeks>=0")
-        self.remote = settings.get("FERTILE_BACKUP_REMOTE", "")
+        self.wal_bin = overrides.get("FERTILE_BACKUP_WAL_BIN")
+        require(not self.wal_bin or Path(self.wal_bin).is_absolute(), "FERTILE_BACKUP_WAL_BIN must be absolute")
+        self.wal_products = overrides.get("FERTILE_BACKUP_WAL_PRODUCTS")
 
     def command(self, *args, input_data=None, text=True):
         output = subprocess.run(args, input=input_data, env=self.pg, check=True,
-                                stdout=subprocess.PIPE, text=text, pass_fds=self.fds).stdout
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL if self.quiet else None,
+                                text=text, pass_fds=self.fds).stdout
         return output.strip() if text else output
 
     def sql(self, sql, database="postgres"):
@@ -174,10 +185,10 @@ def overlaps(path, other):
 
 
 @contextmanager
-def locked(path):
+def locked(path, mode=fcntl.LOCK_EX):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with path.open("a") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+        fcntl.flock(handle, mode)
         yield handle.fileno()
 
 
@@ -193,7 +204,7 @@ def secret_name(name):
             or lower.endswith((".env", ".pem", ".key", ".p12", ".pfx")) and lower != "runtime.env")
 
 
-def payload_files(tree, kind):
+def payload_files(tree, kind, *, remote=False):
     if tree is None or not tree.exists():
         return
     require(tree.is_dir() and not tree.is_symlink(), f"invalid {kind} root")
@@ -202,7 +213,8 @@ def payload_files(tree, kind):
         dirs.sort()
         for name in dirs.copy():
             path = base / name
-            if (secret_name(name) or name.startswith(("run-", ".")) and kind == "finance-state"
+            if (remote and base == tree and name in F3_TREES.get(kind, ())
+                    or secret_name(name) or name.startswith(("run-", ".")) and kind == "finance-state"
                     or path == tree / ".finance-collector/active" and kind == "catalog"
                     or kind == "research" and name.startswith(".")):
                 dirs.remove(name)
@@ -211,7 +223,8 @@ def payload_files(tree, kind):
         for name in sorted(names):
             path = base / name
             rel = path.relative_to(tree)
-            if name.endswith(".lock") or secret_name(name) or name.startswith(".") and kind == "finance-state":
+            if (remote and base == tree and name in F3_TREES.get(kind, ())
+                    or name.endswith(".lock") or secret_name(name) or name.startswith(".") and kind == "finance-state"):
                 continue
             if kind == "catalog" and path.suffix != ".parquet" and rel.as_posix() != ".finance-collector/source.json":
                 continue
@@ -241,9 +254,9 @@ def copy_sqlite(src, dst):
         copy.execute("PRAGMA journal_mode=DELETE").fetchone()
 
 
-def copy_tree_payload(src, dst, kind, previous):
+def copy_tree_payload(src, dst, kind, previous, *, remote=False):
     dst.mkdir()
-    for rel in payload_files(src, kind):
+    for rel in payload_files(src, kind, remote=remote):
         source, target = src / rel, dst / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         if kind == "finance-state" and source.suffix in (".db", ".sqlite", ".sqlite3"):
@@ -281,7 +294,7 @@ def members(snapshot):
             require(path.is_file() and not any(ord(c) < 32 or c == "\\" for c in str(rel)),
                     "unsupported snapshot member")
             if rel.as_posix() != "SHA256SUMS":
-                require(rel.parts[0] in ALLOWED_TREES or str(rel) in {"postgres.dump", "snapshot.json"},
+                require(rel.parts[0] in ALLOWED_TREES | {"wal"} or str(rel) in {"postgres.dump", "snapshot.json"},
                         "unexpected snapshot member")
                 yield rel
 
@@ -291,7 +304,7 @@ def verify(snapshot):
     manifest = snapshot / "SHA256SUMS"
     require(manifest.is_file() and not manifest.is_symlink(), "missing regular SHA256SUMS")
     expected = {}
-    for line in manifest.read_text().splitlines():
+    for line in manifest.read_text().removesuffix("\n").split("\n"):
         hash_, sep, name = line.partition("  ")
         require(bool(sep) and re.fullmatch("[0-9a-f]{64}", hash_) and name not in expected, "invalid SHA256SUMS")
         expected[name] = hash_
@@ -305,6 +318,13 @@ def verify(snapshot):
             and (not (snapshot / "research").exists() or "research" in declared), "snapshot tree mismatch")
     require(type(meta["has_database"]) is bool and meta["has_database"] == (snapshot / "postgres.dump").is_file(),
             "snapshot database dump does not match manifest")
+    wal = snapshot / "wal"
+    require(("wal" in meta) == wal.is_dir(), "snapshot WAL tree mismatch")
+    if "wal" in meta:
+        from backup_wal import validate_wal
+        require(validate_wal(wal) == meta["wal"], "snapshot WAL watermarks do not match manifest")
+        require(not any((snapshot / key / name).exists() for key, names in F3_TREES.items() for name in names),
+                "snapshot mixes sealed WAL and raw F3 trees")
     check_provenance(snapshot)
     return meta
 
@@ -330,37 +350,73 @@ def prune(box, protected):
     sync_dir(box.backups)
 
 
+def deployed_revision(root):
+    current = root / "current"
+    release = current.resolve()
+    if not current.exists():
+        return None
+    path = release / "manifest.json"
+    require(release.parent == root / "releases" and path.is_file() and not path.is_symlink(),
+            "invalid installed release manifest")
+    manifest = json.loads(path.read_bytes())
+    names = ("finance", "web", "frontend")
+    components = {name: manifest["components"][name] for name in names}
+    require(manifest["format"] == 1 and manifest["fertile"] == release.name
+            and all(re.fullmatch("[0-9a-f]{40}", sha) for sha in (release.name, *components.values())),
+            "invalid installed release revisions")
+    return {"fertile": release.name, "components": components}
+
+
+def capture_snapshot(box, stage, previous=None, *, recovery=False, remote=False, seal_wal=False):
+    meta = {}
+    if remote:
+        for kind, names in F3_TREES.items():
+            if any((box.trees[kind] / name).exists() for name in names):
+                require(box.wal_bin, "configure FERTILE_BACKUP_WAL_BIN for F3 data")
+        require(not (seal_wal or box.wal_products is not None) or box.wal_bin,
+                "configure FERTILE_BACKUP_WAL_BIN for WAL options")
+        meta["stamp"] = utc_stamp()
+        meta["captured_at"] = {}
+        if release := deployed_revision(box.root):
+            meta["release"] = release
+        if box.wal_bin:
+            from backup_wal import capture_wal, parse_products_setting
+            meta["wal"] = capture_wal(box.wal_bin, box.data, stage / "wal", seal=seal_wal,
+                                      products=parse_products_setting(box.wal_products))
+    has_db = box.exists(box.db)
+    require(has_db or recovery, "application DB missing")
+    if has_db:
+        box.command("pg_dump", "--format=custom", "--create", "--dbname", box.db, "--file", stage / "postgres.dump")
+    if remote:
+        meta["captured_at"]["postgres"] = utc_stamp()
+    trees = {name: name in box.trees and box.trees[name].is_dir() for name in ALLOWED_TREES}
+    # Copy the atomic checkpoint first. Immutable catalog files enumerated
+    # later can only be newer; the collector recomputes its watermark at open.
+    for name in ("finance-state", "catalog", "config", "research"):
+        copy_tree_payload(box.trees.get(name), stage / name, name, previous, remote=remote)
+        if remote and trees[name]:
+            meta["captured_at"][name] = utc_stamp()
+    check_provenance(stage)
+    meta.update(format=1, stamp=meta.get("stamp") or utc_stamp(), source=box.source, database=box.db,
+                has_database=has_db, trees=trees, purpose="before-restore" if recovery else "scheduled-or-manual")
+    atomic_json(stage / "snapshot.json", meta)
+    with (stage / "SHA256SUMS").open("x") as f:
+        for rel in sorted(members(stage)):
+            f.write(f"{digest(stage / rel)}  {rel}\n")
+    return meta
+
+
 def backup(box, recovery=False):
     box.backups.mkdir(mode=0o700, exist_ok=True)
     previous = next(snapshots(box.backups), None)
     stage = Path(tempfile.mkdtemp(prefix=".incomplete-", dir=box.backups))
     try:
-        has_db = box.exists(box.db)
-        require(has_db or recovery, "application DB missing")
-        if has_db:
-            box.command("pg_dump", "--format=custom", "--create", "--dbname", box.db, "--file", stage / "postgres.dump")
-        trees = {name: name in box.trees and box.trees[name].is_dir() for name in ALLOWED_TREES}
-        # Copy the atomic checkpoint first. Immutable catalog files enumerated
-        # later can only be newer; the collector recomputes its watermark at open.
-        for name in ("finance-state", "catalog", "config", "research"):
-            copy_tree_payload(box.trees.get(name), stage / name, name, previous)
-        check_provenance(stage)
-        stamp = utc_stamp()
-        atomic_json(stage / "snapshot.json", dict(format=1, stamp=stamp, source=box.source, database=box.db,
-                                                  has_database=has_db, trees=trees,
-                                                  purpose="before-restore" if recovery else "scheduled-or-manual"))
-        files = sorted(members(stage))
-        with (stage / "SHA256SUMS").open("x") as f:
-            for rel in files:
-                f.write(f"{digest(stage / rel)}  {rel}\n")
+        meta = capture_snapshot(box, stage, previous, recovery=recovery)
         sync_tree(stage)
-        result = box.backups / stamp
+        result = box.backups / meta["stamp"]
         stage.rename(result)
         sync_dir(box.backups)
         if not recovery:
-            if box.remote:
-                require(re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]*:[^\r\n]*", box.remote), "use a named rclone remote")
-                box.command("rclone", "copy", "--", str(result), box.remote.rstrip("/") + "/" + stamp)
             prune(box, {result})
         return result
     finally:
@@ -387,8 +443,9 @@ def quiescent(box):
     active = box.sql(f"SELECT count(*) FROM pg_stat_activity WHERE datname='{box.db}' AND backend_type='client backend'")
     require(active == "0", "stop database clients before restore")
     # Backup supports concurrent writers; swapping the directories during restore does not.
-    for path in [box.catalog / ".finance-collector/writer.lock",
-                 box.data / "finance-state/collector/writer.lock", box.data / "finance-state/backtests/worker.lock"]:
+    state = box.data / "finance-state"
+    for path in [box.catalog / ".finance-collector/writer.lock", state / "collector/writer.lock",
+                 state / "backtests/worker.lock", *state.glob("market-wal/*/*/writer.lock")]:
         if path.is_file():
             with path.open("rb") as handle:
                 try:
@@ -505,6 +562,9 @@ def check_occupancy(box, meta, overwrite, *, dry_run=False):
 
 
 def restore(box, snapshot, meta, overwrite, targets):
+    if meta.get("wal"):
+        require(box.wal_bin and meta["trees"].get("finance-state"),
+                "configure FERTILE_BACKUP_WAL_BIN to restore the sealed WAL")
     with locked(box.run / "control.lock") as control_fd:
         box.fds.append(control_fd)
         quiescent(box)
@@ -536,6 +596,12 @@ def restore(box, snapshot, meta, overwrite, targets):
                     path = Path(row["path"])
                     stage = path.parent / (".fertile-restore-" + token + "-" + path.name + ".new")
                     shutil.copytree(snapshot / row["key"], stage)
+                    if row["key"] == "finance-state" and meta.get("wal"):
+                        from backup_wal import activate_wal
+                        with tempfile.TemporaryDirectory(dir=stage) as temporary:
+                            data_root = Path(temporary)
+                            activate_wal(box.wal_bin, data_root, snapshot / "wal")
+                            (data_root / "finance-state/market-wal").rename(stage / "market-wal")
                     sync_tree(stage)
             if meta["has_database"]:
                 if plan["had_db"]:
@@ -562,6 +628,25 @@ def restore(box, snapshot, meta, overwrite, targets):
         print(f"Restored: {snapshot.name}. Pre-restore state: {before}")
 
 
+@contextmanager
+def restore_session(root, targets=None, *, quiet=False):
+    journal = root / "run/restore-journal.json"
+    with locked(root / "run/backup.lock") as backup_fd:
+        if journal.exists():
+            require(targets is not None, "interrupted restore must be reconciled first")
+            saved = json.loads(journal.read_bytes())
+            expected = saved.get("targets", [saved["location"]["FERTILE_DATA_ROOT"], saved["db"], None])
+            require([str(path) if path is not None else None for path in targets] == expected,
+                    "interrupted restore must be reconciled using its original explicit targets")
+            interrupted = Box(saved, restoring=True, quiet=quiet)
+            with locked(interrupted.run / "control.lock") as control_fd:
+                interrupted.fds = [backup_fd, control_fd]
+                quiescent(interrupted)
+                rollback_or_finish(interrupted, journal)
+                print("Interrupted restore reconciled.", flush=True)
+        yield backup_fd
+
+
 def main():
     parser = argparse.ArgumentParser()
     actions = parser.add_subparsers(dest="action", required=True)
@@ -586,26 +671,13 @@ def main():
             sub.error("specify both --target-data-root and --target-database")
     os.umask(0o077)
     root = resolve_root().resolve(strict=True)
-    journal = root / "run/restore-journal.json"
     if args.action == "restore" and args.dry_run:
         box = Box(restoring=True)
         meta = verify_restore(box, args.snapshot, targets)
         if targets is not None:
             check_occupancy(box, meta, args.overwrite, dry_run=True)
         return
-    with locked(root / "run/backup.lock") as backup_fd:
-        if journal.exists():
-            require(args.action == "restore", "interrupted restore must be reconciled first")
-            saved = json.loads(journal.read_bytes())
-            expected = saved.get("targets", [saved["location"]["FERTILE_DATA_ROOT"], saved["db"], None])
-            require([str(path) if path is not None else None for path in targets] == expected,
-                    "interrupted restore must be reconciled using its original explicit targets")
-            interrupted = Box(saved, restoring=True)
-            with locked(interrupted.run / "control.lock") as control_fd:
-                interrupted.fds = [backup_fd, control_fd]
-                quiescent(interrupted)
-                rollback_or_finish(interrupted, journal)
-                print("Interrupted restore reconciled.", flush=True)
+    with restore_session(root, targets) as backup_fd:
         box = Box(restoring=args.action == "restore")
         box.fds = [backup_fd]
         if args.action == "backup":

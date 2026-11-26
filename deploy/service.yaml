@@ -111,3 +111,18 @@ backups:
     weekly: 4
   offsite_remote_env: FERTILE_BACKUP_REMOTE
   offsite_default: disabled
+  offsite:
+    full: python3 scripts/backup_remote.py full
+    hourly: python3 scripts/backup_remote.py hourly
+    status: python3 scripts/backup_remote.py status
+    restore: python3 scripts/backup_remote.py restore
+    prune: python3 scripts/backup_remote.py prune
+    settings_file: config/backup.conf
+    rclone_binary_env: FERTILE_BACKUP_RCLONE
+    rclone_config_file: secrets/backup-rclone.conf
+    wal_binary_env: FERTILE_BACKUP_WAL_BIN
+    wal_products_env: FERTILE_BACKUP_WAL_PRODUCTS
+    full_at_utc: "03:00"
+    incremental_interval_seconds: 3600
+    max_recoverable_age_seconds: 3600
+    runbook: ops/backup.md

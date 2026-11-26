@@ -18,7 +18,9 @@
 | FINANCE_COLLECTOR_CONFIG、IB_GATEWAY_ADDRESS | 指向当前行情源的配置和本机 paper 接口 127.0.0.1:4002。 |
 | FERTILE_HEALTH_CONFIG | 站点巡检覆盖文件的路径。可在未来生产服务器的文件里显式填写 `public_origin`。 |
 | FERTILE_PUBLIC_ORIGIN | 运维显式启用公网巡检的 HTTPS origin，如 `https://<your-origin>`。非空环境变量优先于覆盖文件。 |
-| FERTILE_BACKUP_DAYS、FERTILE_BACKUP_WEEKS、FERTILE_BACKUP_REMOTE | 本地保留周期与可选 rclone remote 名。详细设置见 [备份](../ops/backup.md)。 |
+| FERTILE_BACKUP_DAYS、FERTILE_BACKUP_WEEKS | 本机与异地备份的日、周保留点数。可写入 `config/backup.conf`。 [备份配置](../ops/backup.md#配置) |
+| FERTILE_BACKUP_REMOTE、FERTILE_BACKUP_RCLONE、FERTILE_BACKUP_WAL_BIN | 在 `config/backup.conf` 配置命名 `crypt` 目标、rclone 和 F3 CLI 的绝对路径。远端默认关闭。认证和加密材料放 `$FERTILE_ROOT/secrets/backup-rclone.conf`。 [异地备份](../ops/backup.md#私人-google-drive-加密备份) |
+| FERTILE_BACKUP_WAL_PRODUCTS | 在 `config/backup.conf` 配置 F3 许可混合时的产品范围，以逗号分隔准确的 `source/product` 对。 [F3 配置](../ops/backup.md#远端文件与-f3-接口) |
 
 控制器为 web 注入同一 release 的 WEB_STATIC_ROOT、finance HTTP 地址和 PostgreSQL socket。本机 web 使用独立的 fertile_web PostgreSQL 登录角色，通过 Unix socket peer 映射认证。运行时角色仅在其私有迁移 schema、app 和 blog 内具有相应权限，首次 SQLx 迁移的数据库 CREATE 权限由控制器临时授予并收回。管理员备份继续使用原 peer 身份。外部 DATABASE_URL 放在 `secrets/web-database.env`，使用外部连接时保留 `FERTILE_WEB_DATABASE` 默认值。实例日常操作见 [普通服务器部署指南](../deploy/linux-server.md) 与 [Ruler 手册](../ops/ruler-runbook.md)。
 
