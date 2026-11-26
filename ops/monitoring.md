@@ -18,6 +18,7 @@ healthwatch 的 HTTP 探针和 webhook 投递均发送 `fertile-healthwatch/<VER
 - `public:ready` 默认记录 `skipped`，本机压力测试期间保持此设置。此时没有公网探测请求或公网探针告警。未来生产服务器显式配置 HTTPS origin 后，巡检从该服务器独立请求对应的 `/healthz/ready`，要求 HTTP 200 和有效的 web 就绪 JSON。必需依赖均健康时，web 对可选依赖的降级状态仍视为入口可达。跳转、非预期 HTML、TLS 错误及 Tunnel 502/530 使该探针失败。不同运营商与地域的可达性需从相应地点测量。
 - `market:fresh` 从 finance `/api/v1/market/status` 读取业务状态、每个标的的年龄和陈旧标志。统计标的数、陈旧数、观测到的最大年龄及数据源；缺少行情或数据心跳过期标记失败。未启用采集或旧版接口返回 404 会记录 skipped。
 - 磁盘检查默认为部署根的父目录，对应 `/home/box`。可用空间低于 2 GiB 时告警。最近完成的备份需同时具备合法 UTC 时间戳目录、`snapshot.json` 和 `SHA256SUMS`；超过 36 小时、时间在未来或从未完成均告警。清单内容完整性由备份及恢复流程校验。
+- `backup:remote_age` 读取本机最近一次远端观测，输出已验证远端恢复点及最后可恢复到的 UTC 时间。点龄超过 3600 秒、尚无可恢复点或远端降级时告警。`backup:remote_full` 和 `backup:remote_hourly` 分别报告调度状态。排障时用 `python3 scripts/backup_remote.py status` 实时查询，或加 `--cached` 只读取本机最近观测。 [异地备份状态](backup.md#调度状态与轮转)
 - 未就绪、已断开的服务与行情陈旧分别计时。业务健康不等同于 PID 存在；交易的订单核对、未决写请求和真实券商认证应结合 [健康检查](health-checks.md) 与 [Ruler 手册](ruler-runbook.md) 验证。采样不能发现两次轮询之间始末皆已结束的短暂故障，系统与守护日志可补充事件级时间线。
 
 持续故障只写一条 failure，恢复写一条 recovery。短时抖动对同一探针、同一方向设 15 分钟冷却；冷却期内的样本仍完整保留，仍未恢复的第二次故障会在冷却结束后通知。重启从告警日志恢复去重状态。一个部署根同时只允许一个采样进程。巡检自己的异常保留在运行或服务日志；采样停止或写盘失败可在报告中识别为缺口。
@@ -36,7 +37,7 @@ tail -1 "$root/logs/healthwatch/samples.jsonl" | python3 -m json.tool
 scripts/healthwatch --once
 ```
 
-`--once` 写入一次测量日志，以 JSON 输出检查结果，跳过定时备份调度。通过 stdout 中每个探针的 state 判断依赖健康。常驻模式默认每天 03:00 UTC 异步调用 [backup.sh](../scripts/backup.sh)，错过计划时刻会在当天首轮补跑；失败在 15 分钟后重试。可设置 `backup_at_utc: "HH:MM"` 调整时刻，设为 null 停用调度。可在 runtime.env 配置 FERTILE_BACKUP_DAYS（默认 7）、FERTILE_BACKUP_WEEKS（默认 4）和可选 FERTILE_BACKUP_REMOTE（仅 rclone 目标名，凭据另行管理）。备份前置锁、校验和恢复流程见 [Ruler 手册](ruler-runbook.md)。
+`--once` 写入一次测量日志，以 JSON 输出检查结果，跳过定时备份调度。通过 stdout 中每个探针的 state 判断依赖健康。常驻模式默认每天 03:00 UTC 异步调用 [backup.sh](../scripts/backup.sh)，错过计划时刻会在当天首轮补跑，失败在 15 分钟后重试。可设置 `backup_at_utc` 为 `"HH:MM"` 调整日备份时刻，或设为 `null` 停用备份调度。异地远端启用后另外调度远端日全量和小时增量，配置放 `config/backup.conf`。 [备份操作](backup.md)
 
 ## 可选 webhook
 

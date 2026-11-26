@@ -370,7 +370,9 @@ tests/simulate-reboot.sh
 
 ## 备份、恢复与账户运维
 
-执行 `snapshot=$(scripts/backup.sh)` 保存输出的快照路径。备份成功后，执行 `scripts/restore.sh "$snapshot" --dry-run` 检查快照，可在 PostgreSQL 停止时执行。要检查目标占用，带上 `--target-data-root` 与 `--target-database` 并保持 PostgreSQL 可用。正式恢复使用同一组目标，且须先停止所有写入方。默认保留 7 个每日和 4 个每周快照，整机恢复还需异机副本。[备份操作](backup.md)
+执行 `snapshot=$(scripts/backup.sh)` 保存输出的本机快照路径。备份成功后，执行 `scripts/restore.sh "$snapshot" --dry-run` 检查快照，可在 PostgreSQL 停止时执行。要检查目标占用，带上 `--target-data-root` 与 `--target-database` 并保持 PostgreSQL 可用。正式恢复使用同一组目标，且须先停止所有写入方。默认保留 7 个每日和 4 个每周快照。[备份操作](backup.md)
+
+整机或持久盘丢失时，在独立运行根取得离线恢复材料并装配相同的 `crypt` 配置。执行 `python3 scripts/backup_remote.py status` 查询最后可恢复到的时间与点 ID，再选择一个独立日全量或具有完整父链的小时点，恢复到空数据目录和隔离库。超过一小时的告警优先检查远端容量、密钥访问权限和父链完整性。由 vira 确定私人 Drive 账户、可用容量与离线密钥保管方式后，再启用异地备份。[异地恢复与演练](backup.md#从远端恢复到指定水位)
 
 在运行时根检查 logs/alerts/alerts.jsonl 和 logs/healthwatch/samples.jsonl，把服务停用、恢复、公网探测和备份年龄分开阅读。通知默认写入本地，维护人员可按 [监控](monitoring.md) 配置独立 webhook。paper Gateway 的安装、登录失败预算、2FA、每日自动重启和健康检查见 [Gateway 运维](ibgateway.md)。不要在运行记录中复制凭据、完整账号或本机令牌。
 

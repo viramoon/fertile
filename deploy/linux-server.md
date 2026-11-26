@@ -96,6 +96,8 @@ scripts/fertile logs web
 
 运行参数在启动时从 `config/runtime.env` 读取，修改全栈参数后运行 `sudo systemctl restart fertile.target` 并重新验证。unit 指向安装时选定的发布目录。维护窗口内切换版本时先用 `sudo systemctl stop fertile.target` 停止整栈，以运行账户构建下一版本，再用同一参数重跑 `install-systemd`，启动 target 并复验。注销这个实例的 unit、停用自启并停止服务时，由管理员执行 `sudo scripts/fertile uninstall-systemd --root "$FERTILE_ROOT"`。
 
+私人 Drive 异地备份默认关闭。启用时按手册准备本机加密配置，并为日全量和小时增量安排独立的 timer。 [异地备份调度](../ops/backup.md#调度状态与轮转)
+
 ### supervisord
 
 没有 systemd 的环境和现有本地压测盒子可由运行账户加载 `env.sh` 后使用以下命令。首次启动会准备 supervisor 控制端和本机数据库。

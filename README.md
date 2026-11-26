@@ -39,6 +39,7 @@ curl -fsS http://127.0.0.1:8090/api/v1/system/status
 | 普通服务器部署、systemd 与 HTTPS 反代 | [普通服务器部署指南](deploy/linux-server.md) |
 | 构建、部署、回滚、重启与应急 | [部署清单](deploy/service.yaml) · [Ruler 手册](ops/ruler-runbook.md) |
 | 本机与公网健康、备份、恢复和告警 | [运维索引](ops/README.md) |
+| 私人 Google Drive 加密备份、恢复点和离线演练 | [异地备份](ops/backup.md#私人-google-drive-加密备份) |
 | OpenAPI 与生成客户端 | [契约快照与验证](contracts/README.md) |
 | 工具链、配置与密钥 | [开发环境](docs/dev-environment.md) · [配置](docs/configuration.md) |
 | 版本、子模块指针与脚本 | [发版规则](docs/release.md) · [脚本](scripts/README.md) |
