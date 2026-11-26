@@ -262,6 +262,82 @@ class UpgradeTest(unittest.TestCase):
         self.assertEqual((gap["source"], gap["continuity"], gap["missing_count"]), ("replay", "bars-restored", "2"))
         self.assertLessEqual(gap["opened_at"], gap["ready_at"])
 
+    def test_collector_gap_records_distinct_product_outcomes(self):
+        other = "replay/synthetic-other"
+        # Consecutive transport observations around a synthetic interruption.
+        updates = {STREAM: (100, 103), other: (1, 9007199254740995)}
+        methods = {STREAM: "bars-restored", other: "unrecoverable"}
+        outcomes = {
+            stream: {"continuity": methods[stream], "missing_count": str(after - before - 1)}
+            for stream, (before, after) in updates.items()
+        }
+        pending = {stream: {"continuity": "unknown", "missing_count": None} for stream in updates}
+
+        def hook(step, request):
+            if step == "collector-gap":
+                self.assertEqual(request["gap"]["products"], pending)
+                self.assertEqual(upgrade.records(self.root)[0]["gap"]["products"], pending)
+                return {"products": outcomes}
+            return {
+                "compatibility": {"compatible": True},
+                "collector-seal": {"watermark": {STREAM: "7"}},
+                "collector-release": {"released": True, "watermark": {STREAM: "7", other: "2"}},
+                "collector-start": {},
+                "collector-ready": {"ready": True, "watermark": {STREAM: "8", other: "3"}},
+            }[step]
+
+        record = self.run_collector(hook)
+        self.assertEqual(record["status"], "complete")
+        self.assertEqual(record["gap"]["products"], outcomes)
+        self.assertEqual(record["evidence"]["collector-gap"]["products"], outcomes)
+        self.assertEqual(upgrade.records(self.root)[0]["gap"]["products"][other]["missing_count"], "9007199254740993")
+        self.assertEqual((record["gap"]["continuity"], record["gap"]["missing_count"]), ("unknown", None))
+
+    def test_collector_gap_rejects_unscoped_incomplete_or_unverified_results(self):
+        other = "replay/synthetic-other"
+        unknown = {"continuity": "unknown", "missing_count": None}
+        unverified = {**unknown, "missing_count": "2"}
+        both = {STREAM: "7", other: "4"}
+        cases = (
+            ({STREAM: "7"}, unverified),
+            (both, {"continuity": "bars-restored", "missing_count": "2"}),
+            (both, {"products": {STREAM: unknown}}),
+            (both, {"products": {STREAM: unknown, other: unverified}}),
+            (both, {"products": {STREAM: unknown, other: unknown, "ibkr/synthetic": unknown}}),
+        )
+        for index, (watermark, outcome) in enumerate(cases):
+            with self.subTest(outcome=outcome):
+                root = self.root / str(index)
+                responses = {
+                    "compatibility": {"compatible": True},
+                    "collector-seal": {"watermark": watermark},
+                    "collector-release": {"released": True, "watermark": watermark},
+                    "collector-start": {},
+                    "collector-ready": {"ready": True, "watermark": watermark},
+                    "collector-gap": outcome,
+                }
+                with self.assertRaisesRegex(RuntimeError, "failed at collector-gap"):
+                    upgrade.perform(root, lambda step, _: responses[step], service="finance-collector-replay",
+                                    role="collector", previous=OLD, target=NEW, source="replay")
+                record, = upgrade.records(root)
+                self.assertEqual(record["status"], "needs-reconcile")
+                self.assertEqual(record["gap"]["products"], dict.fromkeys(watermark, unknown))
+                self.assertIsNone(record["gap"]["missing_count"])
+                self.assertNotIn("collector-gap", record["evidence"])
+
+    def test_collector_gap_reads_legacy_source_only_journal(self):
+        transaction_id = "1" * 32
+        directory = self.root / upgrade.JOURNAL
+        directory.mkdir(parents=True)
+        legacy = {
+            "version": 1, "id": transaction_id, "status": "complete", "started_at": "2026-01-01T00:00:00+00:00",
+            "gap": {"source": "replay", "continuity": "bars-restored", "missing_count": "2"},
+        }
+        path = directory / f"{transaction_id}.json"
+        path.write_text(json.dumps(legacy))
+        self.assertEqual(upgrade.records(self.root), [legacy])
+        self.assertEqual(json.loads(path.read_text()), legacy)
+
     def test_sigkill_partial_tail_leaves_unknown_gap_and_explicit_reconciliation(self):
         old = self.launch("writer", "v1")
         wait_for(lambda: read_int(self.base / "writer-v1.seq"))
@@ -452,6 +528,18 @@ class UpgradeTest(unittest.TestCase):
         record = self.run_collector(hook)
         self.assertTrue(record["evidence"]["collector-seal"]["display_only"])
         self.assertIsNone(record["gap"]["missing_count"])
+
+    def test_display_only_collector_can_classify_a_product_without_watermarks(self):
+        outcomes = {STREAM: {"continuity": "snapshot-only", "missing_count": None}}
+
+        def hook(step, _request):
+            if step == "collector-gap":
+                return {"products": outcomes}
+            return {"compatible": True, "display_only": True, "watermark": {}, "released": True, "ready": True}
+
+        record = self.run_collector(hook)
+        self.assertEqual(record["gap"]["products"], outcomes)
+        self.assertEqual(record["evidence"]["collector-ready"]["watermark"], {})
 
 
 if __name__ == "__main__":

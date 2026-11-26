@@ -22,6 +22,85 @@ import yaml
 
 
 class Render(unittest.TestCase):
+    def test_fstab_mount_uses_same_canonical_path_as_volume(self):
+        with TemporaryDirectory() as directory:
+            base = Path(directory)
+            mount = base / "data mount"
+            mount.mkdir()
+            alias = base / "mount-alias"
+            alias.symlink_to(mount, target_is_directory=True)
+            output = json.dumps({"filesystems": [{"target": str(alias)}]})
+            found = subprocess.CompletedProcess([], 0, output, "")
+            with patch.object(units.subprocess, "run", return_value=found):
+                self.assertEqual(units.declared_mounts(), {mount.resolve()})
+
+    def test_uses_configured_data_and_research_volume_dependencies(self):
+        with TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "instance"
+            config = root / "config"
+            config.mkdir(parents=True)
+            mount = base / "data disk"
+            data = mount / "fertile-data"
+            research = data / "research"
+            (config / "runtime.env").write_text(
+                f'FERTILE_MARKET_SOURCE=replay\nFERTILE_DATA_ROOT="{data}"\n'
+                f'FERTILE_RESEARCH_ROOT="{research}"\n'
+            )
+            with patch.dict(os.environ, FERTILE_DATA_ROOT=str(base / "ambient")):
+                rendered = units.render(root, "a" * 40, "trader", "trading", mounts={mount})
+            units.validate_units(rendered)
+            collector = rendered["fertile-finance-collector.service"]
+            self.assertIn(f'RequiresMountsFor="{root}" "{data}"\n', collector)
+            self.assertIn(f'Environment="FERTILE_SYSTEMD_DATA_ROOT={data}"\n', collector)
+            self.assertIn(units.quote(f"FERTILE_SYSTEMD_MOUNTS={json.dumps([str(mount)])}"), collector)
+            self.assertIn(f'RequiresMountsFor="{root}" "{data}" "{research}"\n',
+                          rendered["fertile-finance-api.service"])
+            self.assertNotIn(str(data), rendered["fertile-web.service"].split("[Service]")[0])
+
+    def test_replay_uses_its_own_data_path_by_default(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            rendered = units.render(root, "a" * 40, "trader", "trading",
+                                    settings={"FERTILE_MARKET_SOURCE": "replay"}, mounts=set())
+            self.assertIn(f'RequiresMountsFor="{root}" "{root}/data/replay"\n',
+                          rendered["fertile-finance-collector.service"])
+
+    def test_configured_external_root_without_known_parent_requires_mount(self):
+        with TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "instance"
+            data = base / "unmounted-volume"
+            data.mkdir()
+            rendered = units.render(root, "a" * 40, "trader", "trading",
+                                    settings={"FERTILE_DATA_ROOT": str(data)}, mounts=set())
+            self.assertIn(units.quote(f"FERTILE_SYSTEMD_MOUNTS={json.dumps([str(data)])}"),
+                          rendered["fertile-finance-collector.service"])
+
+    def test_installer_storage_config_rejects_symlink_and_nonregular_files(self):
+        with TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "instance"
+            root.mkdir()
+            public = base / "fixture-config"
+            public.mkdir()
+            config = root / "config"
+            config.symlink_to(public)
+            with self.assertRaises(OSError):
+                units.storage_settings(root)
+            config.unlink()
+            config.mkdir()
+            runtime_settings = config / "runtime.env"
+            fixture = public / "fixture.env"
+            fixture.write_text("FERTILE_MARKET_SOURCE=replay\n")
+            runtime_settings.symlink_to(fixture)
+            with self.assertRaises(OSError):
+                units.storage_settings(root)
+            runtime_settings.unlink()
+            os.mkfifo(runtime_settings)
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                units.storage_settings(root)
+
     def test_templates_follow_core_manifest_order_and_escape_settings(self):
         root = Path('/srv/fertile "%i"$stack')
         rendered = units.render(root, "a" * 40, "trader", "trading")
@@ -218,6 +297,35 @@ class Lifecycle(unittest.TestCase):
 
 
 class Runtime(unittest.TestCase):
+    def test_installed_storage_guard_checks_mount_not_directory_and_rejects_drift(self):
+        with TemporaryDirectory() as directory:
+            base = Path(directory)
+            mount = base / "mount point"
+            data = mount / "data"
+            research = data / "research"
+            research.mkdir(parents=True)
+            mountinfo = base / "mountinfo"
+            mountinfo.write_text("1 0 0:1 / / rw - tmpfs synthetic rw\n")
+            name = "finance-collector"
+            service = {"release": str(base / "releases" / ("a" * 40)), "skip": "",
+                       "env": {"FERTILE_RESEARCH_ROOT": str(research)}}
+            plan = {"data": str(data), "services": {name: service}}
+            env = {"FERTILE_SYSTEMD_DATA_ROOT": str(data), "FERTILE_SYSTEMD_RESEARCH_ROOT": str(research),
+                   "FERTILE_SYSTEMD_MOUNTS": json.dumps([str(mount)])}
+            with (patch.dict(os.environ, env, clear=True), patch.object(units, "MOUNTINFO", mountinfo),
+                  patch.object(runtime.ctl, "ROOT", base), patch.object(runtime.ctl, "RUN", base / "run"),
+                  patch.object(runtime.ctl, "daemon_pid", return_value=0), patch.object(runtime.os, "execvpe") as launch):
+                with self.assertRaisesRegex(RuntimeError, "required systemd mount is unavailable"):
+                    runtime.start(plan, "run", name)
+                launch.assert_not_called()
+                escaped = str(mount).replace(" ", "\\040")
+                with mountinfo.open("a") as stream:
+                    stream.write(f"2 1 0:1 / {escaped} rw - tmpfs synthetic rw\n")
+                units.validate_configured_roots(plan, name)
+                with self.assertRaisesRegex(ValueError, "storage roots changed"):
+                    runtime.start({**plan, "data": str(base / "different")}, "run", name)
+                launch.assert_not_called()
+
     def test_runtime_plan_excludes_optional_services_and_probes_configured_ports(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

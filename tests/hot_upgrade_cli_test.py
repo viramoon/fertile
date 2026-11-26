@@ -199,14 +199,58 @@ class HostHandoff(unittest.TestCase):
         self.assertEqual(selection.selections(self.root, self.base), {"web": self.base.name})
 
     def test_hook_round_trip_uses_argv_and_json(self):
-        executable = self.root / "fixture-hook"
-        executable.write_text(f"#!{sys.executable}\n"
-                              "import json, os, sys\n"
-                              "record = json.load(sys.stdin)\n"
-                              "print(json.dumps([sys.argv[1], record['service'], os.environ['FERTILE_ROOT']]))\n")
-        executable.chmod(0o700)
+        executable = self.make_hook(
+            "import json, os, sys\n"
+            "record = json.load(sys.stdin)\n"
+            "print(json.dumps({'argv': sys.argv[1], 'step': record['step'], "
+            "'service': record['service'], 'root': os.environ['FERTILE_ROOT']}))\n"
+        )
         reply = cli.hook_command(str(executable))("compatibility", {"service": "finance-api"})
-        self.assertEqual(reply, ["compatibility", "finance-api", str(self.root)])
+        self.assertEqual(reply, {"argv": "compatibility", "step": "compatibility",
+                                 "service": "finance-api", "root": str(self.root)})
+
+    def make_hook(self, body):
+        executable = self.root / "fixture-hook"
+        executable.write_text(f"#!{sys.executable}\n{body}")
+        executable.chmod(0o700)
+        return executable
+
+    def test_hook_rejects_non_objects(self):
+        for output in ("null", "[]", "true", '"value"'):
+            with self.subTest(output=output):
+                executable = self.make_hook(f"print({output!r})\n")
+                with self.assertRaisesRegex(ValueError, "JSON object"):
+                    cli.hook_command(str(executable))("reader-cutover", {})
+
+    def test_hook_rejects_oversize_multibyte_reply(self):
+        output = json.dumps({"value": "中" * 25_000}, ensure_ascii=False)
+        self.assertLess(len(output), 64 * 1024)
+        self.assertGreater(len(output.encode("utf-8")), 64 * 1024)
+        executable = self.make_hook(
+            "import sys\n"
+            f"sys.stdout.buffer.write({output.encode('utf-8')!r})\n"
+        )
+        with self.assertRaisesRegex(ValueError, "64 KiB"):
+            cli.hook_command(str(executable))("candidate-ready", {})
+
+    def test_hook_accepts_exact_byte_limit(self):
+        length = 64 * 1024 - len(json.dumps({"value": ""}).encode("utf-8"))
+        executable = self.make_hook(
+            "import json, sys\n"
+            f"sys.stdout.buffer.write(json.dumps({{'value': 'a' * {length}}}).encode())\n"
+        )
+        self.assertEqual(cli.hook_command(str(executable))("candidate-ready", {}), {"value": "a" * length})
+
+    def test_projector_rejects_unacknowledged_cutover_before_stopping_incumbent(self):
+        for reply in (None, [], {"stopped": False}):
+            with self.subTest(reply=reply):
+                manager = Mock()
+                handoff = cli.Handoff("finance-projector", self.base, self.target, {}, manager,
+                                      Mock(return_value=reply))
+                with self.assertRaisesRegex(ValueError, "empty JSON object"):
+                    handoff("reader-cutover", {})
+                self.assertEqual(manager.mock_calls, [])
+                self.assertEqual(selection.selected(self.root, self.base, "finance-projector"), self.base)
 
     def test_status_is_read_only_for_empty_root(self):
         stdout = StringIO()

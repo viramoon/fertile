@@ -7,8 +7,9 @@ from pathlib import Path
 import subprocess
 import sys
 
+from handoff_start import require_start
 import supervision as ctl
-from systemd_units import SYSTEMD_ROWS, TARGET, UNIT_DIR, host_rows, service_unit, unit_state
+from systemd_units import SYSTEMD_ROWS, TARGET, UNIT_DIR, host_rows, service_unit, unit_state, validate_configured_roots
 
 
 STATES = {"active": "RUNNING", "activating": "STARTING", "deactivating": "STOPPING",
@@ -32,10 +33,16 @@ def start(plan, action, name):
     if ctl.daemon_pid():
         raise RuntimeError("stop the existing supervisord stack before starting systemd units")
     service = plan["services"][name]
+    release = Path(service["release"]).name
+    require_start(ctl.ROOT, name, release, "systemd")
     if action == "condition":
-        return 1 if service["skip"] else 0
+        if service["skip"]:
+            return 1
+        validate_configured_roots(plan, name)
+        return 0
     if service["skip"]:
         raise ValueError(f"{name}: {service['skip']}")
+    validate_configured_roots(plan, name)
     if action == "prepare":
         ctl.check_queue_compatibility(plan)
         ctl.prepare_data_root(plan)
@@ -52,6 +59,7 @@ def start(plan, action, name):
     else:
         env = ctl.local_environment(service)
         os.chdir(service["directory"])
+        require_start(ctl.ROOT, name, release, "systemd", launch=True)
         os.execvpe(service["command"][0], service["command"], env)
 
 

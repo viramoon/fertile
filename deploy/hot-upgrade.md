@@ -12,7 +12,7 @@
 | `config/service-releases.json` | 控制器写入单进程发布指针，作用域为记录的基准提交。重启服务时读取与该基准匹配的指针。保留此文件时，再次选择相同基准提交会重新应用相应指针。 |
 | 实例数据根 | collector 写获准持久化的源记录，projector 消费已提交记录并更新投影及游标，finance API 读取业务数据与投影，回测 worker 和 API 共用持久队列。 |
 | `data/postgres` 与 `run/postgres` | 本机 PostgreSQL 的数据与 Unix socket。web 及 notifier 使用同一个 web 库。 |
-| `logs/` 与 `run/` | supervisord 日志和 socket、守护状态及互斥锁。systemd 日志由 journal 保管。 |
+| `logs/` 与 `run/` | supervisord 日志和 socket、守护状态及互斥锁。`run/handoff-start/` 中的一次性许可由当前控制进程发放，仅供对应服务和发布启动一次。systemd 日志由 journal 保管。 |
 | `state/hot-upgrade/` | 热升级事务，记录步骤、已验证证据和 collector 交接缺口。保留在实例持久盘。 |
 
 持久目录应在源码树外。清单中的卷用途供部署挂载和权限核对。默认优雅退出宽限为 30 秒，回测和 projector 为 60 秒，notifier 为 75 秒。核心 HTTP 进程的文件描述符限额为 4096，回测 worker 为 8192。容器终止宽限应容纳进程顺序停止所需的时间。systemd 与 supervisord 的就绪和限额以清单及各自渲染结果为准。[数据发布政策](../docs/data-policy.md)
@@ -33,7 +33,7 @@ F3 投影候选使用隔离的投影状态和 catalog。用 `finance-market-wal 
 
 ## 升级与兼容回退
 
-首次采用本控制器时，先在维护窗口安装支持单进程指针的整栈基准。热切换沿用基准的进程拓扑、运行卷、限额、持久根和端口。变更这些条件时安排整栈维护。直接调用 systemctl 启停及 systemd 安装和卸载均安排在热升级事务之外。要用同一发布统一启动全部服务，在停栈的维护窗口先将 `config/service-releases.json` 移入私有归档，再启动所选基准。
+首次采用本控制器时，先在维护窗口安装包含启动许可检查的整栈基准。热切换沿用基准的进程拓扑、运行卷、限额、持久根和端口。变更这些条件时安排整栈维护。直接调用 systemctl 启停及 systemd 安装和卸载均安排在热升级事务之外。要用同一发布统一启动全部服务，在停栈的维护窗口先将 `config/service-releases.json` 移入私有归档，再启动所选基准。
 
 1. 保留两版制品和可恢复的升级前备份。用已锁定的子模块构建完整候选并保留原基准。候选必须使用完整 fertile 提交号。
 
@@ -56,11 +56,17 @@ F3 投影候选使用隔离的投影状态和 catalog。用 `finance-market-wal 
    scripts/fertile hot-upgrade finance-api "$previous" --rollback --hook "$approved_hook"
    ```
 
-发生中断时先查看 `hot-upgrade-status`，依据实际管理器、服务发布、候选进程、队列及单写者归属核对状态，再执行 `scripts/fertile hot-upgrade-reconcile "$transaction_id" --hook "$approved_hook"`。操作账户负责清理外部启动的 projector 候选。确认动作只接收与前后发布之一相符的证据。若目标服务已停，hook 要先检查租约与未完成写入，再以 `safe_to_start:true` 显式允许控制器启动所选版本，最后由 `reconcile-ready` 确认可用。中断且未证实恢复的采集区间仍标记连续性未知。常规整栈切换与启动问题见[Ruler 手册](../ops/ruler-runbook.md#整栈维护)。
+发生中断时先查看 `hot-upgrade-status`，依据实际管理器、服务发布、候选进程、队列及单写者归属核对状态，再执行 `scripts/fertile hot-upgrade-reconcile "$transaction_id" --hook "$approved_hook"`。操作账户负责清理外部启动的 projector 候选。只接受与前后发布之一相符的恢复证据。若目标服务已停止，hook 必须检查租约与未完成写入，并以 `safe_to_start:true` 允许控制器启动所选版本。supervisord 已退出时，恢复命令会重新拉起守护器，并按需启动该服务的依赖。其它进程待事务完成后走常规启动流程。
+
+未完成的事务阻止两类守护器自行启动受影响服务。控制器仅在对应交接步骤或确认安全恢复后发放一次性启动许可。每次 reconcile 都要通过应用的 `reconcile-ready`，包括上次启动后就绪失败、重试时 PID 仍存在的情况。中断且未证实恢复的采集区间仍标记连续性未知。常规整栈切换与启动问题见[Ruler 手册](../ops/ruler-runbook.md#整栈维护)。
+
+若整个容器已退出，可在使用同一持久根和服务账户的维护进程中执行恢复。先确认原容器和守护器已经停止。恢复完成后退出维护环境，确认其守护器停止，再重启正常容器。
+
+旧基准的启动器缺少启动许可检查。若已留下未完成的旧事务，先停旧整栈并停用其自启，保留原事务、发布指针和前后两版制品。维护窗口内暂存包含保护的基准，在停栈状态和实例控制锁下切换 `current`，把核实过的逐服务发布选择迁到新基准。systemd 重新安装 unit 后保持停栈，使用新控制器恢复原事务。完成后恢复常规启停。旧事务继续使用其原 ID 和已有证据。
 
 ## 应用 hook 协议 v1
 
-hook 是部署账户认可的绝对路径可执行文件，使用常规文件，组和其他用户不可写。每次调用传入步骤名作为第一个参数，通过 stdin 输入一个 JSON 对象，通过 stdout 返回一个 JSON 对象。单次响应最多 64 KiB，时限为 120 秒。错误用非零退出码返回。请求包含 `version`、`id`、`service`、`role`、`source`、`previous`、`target`、`direction`、`migrate`、`step`、`evidence`、`gap` 和 `status`。`previous` 和 `target` 是完整 fertile SHA，`source` 用于限定被升级的采集源。`evidence` 只包含同事务已经验证的步骤结果。输出仅包含应用健康、兼容性及水位元数据，日志和证据不包含凭据、原始行情或邮件内容。
+hook 是部署账户认可的绝对路径可执行文件，使用常规文件，组和其他用户不可写。每次调用传入步骤名作为第一个参数，通过 stdin 接收一个 JSON 对象，通过 stdout 返回一个 UTF-8 JSON 对象。stdout 总计最多 65,536 字节，包含换行，时限为 120 秒。错误用非零退出码返回。请求包含 `version`、`id`、`service`、`role`、`source`、`previous`、`target`、`direction`、`migrate`、`step`、`evidence`、`gap` 和 `status`。`previous` 和 `target` 是完整 fertile SHA，`source` 用于限定被升级的采集源。`evidence` 只包含同事务已经验证的步骤结果。输出仅包含应用健康、兼容性及水位元数据，日志和证据不包含凭据、原始行情或邮件内容。
 
 控制器启动进程后的就绪步骤收到临时的 `runtime` 对象，含已核验的 `pid`、`live_url` 和 `ready_url`。无 HTTP 入口的进程对应 URL 为空。应用可据此核对候选或正式进程的水位和队列状态，控制器仅持久化通过验证的应答字段。
 
@@ -70,14 +76,16 @@ hook 是部署账户认可的绝对路径可执行文件，使用常规文件，
 | `migrate` | 显式执行扩展迁移，保留旧版读取与写入所需的形态，确认后返回 `{"expanded":true}`。 |
 | `reader-checkpoint` | 返回 `watermark` 字典，键为 `source/product`，值为本地 WAL 水位的十进制字符串。projector 使用非空水位。 |
 | `candidate-start`、`candidate-ready` | 控制器启动 HTTP 读者候选。projector hook 以隔离状态启动候选并返回 `{}`。候选就绪后 hook 返回 `{"ready":true,"watermark":{...}}`，各产品水位至少达到原检查点。 |
-| `reader-cutover`、`reader-ready`、`candidate-abort` | 控制器回收 HTTP 候选，projector hook 负责回收隔离候选并返回 `{}`。验证成功后控制器使守护器切换目标服务。应用在原入口重新就绪后返回 `ready:true` 与 `watermark`，水位继续满足检查点。切换前失败时，按同样分工终止候选并清理隔离状态。 |
+| `reader-cutover`、`reader-ready`、`candidate-abort` | 控制器回收 HTTP 候选，projector hook 负责回收隔离候选。projector 切换时，控制器收到 `{}` 确认后才停止旧 projector 并启动新进程。应用在原入口重新就绪后返回 `ready:true` 与 `watermark`，水位继续满足检查点。切换前失败时，按同样分工终止候选并清理隔离状态。 |
 | `collector-seal`、`collector-release` | hook 让旧写者停止摄取并封段，返回 `watermark`。控制器停旧进程后，hook 验证写者锁及来源订阅已释放，返回 `released:true` 与最终 `watermark`。仅展示源可在封段时返回 `display_only:true` 与空 `watermark`，此后该事务沿用空水位。 |
-| `collector-start`、`collector-ready`、`collector-gap` | 控制器在确认交接证据后启动新写者。就绪后 hook 返回 `ready:true` 与 `watermark`。按来源核对缺口，返回 `continuity`，可附已核实的 `missing_count` 十进制字符串。 |
+| `collector-start`、`collector-ready`、`collector-gap` | 控制器在确认交接证据后启动新写者。就绪后 hook 返回 `ready:true` 与 `watermark`。按产品核对缺口，返回 `products`，以 `source/product` 为键，每项含 `continuity` 和可选的 `missing_count` 十进制字符串。 |
 | `worker-drain`、`worker-stop`、`worker-start`、`worker-ready` | 排空后 hook 返回 `drained:true`，控制器停启目标 worker。应用确认可继续消费同一队列后返回 `ready:true`。启用的 notifier 使用相同的交接流程，检查 outbox 和当前投递尝试。 |
 | `reconcile` | 只读核实实际进程和持有者，返回 `reconciled:true` 与 `active_release`。若所选服务已停且确认可安全启动，另返回 `safe_to_start:true`。 |
-| `reconcile-ready` | 控制器按确认结果重新启动所选服务时调用。检查应用就绪后返回 `{"ready":true}`。 |
+| `reconcile-ready` | 每次恢复确认均调用，包含现存进程。检查应用就绪后返回 `{"ready":true}`。 |
 
-采集缺口的 `continuity` 取值为 `unknown`、`ticks-restored`、`bars-restored`、`snapshot-only` 或 `unrecoverable`。本地单调水位能证明写入进度。源连续性需要源级序号或补数证据，例如 Binance 重建快照后的更新 ID、Hyperliquid 快照与成交覆盖、IBKR 市场深度 reset 与可取得的历史窗口。事务的 `gap.opened_at` 和 `gap.ready_at` 是控制器观察到的封段前和新进程就绪后时间。缺乏证据时保持 `continuity` 为 `unknown` 和 `missing_count` 为空。
+采集缺口的 `continuity` 取值为 `unknown`、`ticks-restored`、`bars-restored`、`snapshot-only` 或 `unrecoverable`。封段、释放或新进程就绪水位里出现的每个产品，均须在 `products` 中有对应结果。`unknown` 的计数必须为空。仅展示的同源产品也可提交产品级结果。既有来源级应答仍适用于零个或一个已知产品。多产品事务以 `gap.products` 为准，来源级摘要保持未知和空计数。
+
+本地单调水位可证明写入进度。源连续性需要源级序号或补数证据，例如 Binance 重建快照后的更新 ID、Hyperliquid 快照与成交覆盖、IBKR 市场深度 reset 与可取得的历史窗口。事务的 `gap.opened_at` 和 `gap.ready_at` 是控制器观察到的封段前和新进程就绪后时间。
 
 当前 fertile 针对基准 gitlink 继续运行原有五个核心进程。F3 与 W3 已合并到子仓，需在 gitlink 升级并构建带相应制品的候选后才能启用。F13 和其它来源模板等待对应接入。当前交付验证使用隔离进程和生成模板。真实 paper 的连续性由获授权人员另在私有实例核实。[契约更新顺序](../contracts/README.md#更新)
 
@@ -85,4 +93,4 @@ hook 是部署账户认可的绝对路径可执行文件，使用常规文件，
 
 使用锁定的控制端 Python 运行以下检查。Supervisor 进程演练在临时根运行真实守护器，tini 用例需要 tini 可执行文件。systemd 测试渲染 unit 并使用隔离管理器替身，也可用 `scripts/fertile verify-systemd` 静态验证 unit。[守护清单与模板](../tests/supervision_plan.py) · [Supervisor 进程演练](../tests/supervisor_process_test.py) · [systemd 模板演练](../tests/systemd.py)
 
-热升级测试使用合成 WAL 与 SQLite 队列，复验读者切换期间采集持续、写者交接、半段恢复、兼容迁移和旧版回读。控制器测试验证就绪、选中版本和中断恢复。开发演练使用临时根、合成进程和守护器替身。[热升级事务演练](../tests/hot_upgrade_test.py) · [命令与管理器演练](../tests/hot_upgrade_cli_test.py)
+热升级测试使用合成 WAL 与 SQLite 队列，复验读者切换期间采集持续、写者交接、半段恢复、兼容迁移和旧版回读。控制器测试还覆盖中断后的启动许可、应用就绪失败及重试、按产品分类缺口和 hook 响应边界。开发演练使用临时根、合成进程和守护器替身。[热升级事务演练](../tests/hot_upgrade_test.py) · [命令与管理器演练](../tests/hot_upgrade_cli_test.py) · [中断恢复](../tests/hot_upgrade_recovery_test.py)

@@ -43,6 +43,7 @@ jobs:
           "$FERTILE_CONTROL_PYTHON" -B tests/test_e2e_smoke.py
           "$FERTILE_CONTROL_PYTHON" -B tests/hot_upgrade_test.py
           "$FERTILE_CONTROL_PYTHON" -B tests/hot_upgrade_cli_test.py
+          "$FERTILE_CONTROL_PYTHON" -B tests/hot_upgrade_recovery_test.py
       - name: Exercise rendering, restarts and whole-stack recovery
         run: |
           umask 077

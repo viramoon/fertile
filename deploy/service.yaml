@@ -83,6 +83,7 @@ paths: # 均相对于持久根，默认值见 profiles，可用 FERTILE_ROOT / F
   logs: logs
   run: run
   hot_upgrade_state: state/hot-upgrade
+  hot_upgrade_start_permits: run/handoff-start
   service_releases: config/service-releases.json
   secrets: secrets
   tools: tools

@@ -391,12 +391,17 @@ def build_plan(*, release=None, names=None, use_pins=None, settings_overrides=No
                 default=not bool(custom), services=services, web_database=database)
 
 
-def run_child(path, name):
+def run_child(path, name, controller=None):
     # Keep PID supervision effective when supervisord itself receives SIGKILL.
     parent = os.getppid()
     if parent == 1 or ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM, 0, 0, 0) or os.getppid() != parent:
         raise RuntimeError("lost supervisor during startup")
     svc = json.loads(Path(path).read_text())
+    if controller:
+        sys.path.insert(0, controller)
+        from handoff_start import require_start
+
+        require_start(ROOT, name, Path(svc["release"]).name, "supervisord", launch=True)
     env = local_environment(svc)
     if limits := svc.get("limits"):
         _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -433,7 +438,10 @@ def render(plan):
         digest = hashlib.sha256(text.encode()).hexdigest()
         launcher = RUN / "programs" / f"{name}-{digest}.json"
         atomic(launcher, text)
-        command = shlex.join([sys.executable, str(child_script), "_exec", str(launcher), name])
+        argv = [sys.executable, str(child_script), "_exec", str(launcher), name]
+        if (runtime / "scripts/handoff_start.py").is_file():
+            argv.append(str(runtime / "scripts"))
+        command = shlex.join(argv)
         stop_seconds = svc.get("limits", {}).get("stop_seconds", 30)
         chunks.append(program.substitute(name=name, priority=idx*10, directory=esc(svc["directory"]),
                                          command=esc(command), logfile=esc(logfile), stop_seconds=stop_seconds))

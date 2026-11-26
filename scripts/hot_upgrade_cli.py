@@ -3,16 +3,19 @@ import argparse
 import json
 import os
 from pathlib import Path
+import selectors
 import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from urllib.parse import urlsplit
 
 from xmlrpc.client import Fault
 
 import hot_upgrade
+import handoff_start
 import service_releases
 import supervision as ctl
 import systemd_units as units
@@ -27,6 +30,8 @@ INSTANCE_ENV = {
     "FERTILE_DATA_ROOT", "FERTILE_RESEARCH_ROOT", "FERTILE_PROFILE", "FERTILE_MARKET_SOURCE",
     "PGDATABASE", "PGHOST", "PGPORT", "FINANCE_BASE_URL", "FINANCE_API_PORT", "FINANCE_COLLECTOR_BIND", "WEB_PORT",
 }
+HOOK_RESPONSE_LIMIT = 64 * 1024
+HOOK_TIMEOUT = 120
 
 
 def verify_release(release):
@@ -47,32 +52,69 @@ def hook_command(value):
         env = {key: os.environ[key] for key in ctl.INHERIT if key in os.environ}
         env["FERTILE_ROOT"] = str(ctl.ROOT)
         command = [sys.executable, "-B", hot_upgrade.__file__, str(os.getpid()), str(hook), step]
-        with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                              text=True, env=env, start_new_session=True) as process:
-            try:
-                output, _ = process.communicate(json.dumps({**record, "step": step}), timeout=120)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
-                raise
-            if process.returncode:
-                raise RuntimeError("hot-upgrade hook exited unsuccessfully")
-        if len(output) > 65536:
-            raise ValueError("hot-upgrade hook response exceeds 64 KiB")
-        return json.loads(output)
+        # The hook can begin writing before reading all the request. Provide
+        # stdin as a private file so stdout can be drained with a byte bound.
+        with tempfile.TemporaryFile() as request:
+            request.write(json.dumps({**record, "step": step}).encode("utf-8"))
+            request.seek(0)
+            with subprocess.Popen(command, stdin=request, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                  env=env, start_new_session=True) as process:
+                output = read_hook_output(process, command)
+        reply = json.loads(output.decode("utf-8"))
+        if not isinstance(reply, dict):
+            raise ValueError("hot-upgrade hook must return a JSON object")
+        return reply
 
     return invoke
 
 
+def read_hook_output(process, command):
+    deadline = time.monotonic() + HOOK_TIMEOUT
+    output = bytearray()
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while selector.select(max(0, deadline - time.monotonic())):
+                chunk = os.read(process.stdout.fileno(), HOOK_RESPONSE_LIMIT + 1 - len(output))
+                if not chunk:
+                    break
+                output.extend(chunk)
+                if len(output) > HOOK_RESPONSE_LIMIT:
+                    raise ValueError("hot-upgrade hook response exceeds 64 KiB")
+            else:
+                raise subprocess.TimeoutExpired(command, HOOK_TIMEOUT)
+        process.wait(timeout=max(0, deadline - time.monotonic()))
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        raise
+    if process.returncode:
+        raise RuntimeError("hot-upgrade hook exited unsuccessfully")
+    return output
+
+
 class Supervisor:
-    def __init__(self, base):
+    permit_manager = "supervisord"
+
+    def __init__(self, base, *, recovery=False):
+        self.base = base
+        self.recovery = recovery
+        self.api = None
+        if not recovery or ctl.daemon_pid():
+            self.connect()
+
+    def connect(self):
         self.api = ctl.connection()
         ctl.active_programs(self.api)
         self.plan = json.loads(ctl.SNAPSHOT.read_text())
-        if self.plan["release"] != str(base) or not self.plan["default"]:
+        if self.plan["release"] != str(self.base) or not self.plan["default"]:
             raise ValueError("reconcile the installed supervisor baseline before a per-service handoff")
 
     def pid(self, name):
+        if self.api is None:
+            return 0
         if name not in self.plan["services"]:
             raise ValueError(f"service absent from the installed supervisor plan: {name}")
         try:
@@ -90,6 +132,10 @@ class Supervisor:
             raise RuntimeError("incumbent supervisor group did not stop")
 
     def start(self, name, service):
+        if self.api is None:
+            self.bootstrap_for_recovery()
+        if self.recovery:
+            self.prepare_recovery_dependencies(name)
         self.plan["services"][name] = service
         ctl.render(self.plan)
         added, changed, removed = self.api.reloadConfig()[0]
@@ -101,8 +147,33 @@ class Supervisor:
             self.api.addProcessGroup(name)
         self.api.startProcess(name, True)
 
+    def bootstrap_for_recovery(self):
+        plan = ctl.build_plan(release=self.base, use_pins=True)
+        ctl.prepare_data_root(plan)
+        ctl.render(plan)
+        # Rendered groups have autostart=false. Bring back the manager before
+        # touching the selected service; other jobs remain stopped.
+        ctl.start_daemon()
+        self.connect()
+
+    def prepare_recovery_dependencies(self, name):
+        plan = self.plan
+        if name in {"web", "web-notifier"} and plan["web_database"] != "external":
+            postgres = plan["services"]["postgres"]
+            if postgres["skip"]:
+                raise RuntimeError("managed PostgreSQL is unavailable for recovery")
+            if not self.pid("postgres"):
+                self.api.startProcess("postgres", True)
+            ctl.await_postgres(postgres)
+        if name == "web" and plan["services"]["web"]["env"].get("WEB_REQUIRE_FINANCE") == "true":
+            ctl.check_queue_compatibility(plan)
+            if not self.pid("finance-api"):
+                self.api.startProcess("finance-api", True)
+
 
 class Systemd:
+    permit_manager = "systemd"
+
     def __init__(self, base):
         self.base = base
 
@@ -129,6 +200,16 @@ class Systemd:
     def start(self, name, _service):
         unit, _ = self.unit(name)
         units.systemctl("start", unit, check=True, timeout=125)
+
+
+def start_handoff(manager, name, service, record):
+    host = getattr(type(manager), "permit_manager", None)
+    if host is None:
+        return manager.start(name, service)
+    release = Path(service["release"]).name
+    with handoff_start.authorize(ctl.ROOT, record, release, host) as permit:
+        manager.start(name, service)
+        handoff_start.wait_for_launch(permit)
 
 
 def local_probe(url):
@@ -232,14 +313,14 @@ class Handoff:
                 proc.kill()
                 proc.wait(timeout=5)
 
-    def start_target(self):
+    def start_target(self, record):
         if self.name == "finance-api":
             # The incumbent may have accepted another job after preflight.
             ctl.check_queue_compatibility({
                 "default": True, "release": str(self.target), "data": self.service["env"]["FERTILE_DATA_ROOT"],
             })
         service_releases.select(ctl.ROOT, self.base, self.name, self.target)
-        self.manager.start(self.name, self.service)
+        start_handoff(self.manager, self.name, self.service, record)
 
     def __call__(self, step, record):
         if self.name in READER_ENV:
@@ -257,17 +338,18 @@ class Handoff:
             if self.name not in READER_ENV:
                 # Close the separate, non-publishing projector before the
                 # named manager starts the selected production projector.
-                self.hook(step, record)
+                if self.hook(step, record) != {}:
+                    raise ValueError("projector cutover hook must acknowledge with an empty JSON object")
             self.close_candidate()
             self.manager.stop(self.name)
-            self.start_target()
+            self.start_target(record)
             return {}
         if step in {"collector-release", "worker-stop"}:
             self.manager.stop(self.name)
             if step == "worker-stop":
                 return {}
         if step in {"collector-start", "worker-start"}:
-            self.start_target()
+            self.start_target(record)
             return {}
         if step == "worker-drain" and self.name == "web-notifier":
             notifier_plan = ctl.build_plan(release=self.target, names={"postgres", "web", self.name})
@@ -277,7 +359,7 @@ class Handoff:
         return self.hook(step, record)
 
 
-def installed():
+def installed(*, recovery=False):
     if os.environ.get("FERTILE_SERVICE_MANIFEST"):
         raise ValueError("hot-upgrade uses the installed release manifest")
     base = units.managed_release(ctl.ROOT)
@@ -288,11 +370,11 @@ def installed():
         manager = Systemd(base)
     else:
         base = ctl.release_path()
-        if not ctl.daemon_pid():
+        if not recovery and not ctl.daemon_pid():
             raise RuntimeError("start the installed supervisor before a per-service handoff")
-        manager = Supervisor(base)
-    if not (base / "fertile/scripts/service_releases.py").is_file():
-        raise ValueError("install a baseline release with per-service selection support first")
+        manager = Supervisor(base, recovery=recovery)
+    if not (base / "fertile/scripts/handoff_start.py").is_file():
+        raise ValueError("install a baseline release with hot-upgrade start fencing first")
     return base, manager
 
 
@@ -363,7 +445,7 @@ def upgrade(args, hook):
 
 def reconcile(args, hook):
     with hot_upgrade.lock(ctl.ROOT):
-        base, manager = installed()
+        base, manager = installed(recovery=True)
 
         def verify(step, record):
             result = hook(step, record)
@@ -377,22 +459,23 @@ def reconcile(args, hook):
             row = plan["services"][service]
             if row["skip"]:
                 raise ValueError("selected service is unavailable")
-            started = False
             if not manager.pid(service):
                 if result.get("safe_to_start") is not True:
                     raise ValueError("hook must explicitly authorize recovery of the stopped service")
-                manager.start(service, row)
-                started = True
+                if service == "web" and not row["pinned"]:
+                    # A previous attempt may already have applied expansion SQL.
+                    service_releases.select(ctl.ROOT, base, service, active)
+                    row = ctl.build_plan(release=base, names={service}, use_pins=True)["services"][service]
+                if service == "finance-api":
+                    ctl.check_queue_compatibility(plan)
+                start_handoff(manager, service, row, record)
             if isinstance(manager, Supervisor):
                 running = manager.plan["services"][service]
                 if running.get("release", manager.plan["release"]) != str(active):
                     raise ValueError("rendered supervisor plan disagrees with reconciliation")
-            if started:
-                readiness = ready_evidence(hook, "reconcile-ready", record, lambda: manager.pid(service), row)
-                if not isinstance(readiness, dict) or readiness.get("ready") is not True:
-                    raise ValueError("hook must confirm application readiness after recovery")
-            else:
-                wait_ready(lambda: manager.pid(service), row)
+            readiness = ready_evidence(hook, "reconcile-ready", record, lambda: manager.pid(service), row)
+            if not isinstance(readiness, dict) or readiness.get("ready") is not True:
+                raise ValueError("hook must confirm application readiness after recovery")
             return result
 
         return hot_upgrade.reconcile(ctl.ROOT, args.id, verify, lock_held=True)

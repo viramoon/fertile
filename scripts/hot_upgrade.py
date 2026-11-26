@@ -25,6 +25,7 @@ ROLES = {"reader", "projector", "collector", "worker"}
 STATUSES = {"running", "complete", "aborted", "needs-reconcile", "reconciled"}
 UNRESOLVED = {"running", "needs-reconcile"}
 CONTINUITY = {"unknown", "ticks-restored", "bars-restored", "snapshot-only", "unrecoverable"}
+UNKNOWN_GAP = {"continuity": "unknown", "missing_count": None}
 
 
 def timestamp():
@@ -102,16 +103,20 @@ def _ack(result, field):
     return {field: True}
 
 
+def _validate_stream(stream, source):
+    if not isinstance(stream, str):
+        raise ValueError("invalid watermark or gap stream")
+    stream_source, _, product = stream.partition("/")
+    if not identifier(stream_source) or not identifier(product) or (source and stream_source != source):
+        raise ValueError("invalid watermark or gap stream")
+
+
 def _watermark(result, *, source=None, required=False):
     entries = result.get("watermark")
     if not isinstance(entries, dict) or (required and not entries):
         raise ValueError("hook did not supply required watermarks")
     for stream, offset in entries.items():
-        if not isinstance(stream, str):
-            raise ValueError("invalid watermark stream")
-        stream_source, _, product = stream.partition("/")
-        if not identifier(stream_source) or not identifier(product) or (source and stream_source != source):
-            raise ValueError("invalid watermark stream")
+        _validate_stream(stream, source)
         position(offset)
     return entries
 
@@ -119,6 +124,39 @@ def _watermark(result, *, source=None, required=False):
 def _at_least(observed, required):
     if any(key not in observed or position(observed[key]) < position(value) for key, value in required.items()):
         raise ValueError("candidate watermarks lag behind the handoff checkpoint")
+
+
+def _gap_outcome(result):
+    if not isinstance(result, dict):
+        raise ValueError("collector gap outcome must be an object")
+    continuity = result.get("continuity")
+    if not isinstance(continuity, str) or continuity not in CONTINUITY:
+        raise ValueError("collector gap needs a continuity classification")
+    count = result.get("missing_count")
+    if count is not None:
+        if continuity == "unknown":
+            raise ValueError("unknown collector gap cannot include a missing count")
+        position(count)
+    return {"continuity": continuity, "missing_count": count}
+
+
+def _gap_classifications(result, source, tracked):
+    if "products" not in result:
+        if len(tracked) > 1:
+            raise ValueError("collector gap needs an outcome for each product")
+        outcome = _gap_outcome(result)
+        return {**outcome, "products": {stream: outcome.copy() for stream in tracked}}
+
+    outcomes = result["products"]
+    if ("continuity" in result or "missing_count" in result or not isinstance(outcomes, dict)
+            or not tracked.keys() <= outcomes.keys()):
+        raise ValueError("collector gap needs an outcome for each product")
+    products = {}
+    for stream, outcome in outcomes.items():
+        _validate_stream(stream, source)
+        products[stream] = _gap_outcome(outcome)
+    summary = next(iter(products.values())) if len(products) == 1 else UNKNOWN_GAP
+    return {**summary, "products": products}
 
 
 class Transaction:
@@ -181,14 +219,18 @@ class Transaction:
             "source": source,
             "opened_at": timestamp(),
             "ready_at": None,
-            "continuity": "unknown",
-            "missing_count": None,
+            **UNKNOWN_GAP,
+            "products": {},
         }
+
+        def track(watermark):
+            gap["products"].update({stream: UNKNOWN_GAP.copy() for stream in watermark})
 
         def seal(result):
             watermark = _watermark(result, source=source)
             if not watermark and result.get("display_only") is not True:
                 raise ValueError("collector seal needs watermarks or a display-only confirmation")
+            track(watermark)
             return {"watermark": watermark, "display_only": not watermark}
 
         def checkpoint(result, flag, expected):
@@ -197,6 +239,7 @@ class Transaction:
             if not sealed and watermark:
                 raise ValueError("display-only collector reported a persistent watermark")
             _at_least(watermark, expected)
+            track(watermark)
             return {flag: True, "watermark": watermark}
 
         sealed = self.call("collector-seal", seal)["watermark"]
@@ -206,15 +249,11 @@ class Transaction:
         gap["ready_at"] = timestamp()
 
         def classify(result):
-            continuity = result.get("continuity")
-            if not isinstance(continuity, str) or continuity not in CONTINUITY:
-                raise ValueError("collector gap needs a continuity classification")
-            count = result.get("missing_count")
-            if count is not None:
-                position(count)
-            return {"continuity": continuity, "missing_count": count}
+            classification = _gap_classifications(result, source, gap["products"])
+            gap.update(classification)
+            return classification
 
-        gap.update(self.call("collector-gap", classify))
+        self.call("collector-gap", classify)
 
     def worker(self):
         self.call("worker-drain", lambda result: _ack(result, "drained"))
