@@ -51,6 +51,7 @@ jobs:
               ".github/ISSUE_TEMPLATE/production-bug.md",
               ".github/pull_request_template.md",
               ".github/workflows/docs-check.yml",
+              ".github/workflows/data-policy.yml",
               ".gitmodules",
               "AGENTS.md",
               "README.md",
@@ -64,6 +65,7 @@ jobs:
               "docs/adr/ADR-001-cloud-box-network-constraints.md",
               "docs/adr/TEMPLATE.md",
               "docs/architecture.md",
+              "docs/data-policy.md",
               "docs/deploy-topology.md",
               "docs/release.md",
               "ops/README.md",
@@ -79,12 +81,35 @@ jobs:
           tracked = subprocess.check_output(["git", "ls-files", "-z"], text=True).split("\0")
           staged = subprocess.check_output(["git", "ls-files", "--stage", "-z"], text=True).split("\0")
           gitlinks = {row.split("\t", 1)[1] for row in staged if row.startswith("160000 ")}
+          artifact_gates = {
+              (".github/workflows/bootstrap-box.yml", "bootstrap-timing"):
+                  ("bootstrap", " --timing /home/box/test-logs/timing.env"),
+              (".github/workflows/supervisor.yml", "supervisor-drill"): ("supervisor", ""),
+          }
           for name in filter(None, tracked):
               if name in gitlinks:
                   continue
               path = root / name
               if path.suffix in {".yaml", ".yml"}:
-                  yaml.safe_load(path.read_text(encoding="utf-8"))
+                  document = yaml.safe_load(path.read_text(encoding="utf-8"))
+                  if name.startswith(".github/workflows/"):
+                      for job in document.get("jobs", {}).values():
+                          steps = job.get("steps", [])
+                          for i, step in enumerate(steps):
+                              if not step.get("uses", "").lower().startswith("actions/upload-artifact@"):
+                                  continue
+                              upload = step.get("with", {})
+                              gate = artifact_gates.get((name, upload.get("name")))
+                              assert gate and i > 0 and "if" not in step, f"制品未经过公开报告检查: {name}"
+                              profile, timing = gate
+                              report = upload["name"] + ".json"
+                              assert upload.get("path") == "${{ runner.temp }}/" + report, f"制品路径不符: {name}"
+                              assert upload.get("if-no-files-found") == "error", f"制品必须存在: {name}"
+                              previous = steps[i - 1]
+                              assert "if" not in previous and not previous.get("continue-on-error"), name
+                              assert previous.get("run") == (
+                                  f'python3 -B scripts/data-guard.py artifact {profile} "$RUNNER_TEMP/{report}"{timing}'
+                              ), f"制品检查步骤不符: {name}"
               if path.suffix == ".md":
                   content = path.read_text(encoding="utf-8")
                   assert content.strip(), f"空文档: {name}"
@@ -106,5 +131,5 @@ jobs:
           body = os.environ.get("PR_BODY", "")
           assert re.search(r"\bCloses\s+#\d+\b", body, re.IGNORECASE), "PR 描述缺少 Closes #<号>"
           assert "测试结果" in body, "PR 描述缺少测试结果"
-          print(f"通过：{len(required)} 个必需文件，文档非空、相对链接、YAML、初始化范围与 PR 描述")
+          print(f"通过：{len(required)} 个必需文件，文档非空、相对链接、YAML、制品上传入口、初始化范围与 PR 描述")
           PY

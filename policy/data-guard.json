@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "max_blob_bytes": 1048576,
+  "max_pr_bytes": 65536,
+  "fixture_root": "tests/fixtures/",
+  "fixture_manifest": "policy/synthetic-fixtures.json",
+  "fixture_extensions": [".csv", ".tsv", ".json", ".jsonl", ".ndjson"],
+  "generator_extensions": [".py", ".sh", ".rs", ".js", ".mjs", ".ts"],
+  "blocked_directory_pattern": "(?:data(?:[-_.].*)?|datasets?|(?:research[-_])?catalogs?|backups?|snapshots?|screenshots?|recordings?|(?:test[-_])?logs?|dumps?|crash[-_]?dumps?|exports?|artifacts?|secrets)",
+  "blocked_filenames": ["env.sh", "runtime.env", "core", ".lfsconfig"],
+  "blocked_extensions": [
+    ".7z", ".arrow", ".avif", ".bak", ".bmp", ".bz2", ".cap", ".db", ".db3",
+    ".docx", ".dmp", ".duckdb", ".dump", ".feather", ".flac", ".gif", ".gz",
+    ".heic", ".ico", ".ipynb", ".jpeg", ".jpg", ".lfs", ".log", ".lz4", ".mov",
+    ".mp3", ".mp4", ".ogg", ".orc", ".parq", ".parquet", ".pcap", ".pcapng",
+    ".pdf", ".png", ".rar", ".rdb", ".sqlite", ".sqlite3", ".svg", ".tar",
+    ".tfrecord", ".tgz", ".tiff", ".wal", ".wav", ".webm", ".webp", ".xls",
+    ".xlsx", ".xz", ".zip", ".zst"
+  ]
+}

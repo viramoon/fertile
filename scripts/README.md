@@ -24,6 +24,8 @@
 
 服务使用 [部署清单](../deploy/service.yaml)。systemd 的安装和切换步骤见 [普通服务器部署指南](../deploy/linux-server.md)，压测盒子操作、备份与故障处理见 [Ruler 手册](../ops/ruler-runbook.md)，系统版本规则见 [发版文档](../docs/release.md)。
 
+`data-guard.py` 提供 Git 索引、push 记录、CI 提交范围、私有目录和公开报告检查。钩子安装与共享规则见 [四仓数据发布政策](../docs/data-policy.md)。
+
 静态路由等 OpenAPI 未变的 web 升级可以保留 frontend 记录的 web 祖先提交。契约检查会从该祖先和新版 gitlink 的独立 Git 归档分别导出 OpenAPI 并逐字节比较。两个客户端仍按锁定的输入重新生成校验，两份快照仍与锁定提交的导出比对。[契约验证流程](../contracts/README.md#验证)
 
 本机压力测试与部署复验使用 `tests/e2e-smoke.sh local --paper-only`，公网巡检按默认配置跳过。

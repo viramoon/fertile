@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "products": {
+    "ibkr-us-equity-l1": {
+      "display_live": null,
+      "record_local": null,
+      "derive_non_display": null,
+      "backup_personal_drive": null,
+      "redistribute": false,
+      "basis": "pending"
+    },
+    "ibkr-opra-l1": {
+      "display_live": null,
+      "record_local": null,
+      "derive_non_display": null,
+      "backup_personal_drive": null,
+      "redistribute": false,
+      "basis": "pending"
+    },
+    "ibkr-nasdaq-totalview": {
+      "display_live": null,
+      "record_local": null,
+      "derive_non_display": null,
+      "backup_personal_drive": null,
+      "redistribute": false,
+      "basis": "pending"
+    }
+  }
+}

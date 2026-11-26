@@ -1,0 +1,24 @@
+name: Data publication policy
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  data-policy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check PR history and submission text
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: python3 -B scripts/data-guard.py range "$PR_BASE" HEAD --pr-event "$GITHUB_EVENT_PATH"
+      - name: Exercise publication guards with synthetic inputs
+        run: python3 -B tests/data_policy_test.py -v

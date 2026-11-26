@@ -41,6 +41,7 @@ curl -fsS http://127.0.0.1:8090/api/v1/system/status
 | 本机与公网健康、备份、恢复和告警 | [运维索引](ops/README.md) |
 | OpenAPI 与生成客户端 | [契约快照与验证](contracts/README.md) |
 | 工具链、配置与密钥 | [开发环境](docs/dev-environment.md) · [配置](docs/configuration.md) |
+| 合成 fixture、私有数据与 Git/PR 检查 | [四仓数据发布政策](docs/data-policy.md) |
 | 版本、子模块指针与脚本 | [发版规则](docs/release.md) · [脚本](scripts/README.md) |
 | 架构、部署边界与协作 | [架构](docs/architecture.md) · [ADR-001](docs/adr/ADR-001-cloud-box-network-constraints.md) · [AGENTS.md](AGENTS.md) |
 

@@ -65,6 +65,7 @@ infrastructure:
     state: data/ibgateway
     logs: logs/ibgateway
 paths: # 均相对于持久根，默认值见 profiles，可用 FERTILE_ROOT / FERTILE_BOX_HOME 覆盖。
+  # 持久根、独立数据根和运维导出目录均须在四仓工作树外，见 data_publication_policy。
   releases: releases
   active: current
   data: data
@@ -76,6 +77,7 @@ paths: # 均相对于持久根，默认值见 profiles，可用 FERTILE_ROOT / F
   tools: tools
   backups: backups
 operations:
+  data_publication_policy: docs/data-policy.md
   bootstrap: deploy/bootstrap.md
   server_guide: deploy/linux-server.md
   runbook: ops/ruler-runbook.md
