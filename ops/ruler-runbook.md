@@ -8,7 +8,7 @@
 
 ## 首次启动
 
-1. 以部署账户 checkout 选定的提交。初始化三个私有子模块及 Nautilus 源码，核对目标提交和 profile。
+1. 以部署账户 checkout 选定的提交。初始化三个公开子模块及 Nautilus 源码，核对目标提交和 profile。
 2. 按 [bootstrap](../deploy/bootstrap.md) 安装锁定的工具，执行 `source "$FERTILE_ROOT/env.sh"`。确认磁盘剩余足以构建 Rust、Python wheel、前端与备份。
 3. 按 web 手册确认静态目录、数据库角色和管理令牌。凭据文件只允许属主读写。[web RUNBOOK](https://github.com/viramoon/web/blob/main/RUNBOOK.md)
 4. 在本机 Gateway 完成 paper 登录前，独立记录本机服务状态、paper 账号和行情连续性。开发演练可显式选 replay，并为回放与真实行情分别安排持久数据根。
