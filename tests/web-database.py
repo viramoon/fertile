@@ -129,6 +129,16 @@ def audit():
             supervision.prepare_web(old_plan)
             assert sql(base, "SELECT count(*) FROM pg_roles WHERE rolname='fertile_web'") == "0"
             assert sql(admin, "SHOW hba_file") == str(original[1])
+            assert sql(admin, "SELECT to_regnamespace('app') IS NULL AND to_regnamespace('blog') IS NULL "
+                              "AND to_regclass('public._sqlx_migrations') IS NULL") == "t"
+            run(source, "migrate", env=candidate)
+            assert applied_migrations(admin, "public") == APPLIED
+            assert sql(admin, "SELECT to_regclass('app.integration_configs') IS NOT NULL") == "t"
+            print("previous bundle: migrated an empty database with the original peer identity and HBA")
+
+            # Recreate the disposable database for the separate pre-W1 restore and upgrade.
+            run("dropdb", "web", env=base)
+            supervision.prepare_web(old_plan)
             seed_pre_w1(admin)
             assert applied_migrations(admin, "public") == INITIAL
             assert sql(admin, "SELECT to_regclass('app.integration_configs') IS NULL") == "t"

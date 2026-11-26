@@ -38,6 +38,8 @@ finance CI 从上游源码构建 wheel，缓存以 source commit + 工具链 / l
 
 总仓 Actions 先使用内置令牌检出 fertile。管理员在 fertile 的 Settings → Secrets and variables → Actions 新增仓库级 FERTILE_SUBMODULES_TOKEN，选择能够读取 finance、web、frontend 的细粒度凭据，三个仓库仅授予 Contents: Read 并按所属组织规则审批。重跑集成作业。诊断依次检查 secret 配置、仓库可读性和锁定提交可达性；Nautilus 源码来自公开上游。验证远端祖先、从源构建三组件、重导出两份契约及重跑两个客户端生成器后，在专用运行根启动 PostgreSQL、回放行情、finance 与 web，执行真实队列和页面冒烟。备份恢复、Gateway 离线保护、巡检与 supervisor 各自有独立作业；这些作业只需读取总仓。
 
+集成作业在临时 PostgreSQL 中验证旧连接布局下的空库可由真实的 `web migrate` 初始化。作业另行恢复仅含 W1 前迁移记录的库，验证受管角色应用 `20261126000000`、保留既有数据并支持重复迁移。
+
 ### 总仓集成作业的 Nautilus wheel 缓存
 
 [集成工作流](../.github/workflows/integration.yml) 先完成锁定工具链的安装和校验，再按精确 key 恢复 `$FINANCE_BUILD_ROOT/wheels`。该目录含源码构建的 wheel、`SHA256SUMS` 和 `source-commit`。key 将 finance gitlink（含构建脚本、锁文件、Nautilus gitlink）与总仓工具链配置、bootstrap 与发布构建脚本、工作流、runner 镜像版本、系统库版本绑定，并包含构建模式、精度、架构、Rust 和 Clang 版本输出及 Python SOABI。命中后，finance 仍按冻结锁文件同步环境，校验 wheel 的 SHA256 与源码提交，重新安装并导入原生扩展。发布构建也会验证 wheel 与发布目录。
