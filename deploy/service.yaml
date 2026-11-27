@@ -118,7 +118,7 @@ operations:
     status: scripts/fertile status --json
     restart: scripts/fertile restart <service>
     logs: scripts/fertile logs <service>
-    rollback: scripts/fertile rollback <commit>
+    rollback: scripts/fertile rollback <commit> # 共享目标仅限无新增迁移且新版未写过该库。迁移回退见 runbook。
   restart_policy: # supervisord 的选项，systemd 见 deploy/systemd
     autorestart: true
     stopsignal: TERM

@@ -31,6 +31,10 @@ CI 的 Integration 作业从本批 gitlink 构建制品。九只股票的回放 
 
 独立复验先按 [契约验证](../contracts/README.md#验证)从干净克隆检查 gitlinks 与生成物，再执行 [Integration](../.github/workflows/integration.yml) 和 [Recovery](../.github/workflows/recovery.yml) 的隔离用例。保留可公开的测试状态和计数。数据正文、邮件正文、数据库、日志和截图留在本地临时目录，处理边界见[四仓数据政策](data-policy.md)。
 
+## 含迁移发布的回退
+
+回退前暂停 notifier 并清点 outbox。将迁移前备份恢复到新建的 `data-paper-rollback-<sha>` 和 `web_rollback_<sha>`，在这对目标上运行旧发布。`<sha>` 为升级前的 fertile 提交号。旧代码不得连接新版写过的数据库，原数据根、数据库和台账留给新版。切回新版时按部署记录恢复原指针，将隔离窗口的写入另存并对账。[Ruler 回退步骤](../ops/ruler-runbook.md#从升级前快照回滚并切回新版) · [热回退适用范围](../deploy/hot-upgrade.md#升级与兼容回退)
+
 ## 后续批次
 
 - **质量接口。** 断源、补数与浏览器质量报告贯通验收随上游接线推进。

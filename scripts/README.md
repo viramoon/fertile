@@ -14,12 +14,12 @@
 | scripts/fertile verify-systemd | 渲染并静态检查样例 unit。若有 systemd-analyze 则执行 verify。 |
 | scripts/fertile status --json | 读取已安装 systemd 实例或 supervisord 的进程状态，以及 HTTP live / ready 结果。 |
 | scripts/fertile restart SERVICE / logs SERVICE | 操作当前实例所属守护器，分别重启服务或读取近 100 行日志。systemd 模式日志来自 journal。 |
-| scripts/fertile hot-upgrade SERVICE SHA --hook PATH | 验证兼容性，完成指定进程的候选就绪或停写交接，记录服务发布指针。`--migrate` 应用扩展迁移，`--rollback` 走兼容回退。 |
+| scripts/fertile hot-upgrade SERVICE SHA --hook PATH | 验证兼容性，完成指定进程的候选就绪或停写交接，记录服务发布指针。`--migrate` 供隔离演练，`--rollback` 仅用于无新增迁移且新版未写过旧版目标库的兼容回退。[热回退条件](../deploy/hot-upgrade.md#升级与兼容回退) |
 | scripts/fertile hot-upgrade-status [--json] / hot-upgrade-reconcile ID --hook PATH | 读取热升级事务或在核对实际进程、租约和发布指针后确认中断结果。详见[热升级与本机接口](../deploy/hot-upgrade.md)。 |
 | scripts/fertile data-root | 输出当前环境与 `config/runtime.env` 解析出的 finance 数据根。 |
 | scripts/healthwatch | 采样本机健康状态、记录告警并调度备份。未来生产服务器可通过 `FERTILE_PUBLIC_ORIGIN` 或巡检覆盖文件显式启用 HTTPS 就绪探测。详见 [巡检与告警](../ops/monitoring.md)。 |
-| scripts/fertile rollback SHA | 校验既有版本并切换，重新加载受影响服务。 |
-| scripts/fertile rollback --switch-only SHA | supervisor 已停时，校验既有版本并切换 `current`，由后续 `ensure-up` 启动。 |
+| scripts/fertile rollback SHA | 校验既有版本并切换，重新加载受影响服务。共享目标仅适用于无新增迁移、数据兼容且新版未写过目标库的回退。 |
+| scripts/fertile rollback --switch-only SHA | supervisor 已停时，校验既有版本并切换 `current`。含新增迁移的发布先恢复迁移前备份至 `data-paper-rollback-<sha>` 和 `web_rollback_<sha>`，随后用这一对目标运行旧发布。[隔离恢复流程](../ops/ruler-runbook.md#从升级前快照回滚并切回新版) |
 | scripts/backup.sh | 将活动库、队列、catalog 和公开配置备份到持久目录。 |
 | python3 scripts/backup_remote.py full / hourly | 通过 `rclone crypt` 发布独立日全量或基于已验证父点的小时增量。 |
 | python3 scripts/backup_remote.py status [--cached] | 输出最后可恢复到的时间、点 ID、年龄及告警状态。`--cached` 使用本机上次观测。 |

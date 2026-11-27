@@ -100,6 +100,8 @@ scripts/fertile logs web
 
 unit 指向安装时选定的基准发布。拥有目标 unit 启停权限的运行账户可按应用就绪与兼容证明逐个切换服务。维护窗口内整体换版时，先用 `sudo systemctl stop fertile.target` 停止整栈，以运行账户构建下一版本，再用同一参数重跑 `install-systemd`，启动 target 并复验。注销这个实例的 unit、停用自启并停止服务时，由管理员执行 `sudo scripts/fertile uninstall-systemd --root "$FERTILE_ROOT"`。[热升级与本机接口](hot-upgrade.md)
 
+含新增迁移的发布回退时，先将迁移前备份恢复到 `data-paper-rollback-<sha>` 和 `web_rollback_<sha>`。在独立实例中配置这对目标及旧发布，核对 unit 使用的卷与实际数据库连接后再启动旧版。同一主机上的托管 unit 名固定，切换实例须先停用并移除原实例的 unit。保留原实例的配置和数据供新版切回。[从升级前快照回滚并切回新版](../ops/ruler-runbook.md#从升级前快照回滚并切回新版)
+
 私人 Drive 异地备份默认关闭。启用时按手册准备本机加密配置，并为日全量和小时增量安排独立的 timer。 [异地备份调度](../ops/backup.md#调度状态与轮转)
 
 ### supervisord

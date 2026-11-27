@@ -55,7 +55,7 @@ curl -fsS http://127.0.0.1:8090/api/v1/backtests/sample
 2. 检出获批提交并初始化递归子模块。运行 `scripts/fertile build --ref <fertile-commit>`，核对 `current/manifest.json` 的三个 gitlink 和完整静态目录。systemd 按普通服务器指南在构建前停旧 target，构建后重装指向新版的 unit。[systemd 版本切换](../deploy/linux-server.md#systemd)
 3. 受管 PostgreSQL 由 supervisord 的 `scripts/fertile ensure-up` 或 systemd 启动时的准备步骤以 `fertile_web` 运行新版 `web migrate`，成功后启动新版 web。使用外部 PostgreSQL 时，由数据库管理员安排显式迁移。以 web 运行账户加载服务所用的 `DATABASE_URL` 和 profile，设置 `WEB_CONFIG_DIR="$FERTILE_ROOT/current/web/config"`，执行新版 `current/bin/web migrate`，成功后再重启到新版 web。确认 SQLx 台账已记录 `20261126000000` 成功。
 4. 核对新版 web PID、`/healthz/ready` 和 `/api/v1/system/status`，打开终端页面并核对同源 JS/CSS，按[第三方许可证复验](#第三方许可证复验)核对两个第三方路径和根路径 `/NOTICE` 的响应。在部署复验窗口运行 `tests/e2e-smoke.sh local --paper-only`，确认可提交回测。官方历史日线作业按[隔离历史日线验收](#部署后的隔离历史日线验收)使用隔离队列。
-5. 降级到 W1 之前时，从升级前快照恢复独立的兼容数据库，保留已迁移的数据库和密文。旧版 SQLx 迁移器会拒绝台账中新增的迁移版本。使用新版控制器与兼容数据库切回旧制品，步骤见 [从升级前快照回滚并切回新版](#从升级前快照回滚并切回新版)。若重装旧版 systemd unit，先记录并撤下 `runtime.env` 中已配置的 W1 变量，切回新版后恢复。若还跨越 finance `7600be4`，为旧 finance 选择兼容的独立数据根或恢复首次写入四窗口摘要前的备份。
+5. 回退 W1 迁移时，将迁移前备份恢复到 `data-paper-rollback-<sha>` 和 `web_rollback_<sha>`，在这对目标上运行旧发布。保留原数据、迁移台账和密文。旧版 SQLx 迁移器会拒绝台账中的新增迁移。跨越 finance `7600be4` 时，还要确认该快照早于首次写入旧版无法读取的四窗口摘要。[从升级前快照回滚并切回新版](#从升级前快照回滚并切回新版)
 
 ### 许可证路径修复升级
 
@@ -103,7 +103,7 @@ curl -fsS http://127.0.0.1:8090/api/v1/backtests/sample
 
 F3 投影和 W3 notifier 默认关闭。当前候选验证 W3 邮件 worker 组件，生产业务事件进入 outbox、W4 SMTP 候选快照与备份/采集状态文件仍待接线。当前进程清单使用 W3 固定中继设置。IBKR 使用 paper 只读行情。九标的回放与现网实例使用独立数据根。进程环境、默认值和独立运行边界见 [finance 配置](../docs/configuration.md#finance-独立程序参数)。
 
-回退前先暂停 notifier，清点待发与已静默记录。保留升级后的 PostgreSQL、已授权 WAL 和回测结果；需要运行旧 SQLx 迁移器时用升级前快照恢复兼容的独立库，再恢复旧制品。投影可以在隔离根从已封段 WAL 重建。详见[跨版本恢复](#从升级前快照回滚并切回新版)与[单写者交接](../deploy/hot-upgrade.md)。
+回退前先暂停 notifier，清点待发与已静默记录。含新增迁移的发布一律把迁移前备份恢复到 `data-paper-rollback-<sha>` 和 `web_rollback_<sha>`，再在这对目标上运行旧发布。保留升级后的 PostgreSQL、已授权 WAL 和回测结果。投影可从所选恢复点的已封段 WAL 在隔离根重建。[跨版本恢复](#从升级前快照回滚并切回新版) · [单写者交接](../deploy/hot-upgrade.md)
 
 ## 部署后的隔离历史日线验收
 
@@ -293,11 +293,11 @@ fi
 
 保留已通过隔离回读的旧版制品。从总仓检出暂存下一发布，确认前后两版可读取现有数据，按应用角色逐个切换。升级 finance API 或 web 时核对 collector 的 PID、水位和来源。切换采集器前准备同源封段、租约交接和缺口检查。使用 `hot-upgrade-status` 查询事务，遇到控制器意外退出或切换结果不确定时，先按实际进程、端口、水位和租约核对，再记录恢复结果。复核、命令和接口见[热升级与本机接口](../deploy/hot-upgrade.md)。
 
-旧版回读无法通过时，使用隔离数据目录和数据库进行回退，保留新版数据用于恢复。整栈命令用于维护窗口。以下示例由获授权的部署账户在目标主机执行，开发与独立复测使用临时模板和合成进程。
+含新增迁移的发布一律按[隔离恢复流程](#从升级前快照回滚并切回新版)回退。旧代码不得连接新版写过的数据库。整栈命令用于维护窗口，由获授权的部署账户在目标主机执行。开发与独立复测使用临时目录和合成或回放 fixture。
 
 ### 整栈维护
 
-`status`、`logs` 和 `restart` 按当前持久根选择已安装且可连接的 systemd 管理器，其他实例沿用 supervisord。下面的停机、恢复和回滚步骤用于云盒子。
+`status`、`logs` 和 `restart` 按当前持久根选择已安装且可连接的 systemd 管理器，其他实例沿用 supervisord。下面的停机与恢复步骤用于云盒子。
 
 ```sh
 scripts/fertile status --json
@@ -306,80 +306,52 @@ scripts/fertile stop web
 scripts/fertile restart web
 scripts/fertile down
 scripts/fertile ensure-up
-scripts/fertile rollback <previous-fertile-commit>
 ```
 
-普通 `rollback` 适用于两版共享兼容的数据和配置。传入已构建的 fertile 提交，控制器验证制品后切换服务与静态资源。旧版无法读取新版队列或摘要时，按下方步骤切换独立数据。若私有 supervisor 仍管理正在运行的共享服务，先由 Ruler 处理所有权。部署记录包括两版提交、三个 gitlink、数据根、库名、快照路径、迁移状态和操作时间。
+普通 `rollback` 只适用于无新增迁移、两版数据和配置兼容、且旧发布所连接的数据库未被新版写过的场景。若私有 supervisor 仍管理正在运行的共享服务，先由 Ruler 处理所有权。部署记录包括两版提交、三个 gitlink、数据根、库名、快照路径、迁移状态和操作时间。
 
 ### 从升级前快照回滚并切回新版
 
-使用包含本节脚本的源码检出执行整套步骤。示例针对本机受管 PostgreSQL、`data-paper` 和已经构建的 `7f88ba4`，工作路径以现场记录为准。若 web 使用 `secrets/web-database.env` 中的外部 `DATABASE_URL`，应由数据库管理员先安排独立的连接配置和切换步骤。本节的 `FERTILE_WEB_DATABASE` 适用于本机连接。
+含新增迁移的发布，先将迁移前备份恢复到新建的 `data-paper-rollback-<sha>` 数据根和 `web_rollback_<sha>` 数据库，再在其上运行旧发布。`<sha>` 为升级前的完整 fertile 提交号。原 `data-paper`、现网库 `web` 及其迁移台账保留给新版。即使兼容性检查通过，旧代码也不得连接新版写过的数据库。
 
-1. 暂停接单，等运行中的作业结束，记录新版和升级前快照。载入工具环境，确认当前数据根、库名和 PostgreSQL 端口。先把旧快照保存在自动轮转目录外，避免保全新版时触发清理。以下各段在同一个 Bash 会话逐段执行，每条命令成功后再继续。
-
-   ```bash
-   source "${FERTILE_ROOT:?先设置实例的持久根}/env.sh"
-   new_sha=$(basename -- "$(readlink -f -- "$FERTILE_ROOT/current")")
-   new_data=$(scripts/fertile data-root)
-   new_db=web  # 现场若配置了 FERTILE_WEB_DATABASE，填对应库名
-   export FERTILE_POSTGRES_PORT=5432  # 现场若配置了其他端口，填对应端口
-   old_sha=7f88ba4
-   old_data="$FERTILE_ROOT/data-paper-rollback-$old_sha"
-   old_db="web_rollback_$old_sha"
-   archive=$(mktemp -d "$FERTILE_ROOT/rollback-archives.XXXXXXXX")
-   cp -a -- "$FERTILE_ROOT/backups/20261125T180713.484833Z" "$archive/before-upgrade"
-   pre_upgrade="$archive/before-upgrade"
-   scripts/fertile status --json
-   ```
-
-2. 用 supervisor 停业务。`down` 会一并停 PostgreSQL，随后单独启动 PostgreSQL，整个备份和恢复期间保持它可用。备份新版数据和队列，并把快照保存到轮转目录外。确认 `snapshot.json` 记录的库名和来源符合切换计划，升级前快照应有 `postgres.dump`。
+1. 暂停接单和 notifier，排空作业，记录新版制品、版本指针、数据根、研究根、数据库和业务水位。保全新版快照与配套密文，把已核实的迁移前快照留在轮转目录外。快照必须与旧制品、行情来源和迁移起点相符，并包含 `postgres.dump`。缺少匹配快照时停止回退。停下业务和 supervisor，确认原采集器释放写锁和 IBKR 订阅，再单独启动本机 PostgreSQL。暂停会重启服务、发布备份或发送通知的外部调度。若存在逐服务发布指针，停栈后按[热升级手册](../deploy/hot-upgrade.md#升级与兼容回退)私下归档，确保整栈选用同一旧发布。
+2. 使用能识别独立数据根、研究根和库名的新控制器。下例用于受管 PostgreSQL 与 supervisord 的维护窗口。先在 Bash 会话设置 `FERTILE_ROOT`、实际端口 `FERTILE_POSTGRES_PORT`、旧提交 `old_sha` 和迁移前快照的绝对路径 `pre_upgrade`，并准备已安装的工具链。含 F3 封段的快照需提供能读取该归档的 `FERTILE_BACKUP_WAL_BIN`。库名与目录必须尚未使用。`--dry-run` 校验快照、归档和目标占用。任何失败都应停止，按[恢复步骤](backup.md#恢复步骤)处理，保留已有目标供核对。`runtime.env` 和 `env.sh` 保持原样，快照里的配置只供核对。
 
    ```bash
-   scripts/fertile down
-   scripts/postgres.sh start
-   new_snapshot=$(FERTILE_DATA_ROOT="$new_data" PGDATABASE="$new_db" scripts/backup.sh)
-   cp -a -- "$new_snapshot" "$archive/new-version"
+   (
+     set -euo pipefail
+     export FERTILE_ROOT="${FERTILE_ROOT:?请设置实例的持久根}"
+     export FERTILE_POSTGRES_PORT="${FERTILE_POSTGRES_PORT:?请设置实际 PostgreSQL 端口}"
+     [[ "$FERTILE_ROOT" == /* && "${pre_upgrade:?请设置迁移前快照}" == /* ]]
+     [[ "${old_sha:?请设置旧发布提交}" =~ ^[0-9a-f]{40}$ ]]
+     test -s "$pre_upgrade/postgres.dump"
+     old_data="$FERTILE_ROOT/data-paper-rollback-$old_sha"
+     old_db="web_rollback_$old_sha"
+     test ! -e "$old_data" && test ! -L "$old_data" || exit 1
+     local_pg=(env -u PGHOSTADDR -u PGSERVICE "PGHOST=$FERTILE_ROOT/run/postgres"
+               "PGPORT=$FERTILE_POSTGRES_PORT" "PGUSER=$(id -un)")
+     occupied=$("${local_pg[@]}" psql -XAt -v ON_ERROR_STOP=1 -d postgres \
+       -c "SELECT 1 FROM pg_database WHERE datname = '$old_db'")
+     test -z "$occupied"
+     restore_target=(--target-data-root "$old_data" --target-database "$old_db")
+     "${local_pg[@]}" scripts/restore.sh "$pre_upgrade" --dry-run "${restore_target[@]}"
+     "${local_pg[@]}" scripts/restore.sh "$pre_upgrade" "${restore_target[@]}"
+     scripts/postgres.sh stop
+
+     old_env=(env -u FERTILE_SERVICE_MANIFEST "FERTILE_DATA_ROOT=$old_data"
+              "FERTILE_RESEARCH_ROOT=$old_data/research" "FERTILE_WEB_DATABASE=$old_db"
+              FERTILE_ENABLE_WEB_NOTIFIER=0 FERTILE_BACKUP_REMOTE=)
+     "${old_env[@]}" scripts/fertile rollback --switch-only "$old_sha"
+     "${old_env[@]}" scripts/fertile ensure-up
+     "${old_env[@]}" scripts/fertile data-root
+     "${old_env[@]}" scripts/fertile status --json
+   )
    ```
 
-3. 验证升级前快照再恢复到新目录和新库。带显式目标的 `--dry-run` 会只读检查目标目录和库的占用情况。首次恢复使用空目录或尚未创建的目录，以及空库或不存在的库。遇到占用时，dry-run 会在标准错误中点名目录或库并退出 1。确认允许覆盖时可加 `--overwrite` 做预检，dry-run 会警告正式恢复将替换哪些内容，其余检查通过时退出 0。PostgreSQL 不可达或已存在的目标库无法读取时，命令会点名目标库并退出 1。即使看到 `SHA256 verified`，也要检查退出码再继续。
+3. 核对 `current`、实际 web 连接的库名、SQLx 台账、finance 数据根与研究根，再确认 web 和 finance API 就绪并读到升级前已有的作业。核对行情来源和缺口，保持 IBKR paper 只读与单一采集订阅。只有在上述核对通过后才恢复接单。回退期间的手动启动和重启恢复沿用示例 `old_env` 的环境覆盖值，安排值守或暂停任何会用默认配置自启的入口。重新启用 notifier 或异地备份前，先核对回退窗口的状态，避免重复投递或把隔离分支发布为原备份链的后继。
+4. 切回新版时，暂停接单、排空旧版作业并停止隔离栈。需要保留窗口内的写入时，将隔离数据根和旧库另作快照，记录待对账的作业、事件、邮件和行情缺口。选回记录的新版制品及原数据根、研究根和库，按正常部署流程核对迁移台账、就绪和已有作业后恢复业务。两套数据分别留存，回退窗口的写入经业务对账后再决定如何补录。
 
-   ```bash
-   scripts/restore.sh "$pre_upgrade" --dry-run --target-data-root "$old_data" --target-database "$old_db"
-   (cd "$pre_upgrade" && sha256sum --check SHA256SUMS)
-   scripts/restore.sh "$pre_upgrade" --target-data-root "$old_data" --target-database "$old_db"
-   scripts/postgres.sh stop
-   ```
-
-4. 用同一份新版控制器验证并切换 `current`，再由 supervisor 启动旧版。这里通过命令环境覆盖 `$FERTILE_ROOT/config/runtime.env` 中的三条运行指针。保留该文件、新版数据根和库名，也保留 `env.sh` 的工具链配置。快照的 `config/runtime.env` 可供核对，勿复制到持久配置目录。回滚期间手工执行 `ensure-up` 或主机重启后重新拉起 supervisor 时，沿用下列 `old_env`。
-
-   ```bash
-   old_env=(env "FERTILE_DATA_ROOT=$old_data" "FERTILE_RESEARCH_ROOT=$old_data/research" "FERTILE_WEB_DATABASE=$old_db")
-   "${old_env[@]}" scripts/fertile rollback --switch-only "$old_sha"
-   "${old_env[@]}" scripts/fertile ensure-up
-   ```
-
-5. 核对 `current`、数据根、旧库连接和服务状态。确认 web、finance API 就绪，查询一条升级前已有的作业，再运行本机 `--paper-only` 冒烟。冒烟会在当前队列提交作业，需在核对指针后执行。通过本地复验后恢复接单。
-
-   ```bash
-   readlink -f -- "$FERTILE_ROOT/current"
-   "${old_env[@]}" scripts/fertile data-root
-   scripts/fertile status --json
-   curl -fsS http://127.0.0.1:8090/api/v1/system/status
-   psql -X -h "$FERTILE_ROOT/run/postgres" -p "$FERTILE_POSTGRES_PORT" -d "$old_db" \
-     -c "SELECT datname, count(*) FROM pg_stat_activity WHERE datname=current_database() AND usename='fertile_web' GROUP BY datname"
-   "${old_env[@]}" tests/e2e-smoke.sh local --paper-only
-   ```
-
-6. 切回新版时，暂停接单并让旧版作业结束。需要保留窗口内的新写入时，依照第 2 步停业务并单独启动 PG，执行 `"${old_env[@]}" PGDATABASE="$old_db" scripts/backup.sh`，记录快照路径后执行 `scripts/postgres.sh stop`。通过原先记录的新版指针启动新版，研究目录继续使用原配置。确认新版作业可查，再重复运行状态检查和 paper-only 冒烟。
-
-   ```bash
-   scripts/fertile down
-   new_env=(env "FERTILE_DATA_ROOT=$new_data" "FERTILE_WEB_DATABASE=$new_db")
-   "${new_env[@]}" scripts/fertile rollback --switch-only "$new_sha"
-   "${new_env[@]}" scripts/fertile ensure-up
-   scripts/fertile status --json
-   "${new_env[@]}" tests/e2e-smoke.sh local --paper-only
-   ```
+外部 PostgreSQL 由 DBA 恢复到 `web_rollback_<sha>` 并提供仅连接该库的独立 `DATABASE_URL`。现有控制器的 `FERTILE_WEB_DATABASE` 仅用于受管库。systemd 使用独立实例的启动配置和恢复目标，按[普通服务器部署指南](../deploy/linux-server.md#systemd)安装指向旧版的 unit，启动前核对卷和数据库连接。原实例的配置文件保留供切回新版。
 
 ## 重启与外部入口
 
