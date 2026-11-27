@@ -73,8 +73,9 @@ class UpgradeRunbookTests(unittest.TestCase):
         guide = section(LINUX_SERVER, "systemd")
         upgrade = next(paragraph for paragraph in guide.split("\n\n") if "整体换版" in paragraph)
         order = ("暂停提交", "确认 worker 已排空", "`sudo systemctl stop fertile-finance-backtest-worker.service`",
-                 "确认 worker 和引擎均已退出", "`sudo systemctl stop fertile.target`", "`install-systemd`",
-                 "在启动 target 前单独完成 `web migrate` 并核对 SQLx 台账", "`sudo systemctl start fertile.target`")
+                 "确认 worker 和引擎均已退出", "`sudo systemctl stop fertile.target`",
+                 "在启动 target 前单独完成 `web migrate` 并核对 SQLx 台账", "`install-systemd`",
+                 "`sudo systemctl start fertile.target`")
         offsets = [upgrade.index(check) for check in order]
         self.assertEqual(offsets, sorted(offsets))
         self.assertIn(f"../{RUNBOOK}#{MANUAL})", upgrade)
