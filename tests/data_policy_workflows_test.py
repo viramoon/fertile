@@ -128,6 +128,11 @@ from pathlib import Path
 import sys
 
 root = Path(os.environ["RUNNER_TEMP"])
+trace = root / "trace"
+attempt = trace.read_text().splitlines().count("curl") if trace.exists() else 0
+# Record every invocation, including calls whose failure the script ignores.
+with trace.open("a") as file:
+    file.write("curl\\n")
 args = sys.argv[1:]
 partial = Path(args[args.index("--output") + 1])
 assert args == [
@@ -138,10 +143,6 @@ assert args == [
 jar = Path(os.environ["OPENAPI_GENERATOR_JAR"])
 assert partial.parent == jar.parent and partial.name.startswith(jar.name + ".part.")
 assert not jar.exists()
-trace = root / "trace"
-attempt = trace.read_text().splitlines().count("curl") if trace.exists() else 0
-with trace.open("a") as file:
-    file.write("curl\\n")
 status, http = os.environ["CURL_RESULTS"].split()[attempt].split(":")
 partial.write_bytes((root / "payload").read_bytes() if status == "0" else b"synthetic error body")
 print(http, end="")
@@ -182,6 +183,7 @@ sys.exit(int(status))
             "key": "fertile-openapi-generator-${{ steps.openapi-pin.outputs.version }}-${{ steps.openapi-pin.outputs.sha256 }}",
         }
         self.assertEqual(restore["uses"], "actions/cache/restore@v4")
+        self.assertEqual(restore.get("id"), "restore-openapi")
         self.assertEqual(restore["with"], cache_inputs)
         self.assertEqual(verify["env"], {
             "CACHE_HIT": "${{ steps.restore-openapi.outputs.cache-hit }}",
@@ -213,6 +215,11 @@ sys.exit(int(status))
         self.assertNotEqual(result.returncode, 0, result)
         self.assertIn("Cannot read the pinned OpenAPI Generator", result.stdout)
         self.assertFalse(self.output.exists())
+
+    def test_curl_stub_records_rejected_calls(self):
+        result = self.shell("curl --version")
+        self.assertNotEqual(result.returncode, 0, result)
+        self.assert_trace("curl")
 
     def test_cache_hit_checks_bytes_without_request(self):
         self.jar.write_bytes(self.payload)
