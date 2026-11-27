@@ -131,10 +131,7 @@ jobs:
                   assert path.suffix in {".md", ".yaml", ".yml"} or name in allowed, f"初始化范围外文件: {name}"
 
           body = os.environ.get("PR_BODY", "")
-          closing = re.search(r"\bCloses\s+#\d+\b", body, re.IGNORECASE)
-          t3_batch = (os.environ.get("HEAD_REF") == "issue-44-contracts-gitlinks-e2e"
-                      and re.search(r"(?im)^Refs[ \t]+#44[ \t]*$", body))
-          assert closing or t3_batch, "PR 描述缺少 Closes #<号> 或 T3 分批集成的 Refs #44"
+          assert re.search(r"\bCloses\s+#\d+\b", body, re.IGNORECASE), "PR 描述缺少 Closes #<号>"
           assert "测试结果" in body, "PR 描述缺少测试结果"
           print(f"通过：{len(required)} 个必需文件，文档非空、相对链接、YAML、制品上传入口、初始化范围与 PR 描述")
           PY

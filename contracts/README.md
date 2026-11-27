@@ -13,26 +13,27 @@
 
 ## 验证
 
-检出 fertile 对应的子模块，使用锁定的 Rust（含 rustfmt）、Node 和 pnpm，准备 JDK 17 或更高版本（含 `javac`）、`unzip`、`patch` 和 `flock`。在仓库根目录运行下列命令。
+检出 fertile 对应的子模块，使用锁定的 Rust（含 rustfmt）、Node 和 pnpm，准备 JDK 17 或更高版本（含 `javac`）、`unzip`、`patch` 和 `flock`。T3a 回归测试还使用 Python 3 和 PyYAML。在仓库根目录运行下列命令。
 
 ```sh
 git submodule update --init --recursive
 pnpm --dir frontend install --frozen-lockfile
 bash scripts/contract-diff.sh
 bash tests/contract-drift.sh
+python3 -B tests/t3a_contract_test.py
 ```
 
 检查将三个子模块的 HEAD 与 fertile 的 Git 索引逐一核对，从锁定提交的临时 Git 归档重新导出两份 OpenAPI，再与快照逐字节比对。消费方记载的提交允许是同树 squash 前提交。若记载的是生产者 gitlink 的祖先，两份独立导出的 HTTP OpenAPI 必须逐字节一致。Finance 祖先还必须有相同的版本化协议文件，两边都重新导出并比对 v1 读流的三份产物。两个消费方继续用原有生成器按各自输入验证客户端。导出使用 `CARGO_TARGET_DIR` 下的独立 `contract-exports` 缓存，持锁按顺序解包，解包时刷新源码时间戳，确保 Cargo 能识别不同提交的源码。依赖已经缓存时可通过 `CARGO_NET_OFFLINE=true` 离线运行。已有固定版本的 OpenAPI Generator JAR 时，可设置 `OPENAPI_GENERATOR_JAR`，web 仍会校验 SHA256。
 
 负向演练在一次性克隆中分别改动快照格式、生产者提交号、Rust 和 TypeScript 生成代码及版本化读流文件。生产者提交号用例覆盖缺失提交和非祖先的不同 Git 树。第 1 批另验证前端旧快照的过渡条件只允许已核对的固定提交组合。
 
-### #44 第 1 批
+### T3a（#53）当前候选
 
-Finance 固定在 `19291f8a969266a4cc67e7d7a7f676754a87b839`。这是 web 记录的 F10a 提交 `617ed833f469640b1be2a83200f30fef67087eb9` 之后最新的契约等价 main 提交。下一个提交 F6 (`094b579`) 导出了 bars 和 indicators 查询，main `fc5e153` 还包含新增资金费率和持仓量消息的 v2 schema 变更。F12 可以用 main 上的对应提交单独离线验证，当前锁定制品尚未包含 F12。
+Finance 固定在 `19291f8a969266a4cc67e7d7a7f676754a87b839`。这是 web 记录的 F10a 提交 `617ed833f469640b1be2a83200f30fef67087eb9` 之后最新的契约等价 main 提交。下一个提交 F6 (`094b579`) 导出了 bars 和 indicators 查询，目标提交 `fc5e153` 还包含新增资金费率和持仓量消息的 v2 schema 变更。当前 F12 证据来自单独的已合并 finance 提交，按锁定 finance SHA 复验待 W6、U5 后统一前移。
 
-第 1 批部署导出使用 W2a `9132c5dc2e40f94d96151fbcc2989abbbb53d778`。前端 `3788ae986ea61762b4219fd17547b5e2840c93cb` 的客户端仍固定在 W4 合并前 `d9e5c79b492bdf4bf04b1f50987a78b515e7283b`。检查仅接受这组提交作为过渡，并从 frontend 记录的提交和 W4 main 合并提交 `a6cd062393d18166bea2500d3873c37e564c3861` 分别导出，验证其字节与 frontend 快照相同。W2a 的新增路由和既有 schema 变化独立按部署版本校验。U5 合并后提升 frontend gitlink，重新以与 W2a 对齐的快照和生成客户端执行检查，恢复对 web 和 frontend 之间的逐字节校验。
+当前部署导出使用 W2a `9132c5dc2e40f94d96151fbcc2989abbbb53d778`。前端 `3788ae986ea61762b4219fd17547b5e2840c93cb` 的客户端仍固定在 W4 合并前 `d9e5c79b492bdf4bf04b1f50987a78b515e7283b`。检查仅接受这组提交作为过渡，并从 frontend 记录的提交和 W4 main 合并提交 `a6cd062393d18166bea2500d3873c37e564c3861` 分别导出，验证其字节与 frontend 快照相同。W2a 的新增路由和既有 schema 变化独立按部署版本校验。W6 和 U5 合并后统一更新三个 gitlink，按同一条契约链对照部署导出、消费快照和生成客户端。
 
-W2a 导出的 finance 行情水位组件与 W4 已有的 `MarketWatermarks`、`SourceObservation` 同名。W4 的质量查询仍序列化原有水位字段。前移 U5 时需核对生成类型与质量查询的原有响应形状，涉及 schema 调整的变更从 web 导出后再由 frontend 生成。
+当前 W2a 导出覆盖了 W4 的 `MarketWatermarks` 和 `SourceObservation`。沿 `/api/v1/quality/gaps` 响应的 `QualityCoverage.watermarks` 解析会得到 finance 的 `access`、`as_of`、`watermarks` 结构。实际响应仍使用 `local_durable`、`projected`、`remote_verified`、`source_latest`。总仓测试精确记录当前 pin 的差异，并对后续 web pin 检查质量响应结构。子仓 `quality_publish` 使用合成输入单独验证发布及读取路径。W6 负责修复 web 导出，随后按正常流程生成 frontend 客户端。[T3a 验收范围](../docs/v1-integration.md)
 
 ### 集成 CI 的生成器下载
 

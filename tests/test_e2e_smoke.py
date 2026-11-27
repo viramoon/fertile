@@ -3,7 +3,9 @@ import argparse
 from contextlib import redirect_stderr, redirect_stdout
 import csv
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from email.message import Message
+from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
@@ -14,12 +16,13 @@ import subprocess
 import sys
 import tempfile
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
 
 import e2e_smoke as check
-from replay_fixture import write_replay_fixture
+from replay_fixture import BAR_SPEC, CANDLE_FIELDS, INTERVAL_MS, check_persisted_bars, fixture_candles, write_replay_fixture
 
 
 TEST_HOST = "deployment.invalid"
@@ -188,6 +191,16 @@ class SmokeTests(unittest.TestCase):
 
 
 class ReplayFixtureTests(unittest.TestCase):
+    def persisted_bars(self, origin):
+        return [
+            SimpleNamespace(bar_type=f"{instrument}-{BAR_SPEC}-EXTERNAL",
+                            ts_event=origin + slot * INTERVAL_MS * 1_000_000,
+                            **{field: SimpleNamespace(as_decimal=partial(Decimal, value))
+                               for field, value in zip(CANDLE_FIELDS, values, strict=True)})
+            for slot, values in enumerate(fixture_candles())
+            for instrument in check.EQUITIES
+        ]
+
     def test_nine_equity_replay_config_matches_the_smoke_and_uses_exact_prices(self):
         with tempfile.TemporaryDirectory() as directory:
             config = json.loads(write_replay_fixture(Path(directory)).read_text(encoding="utf-8"))
@@ -217,6 +230,25 @@ class ReplayFixtureTests(unittest.TestCase):
             check.check_replay_nine({"source": "ib-realtime", "instruments": [
                 {"instrument": instrument} for instrument in check.EQUITIES
             ]})
+
+    def test_persisted_replay_checks_each_equitys_three_exact_candles(self):
+        origin = 1_700_000_000_000_000_123
+        bars = self.persisted_bars(origin)
+        self.assertEqual(len(bars), 27)
+        check_persisted_bars(reversed(bars), origin)
+        with self.assertRaisesRegex(ValueError, "missing 1 persisted replay bars"):
+            check_persisted_bars(bars[1:], origin)
+        with self.assertRaisesRegex(ValueError, "unexpected or duplicate replay bar"):
+            check_persisted_bars(bars + bars[:1], origin)
+
+    def test_persisted_replay_rejects_rounded_price_and_wrong_volume(self):
+        origin = 1_700_000_000_000_000_123
+        for field, value in (("close", "100.12345679"), ("volume", "99")):
+            with self.subTest(field=field):
+                bars = self.persisted_bars(origin)
+                getattr(bars[0], field).as_decimal = partial(Decimal, value)
+                with self.assertRaisesRegex(ValueError, f"wrong replay {field}"):
+                    check_persisted_bars(bars, origin)
 
 
 class PublicOriginTests(unittest.TestCase):

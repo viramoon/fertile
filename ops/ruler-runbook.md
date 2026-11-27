@@ -88,9 +88,9 @@ curl -fsS http://127.0.0.1:8090/api/v1/backtests/sample
 )
 ```
 
-## v1 T3 首批运行时核对
+## v1 T3a 首批运行时核对
 
-选用通过集成检查的完整制品。维护前备份 web 库、回测队列和已授权数据，记录旧制品与数据根。三个 gitlink、隔离验收入口和待后续批次的能力见[首批集成说明](../docs/v1-integration.md)。
+选用通过集成检查的完整制品。维护前备份 web 库、回测队列和已授权数据，记录旧制品与数据根。当前三个 gitlink、待 W6 与 U5 后统一前移的范围和后续批次见 [T3a 集成说明](../docs/v1-integration.md)。
 
 | 项目 | 操作 |
 | --- | --- |
@@ -99,7 +99,7 @@ curl -fsS http://127.0.0.1:8090/api/v1/backtests/sample
 | 邮件 | `FERTILE_ENABLE_WEB_NOTIFIER=1` 时由守护器启动 `web-notifier`。与 web 共用已迁移数据库，无监听端口。先用专属 `web-notifier.env` 配好固定 SMTP 中继、发件地址、本人收件地址和可选凭据文件引用。启用前用隔离 outbox 复验状态。[进程条件](../deploy/hot-upgrade.md#宿主与持久目录) |
 | 备份 | offsite 默认关闭。仅在确认产品云端备份许可、接收方账户与离线密钥安排后配置 T2b，接入 F3 时显式设置 `FERTILE_BACKUP_WAL_BIN`，按产品授权选择封段。远端和收件人由 vira 决定。[备份与恢复](backup.md#私人-google-drive-加密备份) |
 
-两个新增可选进程默认关闭。W4 的 SMTP 候选快照和备份/采集状态文件需要后续部署接线，本批进程清单使用 W3 固定中继设置。Binance 与独立实时决策模板继续关闭。IBKR 允许范围为 paper 只读行情。九标的回放与现网实例使用独立数据根。
+两个可选进程默认关闭。当前候选验证 W3 邮件 worker 组件，生产业务事件进入 outbox、W4 SMTP 候选快照与备份/采集状态文件仍待接线。当前进程清单使用 W3 固定中继设置。Binance 与独立实时决策模板默认关闭。IBKR 允许范围为 paper 只读行情。九标的回放与现网实例使用独立数据根。
 
 回退前先暂停 notifier，清点待发与已静默记录。保留升级后的 PostgreSQL、已授权 WAL 和回测结果；需要运行旧 SQLx 迁移器时用升级前快照恢复兼容的独立库，再恢复旧制品。投影可以在隔离根从已封段 WAL 重建。详见[跨版本恢复](#从升级前快照回滚并切回新版)与[单写者交接](../deploy/hot-upgrade.md)。
 

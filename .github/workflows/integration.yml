@@ -197,6 +197,7 @@ jobs:
           fi
           source "$FERTILE_ROOT/env.sh"
           scripts/setup-supervisor.sh
+          "$FERTILE_ROOT/tools/supervisor/bin/python" -B tests/t3a_contract_test.py
       - name: Prepare locked test dependencies and rclone for the local encrypted remote
         run: |
           source "$FERTILE_ROOT/env.sh"
@@ -231,6 +232,7 @@ jobs:
             cd web
             cargo test --offline --locked --release --lib notifications
             cargo test --offline --locked --release --test api notifications
+            cargo test --offline --locked --release --test quality_publish
           )
           python3 -B tests/backup_remote_test.py EncryptedRecovery.test_encrypted_wal_full_and_hourly_restore_gap_and_new_epoch
       - name: Verify the F12 producer separately from the candidate gitlink
@@ -296,6 +298,7 @@ jobs:
             "$FERTILE_ROOT/tools/supervisor/bin/python" -B tests/web-database.py
           python3 tests/test_e2e_smoke.py
           tests/e2e-smoke.sh local --replay-nine --research-instrument FIXTURE.XNYS --research-kind fixture
+          "$FINANCE_BUILD_ROOT/venv/bin/python" -B tests/replay_fixture.py --verify-catalog "$FERTILE_DATA_ROOT"
           python3 tests/chaos/services.py postgres
       - name: Shut down the private test instance
         if: always()
