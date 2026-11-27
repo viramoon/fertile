@@ -198,6 +198,7 @@ jobs:
           source "$FERTILE_ROOT/env.sh"
           scripts/setup-supervisor.sh
           "$FERTILE_ROOT/tools/supervisor/bin/python" -B tests/t3a_contract_test.py
+          "$FERTILE_ROOT/tools/supervisor/bin/python" -B tests/f12_gitlink_test.py
       - name: Prepare locked test dependencies and rclone for the local encrypted remote
         run: |
           source "$FERTILE_ROOT/env.sh"
@@ -235,22 +236,10 @@ jobs:
             cargo test --offline --locked --release --test quality_publish
           )
           python3 -B tests/backup_remote_test.py EncryptedRecovery.test_encrypted_wal_full_and_hourly_restore_gap_and_new_epoch
-      - name: Verify the F12 producer separately from the candidate gitlink
+      - name: Verify F12 at the locked finance gitlink
         run: |
           source "$FERTILE_ROOT/env.sh"
-          f12=f4786109e3812e4946adb92e97e513f1fbae5d79
-          producer=$(mktemp -d "$RUNNER_TEMP/finance-f12.XXXXXXXX")
-          trap 'rm -rf -- "$producer"' EXIT
-          git -C finance archive "$f12" | tar -xm -C "$producer"
-          cd "$producer"
-          # Revisions of the same Cargo packages must not share compiled artifacts.
-          export CARGO_TARGET_DIR="$producer/target"
-          cargo_host=$(rustc -vV | sed -n 's/^host: //p')
-          cargo fetch --locked --target "$cargo_host"
-          export CARGO_NET_OFFLINE=true
-          cargo test --offline --locked --release -p finance-collector --test option_history
-          cargo test --offline --locked --release -p finance-ib --lib \
-            verified_paper_option_history_requests_and_decodes_synthetic_bars
+          bash tests/finance-f12.sh
       - name: Switch the real finance API while synthetic collection advances
         run: |
           "$FERTILE_ROOT/tools/supervisor/bin/python" -B tests/container_hot_upgrade_test.py --require-native \
