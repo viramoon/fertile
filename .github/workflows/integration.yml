@@ -199,12 +199,15 @@ jobs:
           scripts/setup-supervisor.sh
           "$FERTILE_ROOT/tools/supervisor/bin/python" -B tests/t3a_contract_test.py
           "$FERTILE_ROOT/tools/supervisor/bin/python" -B tests/f12_gitlink_test.py
+          "$FERTILE_ROOT/tools/supervisor/bin/python" -B tests/published_queue_readback_test.py
       - name: Prepare locked test dependencies and rclone for the local encrypted remote
         run: |
           source "$FERTILE_ROOT/env.sh"
           cargo_host=$(rustc -vV | sed -n 's/^host: //p')
           (cd finance && cargo fetch --locked --target "$cargo_host")
           (cd web && cargo fetch --locked --target "$cargo_host")
+          python3 -B tests/published_queue_readback.py --finance-source "$PWD/finance" \
+            --fetch-published-dependencies "$cargo_host"
           (
             cd "$RUNNER_TEMP"
             archive=rclone-v1.76.0-linux-amd64.zip

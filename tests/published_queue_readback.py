@@ -27,7 +27,7 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
-def build_api(source, revision, work, target):
+def archive_finance(source, revision, work):
     checkout = work / revision
     checkout.mkdir()
     with subprocess.Popen(["git", "-C", source, "archive", revision], stdout=subprocess.PIPE) as archive:
@@ -35,6 +35,11 @@ def build_api(source, revision, work, target):
         # older workspace artifacts when the caller supplies a shared target.
         subprocess.run(["tar", "-xm", "-C", checkout], stdin=archive.stdout, check=True)
         require(archive.wait() == 0, "failed to archive the pinned finance source")
+    return checkout
+
+
+def build_api(source, revision, work, target):
+    checkout = archive_finance(source, revision, work)
     subprocess.run(
         ["cargo", "build", "--offline", "--locked", "--release", "-p", "finance-api",
          "--bin", "finance-api", "--target-dir", target],
@@ -175,7 +180,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--finance-source", type=Path, required=True)
     parser.add_argument("--candidate", type=Path, help="finance-api from the candidate's built fertile release")
-    parser.add_argument("--build-only", action="store_true", help="build/verify both binaries without opening sockets")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--build-only", action="store_true", help="build/verify both binaries without opening sockets")
+    mode.add_argument("--fetch-published-dependencies", metavar="TARGET",
+                      help="prefetch the published finance lockfile for the given Cargo target")
     args = parser.parse_args()
     source = args.finance_source.resolve(strict=True)
     pin, old_pin = finance_gitlink("HEAD"), finance_gitlink(PUBLISHED_FERTILE)
@@ -183,6 +191,11 @@ def main():
     subprocess.run(["git", "-C", source, "merge-base", "--is-ancestor", old_pin, pin], check=True)
     with tempfile.TemporaryDirectory(prefix="fertile-published-queue.", dir="/tmp") as directory:
         work = Path(directory)
+        if args.fetch_published_dependencies is not None:
+            checkout = archive_finance(source, old_pin, work)
+            subprocess.run(["cargo", "fetch", "--locked", "--target", args.fetch_published_dependencies],
+                           cwd=checkout, check=True)
+            return
         target = Path(os.environ.get("CARGO_TARGET_DIR", work / "target")).resolve() / "published-queue"
         if args.candidate:
             release = installed_candidate(args.candidate.resolve(strict=True), pin)
