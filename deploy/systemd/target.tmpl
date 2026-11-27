@@ -1,8 +1,10 @@
 $owner
 [Unit]
 Description=Fertile core services
+DefaultDependencies=no
 Wants=$units
-After=$units
+Before=$units shutdown.target
+Conflicts=shutdown.target
 
 [Install]
 WantedBy=multi-user.target

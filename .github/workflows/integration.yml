@@ -189,6 +189,25 @@ jobs:
           (cd frontend && pnpm install --frozen-lockfile)
           scripts/contract-diff.sh
           bash tests/contract-drift.sh
+      - name: Prepare the isolated artifact drills
+        run: |
+          if ! command -v tini >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends tini
+          fi
+          source "$FERTILE_ROOT/env.sh"
+          scripts/setup-supervisor.sh
+      - name: Switch the real finance API while synthetic collection advances
+        run: |
+          "$FERTILE_ROOT/tools/supervisor/bin/python" -B tests/container_hot_upgrade_test.py --require-native \
+            --finance-api "$FERTILE_ROOT/current/bin/finance-api" \
+            --finance-config "$FERTILE_ROOT/current/finance/config"
+      - name: Read the expanded synthetic queue with the published finance API artifact
+        run: |
+          source "$FERTILE_ROOT/env.sh"
+          export CARGO_NET_OFFLINE=true
+          python3 -B tests/published_queue_readback.py --finance-source "$PWD/finance" \
+            --candidate "$FERTILE_ROOT/current/bin/finance-api"
       - name: Exercise the actual supervised local deployment with ReplaySource
         run: |
           set -eu

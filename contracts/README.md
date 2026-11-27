@@ -7,6 +7,8 @@
 
 快照保留导出命令产生的原始字节。消费者分别保存输入快照和生产者的完整提交号，见 `web/openapi/finance.commit` 与 `frontend/openapi/web.commit`。WebSocket 和 SSE 的消息协议需单独维护。
 
+部署控制器的热升级协议通过本机进程调用，定义了候选就绪、旧版回读、采集水位交接与回退证据。[热升级与本机接口](../deploy/hot-upgrade.md)
+
 接口示例、生成快照及客户端测试输入适用 [四仓数据发布政策](../docs/data-policy.md)。行情 fixture 可复现并登记合成来源，CI 报告只发布获准公开的摘要。
 
 ## 验证

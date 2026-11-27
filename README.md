@@ -4,7 +4,7 @@ fertile 将 finance 的行情与回测、web 的 HTTP 网关和前端看板部�
 
 ## 如何使用
 
-Ubuntu 24.04 和 Debian 12（x86_64）的普通服务器按[部署指南](deploy/linux-server.md)准备运行账户、构建并安装 systemd 服务。没有 systemd 时可以使用 supervisord。本地压测盒子继续用 supervisord，部署与恢复由 Ruler 管理。
+Ubuntu 24.04 和 Debian 12（x86_64）的普通服务器按[部署指南](deploy/linux-server.md)准备运行账户、构建并安装 systemd 服务。无 systemd 的主机可使用 supervisord，容器以 tini 包装前台 supervisord。两种守护器共用一份进程清单，本地压测盒子的部署与恢复由 Ruler 管理。
 
 总仓库 `fertile` 及其子模块 `finance`、`web`、`frontend` 均为公开仓库。开发联调可在初始化子模块前检出指定提交。以下命令适用于新建的独立开发实例。
 
@@ -38,6 +38,7 @@ curl -fsS http://127.0.0.1:8090/api/v1/system/status
 | --- | --- |
 | 普通服务器部署、systemd 与 HTTPS 反代 | [普通服务器部署指南](deploy/linux-server.md) |
 | 构建、部署、回滚、重启与应急 | [部署清单](deploy/service.yaml) · [Ruler 手册](ops/ruler-runbook.md) |
+| 暂存制品、单进程热升级、采集交接与兼容回退 | [热升级与本机接口](deploy/hot-upgrade.md) |
 | 本机与公网健康、备份、恢复和告警 | [运维索引](ops/README.md) |
 | 私人 Google Drive 加密备份、恢复点和离线演练 | [异地备份](ops/backup.md#私人-google-drive-加密备份) |
 | OpenAPI 与生成客户端 | [契约快照与验证](contracts/README.md) |

@@ -292,6 +292,56 @@ class PaperSmokeTests(unittest.TestCase):
         with self.assertRaisesRegex(check.SmokeError, "missing a required service"):
             self.await_local(manager="systemd")
 
+    def test_strict_stack_accepts_disabled_optional_services(self):
+        self.services["finance-collector"]["ready"] = 200
+        for name, enabled in (
+            ("finance-projector", True),
+            ("finance-collector-binance", False),
+            ("finance-collector-hyperliquid", False),
+            ("finance-backtest-worker-f13", False),
+            ("finance-live-decision", False),
+            ("web-notifier", True),
+        ):
+            self.services[name] = dict(enabled=enabled, state="disabled", pid=0, live=None, ready=None)
+        origin = "http://127.0.0.1:8090"
+        self.services["healthwatch"] = dict(state="RUNNING", pid=123)
+        self.assertEqual(self.await_local(), (origin, {}))
+        self.services.update({name: dict(enabled=True, state="disabled", pid=0)
+                              for name in ("ib-gateway", "xvfb")})
+        self.assertEqual(self.await_local(), (origin, dict.fromkeys(("ib-gateway", "xvfb"), "disabled")))
+
+        for name in ("healthwatch", "ib-gateway", "xvfb"):
+            del self.services[name]
+        self.assertEqual(self.await_local(manager="systemd"), (origin, {}))
+
+    def test_strict_stack_rejects_disabled_required_service(self):
+        self.services["finance-collector"]["ready"] = 200
+        self.services["healthwatch"] = dict(state="RUNNING", pid=123)
+        self.services["finance-api"].update(enabled=False, state="disabled", pid=0, live=None, ready=None)
+        for manager in (None, "systemd"):
+            with self.subTest(manager=manager), self.assertRaisesRegex(check.SmokeError, "finance-api=disabled"):
+                self.await_local(manager=manager)
+
+    def test_strict_stack_rejects_unhealthy_optional_service(self):
+        self.services["finance-collector"]["ready"] = 200
+        self.services["healthwatch"] = dict(state="RUNNING", pid=123)
+        notifier = dict(enabled=True, state="RUNNING", pid=124, live=200, ready=200,
+                        live_url="http://127.0.0.1:8989/healthz/live",
+                        ready_url="http://127.0.0.1:8989/healthz/ready")
+        self.services["web-notifier"] = notifier
+        self.assertEqual(self.await_local(), ("http://127.0.0.1:8090", {}))
+        for changes, reason in (
+            (dict(state="STOPPED", pid=0), "STOPPED"),
+            (dict(state="missing_binary", pid=0), "missing_binary"),
+            (dict(state="needs_credentials", pid=0), "needs_credentials"),
+            (dict(state="disabled"), "disabled"),
+            (dict(ready=503), "RUNNING.*ready=503"),
+        ):
+            with self.subTest(changes=changes):
+                self.services["web-notifier"] = {**notifier, **changes}
+                with self.assertRaisesRegex(check.SmokeError, f"web-notifier={reason}"):
+                    self.await_local()
+
     def test_paper_stack_still_requires_core_services_and_collector_live(self):
         for name in ("finance-api", "web"):
             with self.subTest(name=name):

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
@@ -69,6 +70,27 @@ def legacy_bundle(root, source, config):
         (legacy / "fertile/deploy/services.yaml").write_text(supervision.yaml.safe_dump(old))
     assert not (legacy / "fertile/scripts/prepare-web-db.sql").exists()
     return legacy
+
+
+def check_unmanaged_role_refusal(plan):
+    # Capture only the intentional provisioning failure. Any other failure
+    # must fail this audit and retain its diagnostics.
+    run_child = subprocess.run
+
+    def capture_provision(command, **kwargs):
+        if command[0] == "psql" and command[-2] == "-f" and Path(command[-1]).name == "prepare-web-db.sql":
+            kwargs.update(stderr=subprocess.PIPE, text=True)
+        return run_child(command, **kwargs)
+
+    with patch.object(supervision.subprocess, "run", side_effect=capture_provision):
+        try:
+            supervision.prepare_web(plan)
+        except subprocess.CalledProcessError as error:
+            diagnostic = "fertile_web exists with an unmanaged identity or unexpected privileges"
+            if error.returncode != 3 or diagnostic not in (error.stderr or ""):
+                raise AssertionError(f"unexpected provisioning failure: {error.stderr or error}") from error
+        else:
+            raise AssertionError("unmanaged role was unexpectedly accepted")
 
 
 def audit():
@@ -154,8 +176,16 @@ def audit():
             server.wait(timeout=15)
             supervision.switch(root / "current", release)
             server = start_pg(plan)
+            managed_oid = None
             for label in ("restored-legacy", "idempotent"):
+                print(f"{label}: preparing the managed web database")
                 supervision.prepare_web(plan)
+                observed_oid = sql(admin, "SELECT oid FROM pg_roles WHERE rolname='fertile_web'")
+                if managed_oid is None:
+                    assert observed_oid.isdecimal()
+                    managed_oid = observed_oid
+                else:
+                    assert observed_oid == managed_oid, "repeated preparation replaced the managed role"
                 role = sql(web, "SELECT current_user, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls,"
                            "has_database_privilege(current_database(),'CREATE'), has_schema_privilege('public','CREATE') "
                            "FROM pg_roles WHERE rolname=current_user")
@@ -214,12 +244,7 @@ def audit():
             assert sql(web, "SELECT has_database_privilege(current_database(),'CREATE')") == "f"
             print("fresh migration and interrupted grant recovered; database CREATE=false")
             sql(admin, "COMMENT ON ROLE fertile_web IS 'reserved by another operator'")
-            try:
-                supervision.prepare_web(plan)
-            except subprocess.CalledProcessError:
-                pass
-            else:
-                raise AssertionError("unmanaged role was unexpectedly accepted")
+            check_unmanaged_role_refusal(plan)
             assert sql(admin, "SELECT shobj_description('fertile_web'::regrole,'pg_authid')") == 'reserved by another operator'
             print("unmanaged same-name LOGIN preserved; default provisioning refused")
             secret = root / "secrets/web-database.env"
@@ -240,4 +265,5 @@ def audit():
             log.close()
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(line_buffering=True)
     audit()

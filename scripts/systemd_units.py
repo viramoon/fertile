@@ -19,18 +19,26 @@ import tempfile
 REPO = Path(__file__).resolve().parents[1]
 UNIT_DIR = Path("/etc/systemd/system")
 SYSTEMD_BOOT = Path("/run/systemd/system")
-SERVICES = ("postgres", "finance-api", "finance-collector", "finance-backtest-worker", "web")
 TARGET = "fertile.target"
 PREFIX = "# fertile-systemd-v1 "
 ACCOUNT = re.compile(r"[a-zA-Z_][a-zA-Z0-9_.-]*\Z")
 COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 SYSTEMCTL = "/usr/bin/systemctl"
 JOURNALCTL = "/usr/bin/journalctl"
+FINDMNT = "/usr/bin/findmnt"
 SYSTEM_ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C"}
+STORAGE_KEYS = {"FERTILE_MARKET_SOURCE", "FERTILE_DATA_ROOT", "FERTILE_RESEARCH_ROOT"}
+MOUNTINFO = Path("/proc/self/mountinfo")
+
+# JSON is a YAML 1.2 subset. The root-owned installer reads only the trusted
+# inventory and templates beside this script, using the system interpreter.
+SYSTEMD_ROWS = {row["name"]: row for row in json.loads((REPO / "deploy/services.yaml").read_text())["services"]
+                if row.get("systemd")}
+SERVICES = tuple(name for name, row in SYSTEMD_ROWS.items() if "availability" not in row)
 
 
 def service_unit(name):
-    if name not in SERVICES:
+    if name not in SYSTEMD_ROWS:
         raise ValueError(f"service unavailable in systemd mode: {name}")
     return f"fertile-{name}.service"
 
@@ -71,7 +79,107 @@ def selected_release(root):
     return release.name
 
 
-def render(root, commit, user, group):
+def host_rows(release, *, include_optional=False):
+    for row in SYSTEMD_ROWS.values():
+        if not row.get("enabled", True):
+            continue
+        if "availability" in row and not include_optional:
+            artifact = Path(Template(row.get("availability_artifact", row["command"][0])).substitute(release=str(release)))
+            if not artifact.is_file():
+                continue
+        yield row
+
+
+def storage_settings(root):
+    """Read only storage assignments from the public instance configuration."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        root_fd = os.open(root, flags)
+    except FileNotFoundError:
+        return {}
+    try:
+        directory = os.open("config", flags, dir_fd=root_fd)
+    except FileNotFoundError:
+        return {}
+    finally:
+        os.close(root_fd)
+    try:
+        try:
+            fd = os.open("runtime.env", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        except FileNotFoundError:
+            return {}
+        with os.fdopen(fd) as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError("config/runtime.env must be a regular file")
+            result = {}
+            for line in stream:
+                key, sep, value = line.strip().partition("=")
+                if sep and key in STORAGE_KEYS:
+                    if value.startswith(('"', "'")) and value.endswith(value[0]):
+                        value = value[1:-1]
+                    result[key] = value
+            return result
+    finally:
+        os.close(directory)
+
+
+def storage_roots(root, settings):
+    source = settings.get("FERTILE_MARKET_SOURCE", "ib")
+    if source not in {"ib", "replay"}:
+        raise ValueError("unsupported market source")
+    data = Path(settings.get("FERTILE_DATA_ROOT", root / ("data/replay" if source == "replay" else "data")))
+    if not data.is_absolute():
+        raise ValueError("FERTILE_DATA_ROOT must be absolute")
+    research_base = root / "data/research"
+    research = Path(settings.get("FERTILE_RESEARCH_ROOT", research_base))
+    if (not (research.is_relative_to(research_base) or research == data / "research")
+            or research.resolve() != research):
+        raise ValueError("FERTILE_RESEARCH_ROOT must be a concrete path within fertile data/research or at FERTILE_DATA_ROOT/research")
+    return data.resolve(), research
+
+
+def mounted_paths():
+    # mountinfo identifies bind mounts even when their device number matches the parent.
+    return {Path(re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), line.split()[4]))
+            for line in MOUNTINFO.read_text().splitlines()}
+
+
+def declared_mounts():
+    result = subprocess.run([FINDMNT, "--fstab", "--list", "--json", "--output", "TARGET"],
+                            env=SYSTEM_ENV, text=True, capture_output=True)
+    if result.returncode == 1 and not result.stdout and not result.stderr:
+        return set()
+    result.check_returncode()
+    entries = json.loads(result.stdout)["filesystems"] or []
+    return {path.resolve() for row in entries if (path := Path(row["target"])).is_absolute()}
+
+
+def expected_mounts(paths, data, root, mounts):
+    expected = {mount for mount in mounts if mount != mount.parent
+                and any(path.is_relative_to(mount) for path in paths)}
+    if (data != data.parent and not data.is_relative_to(root)
+            and any(path.is_relative_to(data) for path in paths)
+            and not any(data.is_relative_to(mount) for mount in expected)):
+        expected.add(data)
+    return sorted(expected)
+
+
+def validate_configured_roots(plan, name):
+    """Reject mismatched runtime volumes or a missing mount before launching a service."""
+    expected_data = os.environ.get("FERTILE_SYSTEMD_DATA_ROOT")
+    expected_research = os.environ.get("FERTILE_SYSTEMD_RESEARCH_ROOT")
+    if expected_data is not None or expected_research is not None:
+        research = plan["services"][name]["env"]["FERTILE_RESEARCH_ROOT"]
+        if (str(Path(plan["data"]).resolve()), str(Path(research).resolve())) != (expected_data, expected_research):
+            raise ValueError("storage roots changed; stop fertile.target and reinstall systemd units")
+    expected = json.loads(os.environ.get("FERTILE_SYSTEMD_MOUNTS", "[]"))
+    if expected:
+        missing = set(map(Path, expected)) - mounted_paths()
+        if missing:
+            raise RuntimeError(f"required systemd mount is unavailable: {min(missing)}")
+
+
+def render(root, commit, user, group, *, include_optional=False, settings=None, mounts=None):
     if not ACCOUNT.fullmatch(user) or not ACCOUNT.fullmatch(group) or "root" in (user, group):
         raise ValueError("systemd units require a non-root user and group name")
     release = release_path(root, commit)
@@ -81,33 +189,48 @@ def render(root, commit, user, group):
     target = Template((templates / "target.tmpl").read_text())
     launcher = quote(release / "fertile/scripts/systemd-service.sh")
     units = {}
-    previous = None
-    for name in SERVICES:
+    settings = storage_settings(root) if settings is None else settings
+    data, research = storage_roots(root, settings)
+    if mounts is None:
+        mounts = mounted_paths() | declared_mounts()
+    fields = dict(root=root, release=release, data=data, research=research, run=root / "run", logs=root / "logs")
+    for row in host_rows(release, include_optional=include_optional):
+        name = row["name"]
         dependencies = []
-        if previous:
-            dependencies.append(f"After={previous}")
-        if name == "web":
-            pg = service_unit("postgres")
-            dependencies.extend([f"Wants={pg}", f"After={pg}"])
+        for key in ("after", "wants"):
+            if names := row.get(key):
+                dependencies.append(f"{key.capitalize()}=" + " ".join(map(service_unit, names)))
+        paths = dict.fromkeys([root, *(Path(Template(path).substitute(fields)) for path in row.get("volumes", {}))])
+        dependencies.append("RequiresMountsFor=" + " ".join(map(quote, paths)))
+        expected = json.dumps([str(path) for path in expected_mounts(paths, data, root, mounts)])
+        storage = "\n".join(f"Environment={quote(f'{key}={value}')}" for key, value in (
+            ("FERTILE_SYSTEMD_DATA_ROOT", data),
+            ("FERTILE_SYSTEMD_RESEARCH_ROOT", research),
+            ("FERTILE_SYSTEMD_MOUNTS", expected),
+        ))
         # The ':' prefix disables systemd's environment expansion in command arguments.
         command = f":/bin/bash {launcher}"
         prepare = f"ExecStartPre={command} prepare {name}"
-        ready = f"ExecStartPost={command} ready {name}" if name == "postgres" else ""
+        ready = f"ExecStartPost={command} ready {name}" if row.get("startup") == "postgres" else ""
+        condition = f"ExecCondition={command} condition {name}"
+        limits = row.get("limits", {})
         units[service_unit(name)] = service.substitute(
             owner=marker, name=name, dependencies="\n".join(dependencies), user=user, group=group,
-            environment=quote(f"FERTILE_ROOT={root}"), prepare=prepare, start=f"{command} run {name}",
-            ready=ready, kill_mode="mixed" if name == "postgres" else "control-group",
+            environment=quote(f"FERTILE_ROOT={root}"), storage=storage, prepare=prepare, start=f"{command} run {name}",
+            condition=condition, ready=ready, stop_seconds=limits.get("stop_seconds", 30),
+            nofile=limits.get("nofile", 1024), kill_mode="mixed" if name == "postgres" else "control-group",
             kill_signal="SIGINT" if name == "postgres" else "SIGTERM",
         )
-        previous = service_unit(name)
     units[TARGET] = target.substitute(owner=marker, units=" ".join(units))
     return units
 
 
 def validate_units(units):
     """Validate sections, links and required settings when systemd-analyze is unavailable."""
-    expected = {*(service_unit(name) for name in SERVICES), TARGET}
-    if units.keys() != expected:
+    expected = set(units)
+    core = {*(service_unit(name) for name in SERVICES), TARGET}
+    allowed = {*(service_unit(name) for name in SYSTEMD_ROWS), TARGET}
+    if not core <= expected <= allowed:
         raise ValueError("incomplete set of systemd units")
     for unit, content in units.items():
         sections = {}
@@ -125,21 +248,28 @@ def validate_units(units):
         metadata = sections["Unit"]
         required = {"Description"}
         if unit == TARGET:
-            required |= {"Wants", "After"}
+            required |= {"Wants", "Before", "DefaultDependencies", "Conflicts"}
             if sections["Install"].get("WantedBy") != ["multi-user.target"]:
                 raise ValueError("fertile.target must be installed with multi-user.target")
-            for key in ("Wants", "After"):
-                if set(metadata.get(key, [""])[0].split()) != expected - {TARGET}:
-                    raise ValueError(f"{unit}: {key} must include all core services")
+            members = expected - {TARGET}
+            if set(" ".join(metadata.get("Wants", [])).split()) != members:
+                raise ValueError(f"{unit}: Wants must include every generated service")
+            # PartOf queues the member stop jobs. Reverse ordering makes
+            # them finish before the target's own stop job completes.
+            if (metadata.get("DefaultDependencies") != ["no"] or metadata.get("After")
+                    or set(" ".join(metadata.get("Before", [])).split()) != members | {"shutdown.target"}
+                    or metadata.get("Conflicts") != ["shutdown.target"]):
+                raise ValueError(f"{unit}: invalid shutdown ordering for member services")
         else:
             fields = sections["Service"]
             if (fields.get("Type") != ["exec"] or fields.get("Restart") != ["always"] or
                 any(not fields.get(key) for key in
-                    ("User", "Group", "Environment", "ExecStart", "ExecStartPre", "TimeoutStopSec"))):
+                    ("User", "Group", "Environment", "ExecCondition", "ExecStart", "ExecStartPre",
+                     "TimeoutStopSec", "LimitNOFILE"))):
                 raise ValueError(f"{unit}: incomplete service directives")
             if metadata.get("PartOf") != [TARGET]:
                 raise ValueError(f"{unit}: missing reference to {TARGET}")
-            if any(not entry.startswith(":/bin/bash ") for key in ("ExecStart", "ExecStartPre", "ExecStartPost")
+            if any(not entry.startswith(":/bin/bash ") for key in ("ExecStart", "ExecStartPre", "ExecStartPost", "ExecCondition")
                    for entry in fields.get(key, [])):
                 raise ValueError(f"{unit}: malformed service command")
         if required - metadata.keys():
@@ -285,20 +415,24 @@ def install(root, user, group):
         raise ValueError("systemd services must use a non-root user and group")
     with lock_unit_directory():
         units = render(root, selected_release(root), user, group)
-        present, states = check_ownership(root, units)
+        obsolete = [service_unit(name) for name in SYSTEMD_ROWS
+                    if service_unit(name) not in units and os.path.lexists(UNIT_DIR / service_unit(name))]
+        present, states = check_ownership(root, [*units, *obsolete])
         changed = [name for name, content in units.items()
                    if name not in present or (UNIT_DIR / name).read_text() != content]
-        if changed and any(row["ActiveState"] not in {"inactive", "failed"} for row in states.values()):
+        if (changed or obsolete) and any(row["ActiveState"] not in {"inactive", "failed"} for row in states.values()):
             raise RuntimeError(f"stop {TARGET} before replacing its unit files")
         for name in changed:
             write_unit(UNIT_DIR / name, units[name])
+        for name in obsolete:
+            (UNIT_DIR / name).unlink()
         systemctl("daemon-reload", check=True)
         systemctl("enable", TARGET, check=True)
     print(f"{TARGET} enabled; run systemctl start {TARGET} to launch it")
 
 
 def uninstall(root):
-    units = [TARGET, *(service_unit(name) for name in reversed(SERVICES))]
+    units = [TARGET, *(service_unit(name) for name in reversed(SYSTEMD_ROWS))]
     with lock_unit_directory():
         present, states = check_ownership(root, units)
         loaded = [name for name in present if states[name]["FragmentPath"]]
@@ -345,7 +479,8 @@ def main():
     commands.add_parser("verify-systemd")
     args = parser.parse_args()
     if args.action == "verify-systemd":
-        verify(render(Path("/var/lib/fertile"), "a" * 40, "fertile", "fertile"))
+        verify(render(Path("/var/lib/fertile"), "a" * 40, "fertile", "fertile", include_optional=True,
+                      settings={}, mounts=set()))
     elif args.action == "install-systemd":
         install(args.root, args.user, args.group)
     elif args.action == "uninstall-systemd":
@@ -355,8 +490,19 @@ def main():
         if release is None:
             return 3
         print(release)
+    elif args.action == "_restart":
+        if os.geteuid() == 0:
+            raise PermissionError("run fertile restart as the non-root service account")
+        # The CLI uses Python isolated mode. Import only the controller
+        # shipped alongside this trusted systemd entry point.
+        sys.path.insert(0, str(REPO / "scripts"))
+        from hot_upgrade import lock, require_clear
+
+        with lock(args.root):
+            require_clear(args.root)
+            service_command(args.root, "restart", args.name)
     else:
-        service_command(args.root, args.action[1:], args.name)
+        service_command(args.root, "logs", args.name)
     return 0
 
 

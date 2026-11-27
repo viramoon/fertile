@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import resource
 from pwd import getpwuid
 import shlex
 import shutil
@@ -58,8 +59,16 @@ WEB_RUNTIME_SETTINGS = {
     "WEB_PUBLIC_ORIGIN", "WEB_ADMIN_SESSION_TTL_SECONDS",
     "WEB_CREDENTIAL_DIR", "WEB_CREDENTIAL_RECIPIENT_PUBLIC_KEY_FILE",
 }
+NOTIFIER_SETTINGS = {
+    "WEB_SMTP_HOST", "WEB_SMTP_PORT", "WEB_SMTP_TLS", "WEB_SMTP_FROM", "WEB_SMTP_TO",
+    "WEB_SMTP_CREDENTIAL_FILE", "WEB_SMTP_TIMEOUT_SECONDS", "WEB_NOTIFIER_QUIET_TIME_ZONE",
+    "WEB_NOTIFIER_QUIET_START", "WEB_NOTIFIER_QUIET_END", "WEB_NOTIFIER_COOLDOWN_SECONDS",
+    "WEB_NOTIFIER_NORMAL_HOURLY_LIMIT", "WEB_NOTIFIER_URGENT_HOURLY_LIMIT",
+    "WEB_NOTIFIER_URGENT_BYPASS_QUIET",
+}
+ENABLE_SETTINGS = {"FERTILE_ENABLE_FINANCE_PROJECTOR", "FERTILE_ENABLE_WEB_NOTIFIER"}
 SUPPORTED = {
-    *WEB_RUNTIME_SETTINGS,
+    *WEB_RUNTIME_SETTINGS, *ENABLE_SETTINGS,
     "FERTILE_PROFILE", "FERTILE_MARKET_SOURCE", "FERTILE_DATA_ROOT", "FERTILE_POSTGRES_PORT",
     "FERTILE_RESEARCH_ROOT", "FERTILE_WEB_DATABASE",
     "FINANCE_API_PORT", "FINANCE_COLLECTOR_PORT", "WEB_PORT", "IB_GATEWAY_ADDRESS",
@@ -67,7 +76,7 @@ SUPPORTED = {
     "FERTILE_BACKUP_DAYS", "FERTILE_BACKUP_WEEKS", "FERTILE_BACKUP_REMOTE",
 }
 INHERIT = {
-    *(SUPPORTED - WEB_RUNTIME_SETTINGS), "HOME", "PATH", "LANG", "LC_ALL", "TZ", "USER", "LOGNAME",
+    *(SUPPORTED - WEB_RUNTIME_SETTINGS - ENABLE_SETTINGS), "HOME", "PATH", "LANG", "LC_ALL", "TZ", "USER", "LOGNAME",
     "FERTILE_BOX_HOME", "FERTILE_ROOT", "LD_LIBRARY_PATH", "UV_CACHE_DIR",
     "FERTILE_CONTROL_PYTHON", "FERTILE_SUPERVISOR_BIN", "FERTILE_SERVICE_MANIFEST",
     "SSL_CERT_FILE", "CURL_CA_BUNDLE", "XDG_RUNTIME_DIR", "PYTHONDONTWRITEBYTECODE",
@@ -184,12 +193,45 @@ def market_data(settings):
     return source, data
 
 
-def build_plan(*, release=None, names=None):
+def manifest_rows(path):
+    document = yaml.safe_load(path.read_text())
+    rows = document["services"]
+    names = [row["name"] for row in rows]
+    if len(set(names)) != len(names) or any(not NAME.fullmatch(name) for name in names):
+        raise ValueError("invalid or duplicate service name in manifest")
+    return {row["name"]: row for row in rows}
+
+
+def local_environment(service):
+    env = dict(service["env"])
+    if service["env_file"]:
+        env.update(read_env(ROOT / "secrets" / service["env_file"], secret=True))
+    if local_file := service.get("local_env_file"):
+        local = read_env(ROOT / "secrets" / local_file, secret=True)
+        if local.keys() - NOTIFIER_SETTINGS or not all(local.get(key) for key in
+                                                     ("WEB_SMTP_HOST", "WEB_SMTP_FROM", "WEB_SMTP_TO")):
+            raise ValueError("invalid web-notifier settings")
+        env.update(local)
+    if service.get("pinned") and "WEB_STATIC_ROOT" in env:
+        env["WEB_AUTO_MIGRATE"] = "false"
+    return env
+
+
+def build_plan(*, release=None, names=None, use_pins=None, settings_overrides=None):
+    if use_pins is None:
+        use_pins = release is None
     release = release_path() if release is None else release
     custom = os.environ.get("FERTILE_SERVICE_MANIFEST")
     manifest = Path(custom) if custom else release / "fertile/deploy/services.yaml"
-    rows = yaml.safe_load(manifest.read_text())["services"]
+    rows = manifest_rows(manifest)
+    defaults = {} if custom else manifest_rows(SCRIPTS.parent / "deploy/services.yaml")
+    pins = {}
+    if use_pins and not custom:
+        from service_releases import release_path as pinned_release, selections
+
+        pins = selections(ROOT, release)
     settings = runtime_settings()
+    settings.update(settings_overrides or {})
     profile = settings.get("FERTILE_PROFILE", "cloudbox")
     if profile not in ("cloudbox", "stable"):
         raise ValueError("unsupported profile")
@@ -201,32 +243,43 @@ def build_plan(*, release=None, names=None):
         raise ValueError("FERTILE_RESEARCH_ROOT must be a concrete path within fertile data/research or at FERTILE_DATA_ROOT/research")
     web_db = settings.get("FERTILE_WEB_DATABASE", "web")
     validate_web_database(web_db)
-    fields = dict(root=str(ROOT), release=str(release), finance_port=port(settings.get("FINANCE_API_PORT", 8081)),
+    fields = dict(root=str(ROOT), data=str(data), research=str(research), run=str(RUN), logs=str(LOGS),
+                  market_source=source, finance_port=port(settings.get("FINANCE_API_PORT", 8081)),
                   collector_port=port(settings.get("FINANCE_COLLECTOR_PORT", 8082)), web_port=port(settings.get("WEB_PORT", 8090)))
     if "8080" in (fields["finance_port"], fields["collector_port"], fields["web_port"]):
         raise ValueError("port 8080 belongs to the existing Ruler-managed website")
+
+    def expand(item):
+        return Template(str(item)).substitute(fields)
+
     common = dict(PYTHONDONTWRITEBYTECODE="1", FERTILE_ROOT=str(ROOT), FERTILE_PROFILE=profile, FERTILE_MARKET_SOURCE=source,
                   FERTILE_DATA_ROOT=str(data), FERTILE_RESEARCH_ROOT=str(research), PGHOST=str(RUN / "postgres"),
                   PGPORT=port(settings.get("FERTILE_POSTGRES_PORT", 5432)), PGDATABASE=web_db)
     web_settings = {key: value for key, value in settings.items() if key in WEB_RUNTIME_SETTINGS}
-    common.update({key: value for key, value in settings.items() if key not in common and key not in web_settings})
+    common.update({key: value for key, value in settings.items()
+                   if key not in common and key not in web_settings and key not in ENABLE_SETTINGS})
     common["FERTILE_POSTGRES_PORT"] = common["PGPORT"]
     base = {k: os.environ[k] for k in INHERIT if k in os.environ}
     services = {}
     database = "external"
-    expand = lambda item: Template(str(item)).substitute(fields)
-    for row in rows:
-        name = row["name"]
+    selected_rows = {}
+    for name, row in rows.items():
         if names is not None and name not in names:
             continue
-        if not NAME.fullmatch(name) or name in services:
-            raise ValueError(f"invalid or duplicate service name: {name}")
         if name in EXTERNAL_PROGRAMS:
             # Older bundles may still declare an external program. A rollback
             # must keep exclusive ownership with Ruler even for those bundles.
             if not custom:
                 continue
             raise ValueError(f"{name} is external to the fertile supervisor")
+        pin = pinned_release(ROOT, pins[name]) if name in pins else None
+        service_release = pin or release
+        if service_release != release:
+            if service_release not in selected_rows:
+                selected_rows[service_release] = manifest_rows(service_release / "fertile/deploy/services.yaml")
+            row = selected_rows[service_release][name]
+        fields["release"] = str(service_release)
+        contract = defaults.get(name, {})
         cmd = [expand(s) for s in row["command"]]
         # These helpers must understand mapped databases and restored research
         # when the controller starts a release that predates either setting.
@@ -234,31 +287,41 @@ def build_plan(*, release=None, names=None):
             cmd[0] = str(SCRIPTS / "postgres.sh")
         if not custom and name == "healthwatch" and research == data / "research" and research != research_base:
             cmd[0] = str(SCRIPTS / "healthwatch")
-        directory = expand(row.get("directory", str(release)))
+        directory = expand(row.get("directory", str(service_release)))
         env = {**base, **common}
         if name.startswith("finance-") or name == "healthwatch":
-            env.update(FINANCE_CONFIG_DIR=str(release / "finance/config"), FINANCE_API_PORT=fields["finance_port"],
+            env.update(FINANCE_CONFIG_DIR=str(service_release / "finance/config"), FINANCE_API_PORT=fields["finance_port"],
                        FINANCE_COLLECTOR_BIND=f"127.0.0.1:{fields['collector_port']}",
-                       FINANCE_BUILD_ROOT=str(release / "runtime"), FINANCE_PYTHON=str(release / "runtime/venv/bin/python"),
+                       FINANCE_BUILD_ROOT=str(service_release / "runtime"), FINANCE_PYTHON=str(service_release / "runtime/venv/bin/python"),
                        FINANCE_COLLECTOR_CONFIG=settings.get("FINANCE_COLLECTOR_CONFIG", str(
-                           release / "finance/config/collector" / (f"{profile}.yaml" if source == "replay" else "ib-cloudbox.yaml"))))
-        if name == "web":
+                           service_release / "finance/config/collector" / (f"{profile}.yaml" if source == "replay" else "ib-cloudbox.yaml"))))
+        if name in {"web", "web-notifier"}:
             env.update(web_settings)
             # The controlling CLI can be newer than the selected release. Earlier
             # managed-role bundles shipped the SQL before declaring the capability.
             sql_available = (release / "fertile/scripts/prepare-web-db.sql").is_file()
             if not custom:
-                declared = row.get("local_database_role")
+                declared = rows.get("web", {}).get("local_database_role")
                 if declared and (declared != "fertile_web" or not sql_available):
                     raise ValueError("incomplete or unsupported web database provisioning in release")
                 database = "managed" if sql_available else "legacy"
             authority = "fertile_web@localhost" if database == "managed" else "localhost"
-            env.update(WEB_PORT=fields["web_port"], WEB_CONFIG_DIR=str(release / "web/config"),
-                       WEB_STATIC_ROOT=str(release / "static"), WEB_ADMIN_TOKEN_FILE=str(ROOT / "secrets/web.env"),
-                       DATABASE_URL=f"postgresql://{authority}/{web_db}?host={quote(common['PGHOST'], safe='')}&port={common['PGPORT']}",
+            env.update(DATABASE_URL=f"postgresql://{authority}/{web_db}?host={quote(common['PGHOST'], safe='')}&port={common['PGPORT']}")
+        if name == "web":
+            env.update(WEB_PORT=fields["web_port"], WEB_CONFIG_DIR=str(service_release / "web/config"),
+                       WEB_STATIC_ROOT=str(service_release / "static"), WEB_ADMIN_TOKEN_FILE=str(ROOT / "secrets/web.env"),
                        FINANCE_BASE_URL=f"http://127.0.0.1:{fields['finance_port']}")
+            if pin:
+                env["WEB_AUTO_MIGRATE"] = "false"
         env.update({k: expand(v) for k, v in row.get("environment", {}).items()})
         skip = "" if row.get("enabled", True) else "disabled"
+        setting = row.get("enable_setting")
+        if not skip and setting:
+            value = settings.get(setting, "0")
+            if value not in {"0", "1"}:
+                raise ValueError(f"{setting} must be 0 or 1")
+            if value == "0":
+                skip = "disabled"
         if not skip and row.get("ib"):
             secret_dir = ROOT / "secrets"
             if source == "replay":
@@ -278,18 +341,40 @@ def build_plan(*, release=None, names=None):
                 skip = "missing_configuration"
             elif yaml.safe_load(cfg.read_text()).get("source") != source:
                 raise ValueError(f"{cfg}: collector source must match FERTILE_MARKET_SOURCE")
-        env_file = row.get("env_file")
-        if env_file:
+        env_file = row.get("env_file", rows[name].get("env_file")) if pin else row.get("env_file")
+        if env_file and (not skip or not setting):
             if Path(env_file).name != env_file or env_file == "ibkr-paper.env":
                 raise ValueError("invalid service env_file")
             secret_path = ROOT / "secrets" / env_file
             secret_state = check_secret(secret_path)
-            if row.get("env_file_optional") and secret_state == "needs_credentials":
+            if row.get("env_file_optional", rows[name].get("env_file_optional")) and secret_state == "needs_credentials":
                 env_file = None
             else:
                 skip = skip or secret_state
-        services[name] = dict(command=cmd, directory=directory, env=env, env_file=env_file,
+        local_file = row.get("local_env_file")
+        if not skip and local_file:
+            if name != "web-notifier" or local_file != "web-notifier.env":
+                raise ValueError("invalid local_env_file")
+            skip = check_secret(ROOT / "secrets" / local_file)
+        metadata = {**contract, **row}
+        limits = metadata.get("limits", {})
+        nofile = limits.get("nofile", 1024)
+        stop_seconds = limits.get("stop_seconds", 30)
+        if type(nofile) is not int or not 256 <= nofile <= 65536 or type(stop_seconds) is not int or not 1 <= stop_seconds <= 120:
+            raise ValueError(f"{name}: invalid service limits")
+        volumes = {expand(path): mode for path, mode in metadata.get("volumes", {}).items()}
+        if any(not Path(path).is_absolute() or mode not in {"ro", "rw"} for path, mode in volumes.items()):
+            raise ValueError(f"{name}: invalid service volumes")
+        startup = metadata.get("startup", "process")
+        if startup not in {"postgres", "process"}:
+            raise ValueError(f"{name}: invalid startup check")
+        services[name] = dict(command=cmd, directory=directory, env=env, env_file=env_file, local_env_file=local_file,
                               enabled=row.get("enabled", True), skip=skip,
+                              release=str(service_release), pinned=pin is not None,
+                              systemd=metadata.get("systemd", False), role=metadata.get("role"),
+                              source=expand(metadata["source"]) if "source" in metadata else None,
+                              after=metadata.get("after", []), startup=startup,
+                              limits={"nofile": nofile, "stop_seconds": stop_seconds}, volumes=volumes,
                               live_url=expand(row["live"]) if row.get("live") else None,
                               ready_url=expand(row["ready"]) if row.get("ready") else None)
     web = services.get("web")
@@ -306,15 +391,24 @@ def build_plan(*, release=None, names=None):
                 default=not bool(custom), services=services, web_database=database)
 
 
-def run_child(path, name):
+def run_child(path, name, controller=None):
     # Keep PID supervision effective when supervisord itself receives SIGKILL.
     parent = os.getppid()
     if parent == 1 or ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM, 0, 0, 0) or os.getppid() != parent:
         raise RuntimeError("lost supervisor during startup")
     svc = json.loads(Path(path).read_text())
-    env = svc["env"]
-    if svc["env_file"]:
-        env.update(read_env(ROOT / "secrets" / svc["env_file"], secret=True))
+    if controller:
+        sys.path.insert(0, controller)
+        from handoff_start import require_start
+
+        require_start(ROOT, name, Path(svc["release"]).name, "supervisord", launch=True)
+    env = local_environment(svc)
+    if limits := svc.get("limits"):
+        _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        limit = limits["nofile"]
+        if hard != resource.RLIM_INFINITY:
+            limit = min(hard, limit)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (limit, limit))
     os.chdir(svc["directory"])
     os.execvpe(svc["command"][0], svc["command"], env)
 
@@ -344,9 +438,13 @@ def render(plan):
         digest = hashlib.sha256(text.encode()).hexdigest()
         launcher = RUN / "programs" / f"{name}-{digest}.json"
         atomic(launcher, text)
-        command = shlex.join([sys.executable, str(child_script), "_exec", str(launcher), name])
+        argv = [sys.executable, str(child_script), "_exec", str(launcher), name]
+        if (runtime / "scripts/handoff_start.py").is_file():
+            argv.append(str(runtime / "scripts"))
+        command = shlex.join(argv)
+        stop_seconds = svc.get("limits", {}).get("stop_seconds", 30)
         chunks.append(program.substitute(name=name, priority=idx*10, directory=esc(svc["directory"]),
-                                         command=esc(command), logfile=esc(logfile)))
+                                         command=esc(command), logfile=esc(logfile), stop_seconds=stop_seconds))
     programs = RUN / "programs.conf"
     atomic(programs, "\n".join(chunks))
     template = Template((templates / "supervisord.conf.tmpl").read_text())
@@ -354,17 +452,80 @@ def render(plan):
     atomic(SNAPSHOT, json.dumps(plan, indent=2))
 
 
-def start_daemon():
-    if daemon_pid():
-        return
+def daemon_environment():
     env = {k: os.environ[k] for k in INHERIT if k in os.environ}
     env["FERTILE_ROOT"] = str(ROOT)
-    subprocess.run([BINDIR / "supervisord", "-c", CONF], env=env, check=True)
+    return env
+
+
+def wait_daemon(process=None):
     for _ in range(100):
         if daemon_pid():
             return
+        if process is not None and process.poll() is not None:
+            break
         time.sleep(.1)
     raise RuntimeError("supervisord did not open its private socket")
+
+
+def start_daemon():
+    if daemon_pid():
+        return
+    subprocess.run([BINDIR / "supervisord", "-c", CONF], env=daemon_environment(), check=True)
+    wait_daemon()
+
+
+def container_command(python=sys.executable):
+    tini = shutil.which("tini")
+    if not tini:
+        raise ValueError("install tini in the container image before using fertile container")
+    return [tini, "-s", "--", python, str(SCRIPTS / "supervision.py"), "_container"]
+
+
+def run_container():
+    from hot_upgrade import require_clear
+
+    stopping = False
+
+    def stop(_signal, _frame):
+        nonlocal stopping
+        stopping = True
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    process = None
+    try:
+        with lock():
+            require_clear(ROOT)
+            if daemon_pid():
+                raise RuntimeError("stop the existing supervisord instance before starting the container")
+            plan = prepare_supervisor_plan()
+            if stopping:
+                return 0
+            process = subprocess.Popen([BINDIR / "supervisord", "-n", "-c", CONF], env=daemon_environment())
+            wait_daemon(process)
+            if not stopping:
+                reconcile(plan)
+        while not stopping:
+            try:
+                code = process.wait(timeout=.2)
+                return code if code >= 0 else 128 - code
+            except subprocess.TimeoutExpired:
+                continue
+        return 0
+    finally:
+        if process is not None and process.poll() is None:
+            try:
+                with lock():
+                    down()
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=35)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
 
 
 def stop_postgres(api, pid):
@@ -446,7 +607,9 @@ def prepare_web(plan):
     if not plan["default"] or not pg or pg["skip"]:
         return
     web = services["web"]
-    release = Path(plan["release"])
+    if web.get("pinned"):
+        return
+    release = Path(web.get("release", plan["release"]))
     database = plan.get("web_database")
     if database is None:  # restart may load a snapshot written by an older CLI
         if web.get("env_file") and "DATABASE_URL" in read_env(ROOT / "secrets" / web["env_file"], secret=True):
@@ -497,8 +660,32 @@ def prepare_web(plan):
                     provision], env=admin, check=True)
 
 
-def check_queue_compatibility(plan):
-    if not plan["default"] or (Path(plan["release"]) / "finance/python/fertile_finance/backtest_research.py").is_file():
+def prepare_notifier(plan):
+    service = plan["services"]["web-notifier"]
+    local_environment(service)
+    if plan["web_database"] == "external":
+        # External provisioning and migrations are performed using the web
+        # administrator workflow before the notifier is enabled.
+        return
+    env = {**service["env"], "PGCONNECT_TIMEOUT": "3"}
+    if plan["web_database"] == "managed":
+        env["PGUSER"] = "fertile_web"
+    sql = (
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('app.notification_outbox') "
+        "AND attname = 'replaces_id' AND NOT attisdropped)"
+    )
+    check = subprocess.run(["psql", "-XAtq", "-v", "ON_ERROR_STOP=1", "-c", sql], env=env,
+                           capture_output=True, text=True, timeout=5)
+    if check.returncode or check.stdout.strip() != "t":
+        raise RuntimeError("web-notifier requires the web W3 database migrations")
+
+
+def check_queue_compatibility(plan, *, release=None):
+    if release is None:
+        from_service = plan.get("services", {}).get("finance-api", {})
+        release = Path(from_service.get("release", plan["release"]))
+    if not plan["default"] or (release / "finance/python/fertile_finance/backtest_research.py").is_file():
         return
     queue = Path(plan["data"]) / "finance-state/backtests/jobs.sqlite3"
     if not queue.is_file():
@@ -524,7 +711,7 @@ def prepare_data_root(plan):
         raise ValueError(f"configured data root is unavailable: {data}")
 
 
-def ensure():
+def prepare_supervisor_plan():
     plan = build_plan()
     check_queue_compatibility(plan)
     if daemon_pid():
@@ -536,7 +723,26 @@ def ensure():
             subprocess.run([Path(plan["release"]) / "fertile/scripts/postgres.sh", "init"],
                            env=svc["postgres"]["env"], check=True)
     render(plan)
+    return plan
+
+
+def await_postgres(service):
+    env = {**service["env"], "PGDATABASE": "postgres"}
+    for _ in range(100):
+        if subprocess.run(["pg_isready", "-q"], env=env).returncode == 0:
+            return
+        time.sleep(.1)
+    raise RuntimeError("PostgreSQL did not become ready")
+
+
+def ensure():
+    plan = prepare_supervisor_plan()
     start_daemon()
+    reconcile(plan)
+
+
+def reconcile(plan):
+    svc = plan["services"]
     api = connection()
     added, changed, removed = api.reloadConfig()[0]
     for name in reversed(list(dict.fromkeys([*svc, *removed]))):
@@ -563,8 +769,12 @@ def ensure():
         try:
             if name == "web":
                 prepare_web(plan)
+            elif service.get("role") == "notifier":
+                prepare_notifier(plan)
             api.startProcess(name, True)
-        except (Fault, OSError, subprocess.CalledProcessError) as error:
+            if service.get("startup") == "postgres":
+                await_postgres(service)
+        except (Fault, OSError, RuntimeError, subprocess.CalledProcessError) as error:
             failures.append(f"{name}: {error}")
     if failures:
         raise RuntimeError("; ".join(failures))
@@ -612,7 +822,8 @@ def report():
             info = infos.get(name, {})
             state = svc["skip"] or info.get("statename", "STOPPED")
             services[name] = dict(enabled=svc["enabled"], state=state, pid=info.get("pid", 0),
-                                  live=None, ready=None, live_url=svc["live_url"], ready_url=svc["ready_url"])
+                                  live=None, ready=None, live_url=svc["live_url"], ready_url=svc["ready_url"],
+                                  release=svc.get("release", plan.get("release")))
             if name == "ib-gateway" and not svc["skip"] and state == "RUNNING":
                 try:
                     gateway = json.loads((RUN / "ibgateway/state.json").read_text())
@@ -659,7 +870,7 @@ def rollback(ref, switch_only=False):
         if not switch_only:
             ensure()
         return
-    check_queue_compatibility({**build_plan(), "release": str(target)})
+    check_queue_compatibility(build_plan(), release=target)
     # Reconcile only changed groups, including when reversing a failed switch.
     switch(ROOT/"current", target)
     if switch_only:
@@ -684,7 +895,7 @@ def lock():
 def main():
     parser = argparse.ArgumentParser(prog="fertile")
     sub = parser.add_subparsers(dest="action", required=True)
-    for action in ("up", "down", "ensure", "ensure-up"):
+    for action in ("up", "down", "ensure", "ensure-up", "container", "_container"):
         sub.add_parser(action)
     sub.add_parser("status").add_argument("--json", action="store_true")
     sub.add_parser("data-root", help="print the effective finance data root for this environment")
@@ -694,6 +905,13 @@ def main():
     rollback_cmd.add_argument("ref")
     rollback_cmd.add_argument("--switch-only", action="store_true", help="switch the verified release with supervisord stopped")
     args = parser.parse_args()
+    if args.action in {"container", "_container"}:
+        if (RUN / "restore-journal.json").exists():
+            raise RuntimeError("unfinished restore; run scripts/restore.sh before starting services")
+        if args.action == "_container":
+            return run_container()
+        command = container_command()
+        os.execv(command[0], command)
     if args.action == "data-root":
         _, data = market_data(runtime_settings())
         print(data)
@@ -715,6 +933,10 @@ def main():
     with lock():
         if args.action not in ("down", "stop") and (RUN / "restore-journal.json").exists():
             raise RuntimeError("unfinished restore; run scripts/restore.sh to recover before starting services")
+        if args.action not in ("down", "stop"):
+            from hot_upgrade import require_clear
+
+            require_clear(ROOT)
         if args.action in ("up", "ensure", "ensure-up"):
             ensure()
         elif args.action == "down":
@@ -740,6 +962,8 @@ def main():
                 return
             if args.name == "web":
                 prepare_web(plan)
+            elif svc.get("role") == "notifier":
+                prepare_notifier(plan)
             api.startProcess(args.name, True)
 
 
@@ -748,6 +972,6 @@ if __name__ == "__main__":
         if IS_CHILD_LAUNCHER:
             run_child(*sys.argv[2:])
         else:
-            main()
+            sys.exit(main())
     except (OSError, ValueError, RuntimeError, KeyError, subprocess.CalledProcessError, Fault) as exc:
         sys.exit(f"fertile: {exc}")

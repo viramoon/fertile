@@ -11,9 +11,11 @@ profiles:
   cloudbox:
     persistent_root: /home/box/fertile
     account_policy: paper-only
+    managers: [supervisord, tini-supervisord]
   stable:
     persistent_root: /var/lib/fertile
     account_policy: paper-only
+    managers: [systemd, supervisord, tini-supervisord]
 components:
   - name: finance
     submodule: finance
@@ -21,8 +23,13 @@ components:
     target: cloudbox # 当前压测部署，普通服务器使用 stable profile
     processes:
       finance-api: {command: current/bin/finance-api, host: 127.0.0.1, port: 8081}
-      finance-collector: {command: current/bin/finance-collector, host: 127.0.0.1, port: 8082}
+      finance-collector: {command: current/bin/finance-collector, host: 127.0.0.1, port: 8082, sources: [ib, replay]}
+      finance-collector-binance: {status: integration-template, default_enabled: false}
+      finance-collector-hyperliquid: {status: integration-template, default_enabled: false}
+      finance-projector: {module: fertile_finance.market_projector, wal_command: current/bin/finance-market-wal, status: requires-f3, enable_env: FERTILE_ENABLE_FINANCE_PROJECTOR, default_enabled: false}
       finance-backtest-worker: {command: current/finance/scripts/finance-backtest-worker}
+      finance-backtest-worker-f13: {status: integration-template, default_enabled: false}
+      finance-live-decision: {status: integration-template, default_enabled: false}
     health: {live: /healthz/live, ready: /healthz/ready, market: /api/v1/market/status}
   - name: web
     submodule: web
@@ -33,6 +40,8 @@ components:
     host: 127.0.0.1
     port: 8090
     health: {live: /healthz/live, ready: /healthz/ready, system: /api/v1/system/status}
+    processes:
+      web-notifier: {command: current/bin/web-notifier, enable_env: FERTILE_ENABLE_WEB_NOTIFIER, default_enabled: false}
 artifacts:
   - name: frontend-dist
     submodule: frontend
@@ -73,6 +82,9 @@ paths: # 均相对于持久根，默认值见 profiles，可用 FERTILE_ROOT / F
   config: config
   logs: logs
   run: run
+  hot_upgrade_state: state/hot-upgrade
+  hot_upgrade_start_permits: run/handoff-start
+  service_releases: config/service-releases.json
   secrets: secrets
   tools: tools
   backups: backups
@@ -83,9 +95,16 @@ operations:
   runbook: ops/ruler-runbook.md
   health_checks: ops/health-checks.md
   supervisor: supervisord
+  container_init: tini
   systemd: deploy/systemd
+  hot_upgrade: deploy/hot-upgrade.md
   commands:
     build: scripts/fertile build
+    stage: scripts/fertile build --stage-only --ref SHA
+    container: scripts/fertile container
+    hot_upgrade: scripts/fertile hot-upgrade SERVICE SHA --hook PATH
+    hot_upgrade_status: scripts/fertile hot-upgrade-status --json
+    hot_upgrade_reconcile: scripts/fertile hot-upgrade-reconcile ID --hook PATH
     install_systemd: scripts/fertile install-systemd --root <root> --user <user> --group <group>
     uninstall_systemd: scripts/fertile uninstall-systemd --root <root>
     verify_systemd: scripts/fertile verify-systemd

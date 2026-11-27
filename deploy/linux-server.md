@@ -78,7 +78,7 @@ PY
 
 ## 3. 启动服务
 
-同一实例由一种守护方式控制。`deploy/services.yaml` 定义核心服务的启动顺序和健康端点。
+同一实例由一种守护方式控制。[进程清单](services.yaml) 定义两类宿主的启动依赖、就绪、持久路径和限额。安装和启动操作由目标主机的部署账户执行，开发演练在隔离目录或容器中进行。
 
 ### systemd
 
@@ -94,7 +94,11 @@ scripts/fertile logs web
 
 由该安装器接管当前根目录时，以运行账户执行 `status`，通过 systemctl 获取进程状态并请求清单中的 live 和 ready 端点。`logs <service>` 读取 journal，`restart <service>` 交由 systemctl 执行。读取 journal 和重启服务需要相应的主机权限。若需提权，管理员可以直接执行 `sudo journalctl -u fertile-web.service -n 100` 或 `sudo systemctl restart fertile-web.service`。
 
-运行参数在启动时从 `config/runtime.env` 读取，修改全栈参数后运行 `sudo systemctl restart fertile.target` 并重新验证。unit 指向安装时选定的发布目录。维护窗口内切换版本时先用 `sudo systemctl stop fertile.target` 停止整栈，以运行账户构建下一版本，再用同一参数重跑 `install-systemd`，启动 target 并复验。注销这个实例的 unit、停用自启并停止服务时，由管理员执行 `sudo scripts/fertile uninstall-systemd --root "$FERTILE_ROOT"`。
+启动 target 会提交成员服务的启动任务。用 `status` 和健康端点确认各服务已就绪。停止 target 会把停止任务传播给各成员，并等成员的停止任务结束后返回。各服务按自身依赖的反序停止。升级已安装的旧 unit 时，先在维护窗口确认各成员已停止，再重新安装以启用这一顺序。
+
+运行参数在启动时从 `config/runtime.env` 读取。安装 unit 时会绑定当时解析出的行情根和研究根，并为各进程生成对实际卷的挂载依赖。外部数据盘可用 fstab 声明挂载点，数据根可位于该挂载点之下。未发现可用上级挂载点时，将外部数据根本身视为预期挂载点。启动时检查实际挂载，空的挂载点目录无法通过。若更改行情源或路径导致解析出的数据根或研究根变化，在维护窗口停止整栈并重新安装 unit，再启动和复验。其它全栈参数可通过重启 target 应用。
+
+unit 指向安装时选定的基准发布。拥有目标 unit 启停权限的运行账户可按应用就绪与兼容证明逐个切换服务。维护窗口内整体换版时，先用 `sudo systemctl stop fertile.target` 停止整栈，以运行账户构建下一版本，再用同一参数重跑 `install-systemd`，启动 target 并复验。注销这个实例的 unit、停用自启并停止服务时，由管理员执行 `sudo scripts/fertile uninstall-systemd --root "$FERTILE_ROOT"`。[热升级与本机接口](hot-upgrade.md)
 
 私人 Drive 异地备份默认关闭。启用时按手册准备本机加密配置，并为日全量和小时增量安排独立的 timer。 [异地备份调度](../ops/backup.md#调度状态与轮转)
 
@@ -110,6 +114,10 @@ scripts/fertile restart web
 ```
 
 `status` 读取本实例私有 socket 并检查健康端点，`restart` 重启同一个 supervisor 管理的服务，`logs` 从 `$FERTILE_ROOT/logs/<service>/stdout.log` 读取。停止用 `scripts/fertile down`。无开机钩子的环境由运维按 [bootstrap](bootstrap.md) 在重启后恢复。
+
+### tini 容器
+
+镜像提供 `tini`、锁定的 supervisord 控制端和所需运行工具。用 `scripts/fertile container` 作为执行式容器入口，由 tini 接收停止信号并回收子进程，supervisord 在前台管理同一份清单。以非 root 的运行账户挂载持久根，挂载路径在重启前后保持一致，由守护器使用其中的配置、数据、运行文件和日志。容器的终止宽限应覆盖清单中依序停机所需的时间。容器端口映射由运维明确选择，内置进程继续使用环回或 Unix socket。[持久目录与进程边界](hot-upgrade.md#宿主与持久目录)
 
 ## 4. 在本机打开看板
 

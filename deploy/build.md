@@ -12,6 +12,8 @@ finance 的源码 wheel 缓存键包含 `uv.lock` 与构建脚本。缓存键变
 
 build 与 up、down、rollback 共用 `$FERTILE_ROOT/run/control.lock`。只有全部构建及核验通过后，才移动完整目录并以单次 rename 切换 current。失败保留原 current 和已经部署的版本。修复错误后用同一命令重试。若已有完整目录的摘要不同，build 停止；先保留证据，再用 `scripts/fertile rollback <已验证提交>` 恢复服务。缺包的离线盒子需先恢复 Git、Cargo、uv 和 pnpm 缓存；遇到缓存不匹配时按 finance 源码构建流程补齐。构建不修改 VERSION、tag 或 RELEASES.md。服务如何启停见 [Ruler 手册](../ops/ruler-runbook.md)。
 
+单进程热升级先执行 `scripts/fertile build --stage-only --ref "$candidate"`。该模式完成相同的构建与摘要校验，将制品发布到 `releases/`，留待热升级逐个进程选择。`current` 继续指向整栈基准。[热升级与本机接口](hot-upgrade.md)
+
 systemd unit 固定到安装时所选的发布。维护窗口内先停止 `fertile.target`，构建或选择目标发布后重新安装 unit，再启动并复验。[普通服务器部署指南](linux-server.md#systemd)
 
 可在无网络的临时目录运行 `tests/build-atomicity.sh`。该测试制造两个并发的失败构建，确认原 current、已有版本和三个脏工作树均被保留。真实成功路径通过两次 build 验证，并比对 manifest.json 和 current 的目标。
