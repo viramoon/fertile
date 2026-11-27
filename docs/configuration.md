@@ -23,7 +23,9 @@
 | FERTILE_BACKUP_REMOTE、FERTILE_BACKUP_RCLONE、FERTILE_BACKUP_WAL_BIN | 在 `config/backup.conf` 配置命名 `crypt` 目标、rclone 和 F3 CLI 的绝对路径。远端默认关闭。认证和加密材料放 `$FERTILE_ROOT/secrets/backup-rclone.conf`。 [异地备份](../ops/backup.md#私人-google-drive-加密备份) |
 | FERTILE_BACKUP_WAL_PRODUCTS | 在 `config/backup.conf` 配置 F3 许可混合时的产品范围，以逗号分隔准确的 `source/product` 对。 [F3 配置](../ops/backup.md#远端文件与-f3-接口) |
 
-控制器为 web 注入同一 release 的 WEB_STATIC_ROOT、finance HTTP 地址和 PostgreSQL socket。本机 web 使用独立的 fertile_web PostgreSQL 登录角色，通过 Unix socket peer 映射认证。运行时角色仅在其私有迁移 schema、app 和 blog 内具有相应权限，首次 SQLx 迁移的数据库 CREATE 权限由控制器临时授予并收回。管理员备份继续使用原 peer 身份。外部 DATABASE_URL 放在 `secrets/web-database.env`，使用外部连接时保留 `FERTILE_WEB_DATABASE` 默认值。单进程热升级由控制器持久化服务制品指针和事务，格式与恢复步骤见[热升级与本机接口](../deploy/hot-upgrade.md)。实例日常操作见 [普通服务器部署指南](../deploy/linux-server.md) 与 [Ruler 手册](../ops/ruler-runbook.md)。
+控制器为 web 注入同一 release 的 WEB_STATIC_ROOT、finance HTTP 地址和 PostgreSQL socket。本机 web 使用独立的 fertile_web PostgreSQL 登录角色，通过 Unix socket peer 映射认证。运行时角色仅在其私有迁移 schema、app 和 blog 内具有相应权限，首次 SQLx 迁移的数据库 CREATE 权限由控制器临时授予并收回。管理员备份继续使用原 peer 身份。正常运行的外部 `DATABASE_URL` 放在 `secrets/web-database.env`，`FERTILE_WEB_DATABASE` 使用默认值。单进程热升级由控制器持久化服务制品指针和事务，格式与恢复步骤见[热升级与本机接口](../deploy/hot-upgrade.md)。实例日常操作见 [普通服务器部署指南](../deploy/linux-server.md) 与 [Ruler 手册](../ops/ruler-runbook.md)。
+
+外部 PostgreSQL 的 supervisord 迁移回退由手册示例临时传入 `FERTILE_ROLLBACK_EXTERNAL_DB=1`，并用 `FERTILE_WEB_DATABASE` 声明恢复库名。控制器从专用 `secrets/web-rollback-database.env` 验证 `DATABASE_URL`，服务进程启动时再次核对。回退模式随持久记录恢复。[回退和重启步骤](../ops/ruler-runbook.md#从升级前快照回滚并切回新版)
 
 重复准备受管库时复用带部署标记且符合权限约束的 `fertile_web` 角色，并保留角色 OID。遇到标记缺失或不符、角色属性不符合要求，或存在角色成员关系时，准备步骤会拒绝继续并保留原角色。集成演练分别检查旧库接管、受管身份复用和非受管角色拒绝。
 
@@ -68,6 +70,7 @@
 | --- | --- |
 | secrets/web.env | 可选。文件中只有 `WEB_ADMIN_TOKEN`。只读看板可匿名访问，提交回测等写操作需要 `Authorization: Bearer <token>`。 |
 | secrets/web-database.env | 可选，web 专用的 DATABASE_URL。 |
+| secrets/web-rollback-database.env | supervisord 外部库迁移回退专用。属主为运行账户，权限 0600。`DATABASE_URL` 的 URI 路径须是恢复库名。 |
 | secrets/web-notifier.env | 启用 notifier 时配置固定 SMTP 中继、发件和收件地址及可选的凭据文件引用。notifier 与 web 使用同一 DATABASE_URL。 |
 | secrets/ibkr-paper.env | 路径相对于 `$FERTILE_ROOT`。仅 Gateway 的 IBC 包装器读取 IBKR_USERNAME、IBKR_PASSWORD。健康检查只输出服务器时间和 DU 账户前缀。 |
 | secrets/alerts.env | 可选 ALERT_WEBHOOK_URL。默认告警写本机 JSONL。 |

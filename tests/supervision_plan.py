@@ -14,7 +14,7 @@ from tempfile import TemporaryDirectory
 import sys
 import sqlite3
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 from urllib.request import AbstractHTTPHandler
 from urllib.response import addinfourl
 
@@ -447,6 +447,72 @@ class RuntimePlan(unittest.TestCase):
         self.assertEqual(commands[1][-1], ctl.SCRIPTS / "prepare-web-db.sql")
         self.assertIn('REVOKE CREATE ON DATABASE "web_rollback" FROM fertile_web', commands[2])
         self.assertEqual(commands[3], [release / "bin/web", "migrate"])
+
+    def test_controller_routes_external_rollback_and_rechecks_the_url_at_launch(self):
+        _, old = self.releases()
+        (self.root / "current").unlink()
+        (self.root / "current").symlink_to(old)
+        (old / "fertile/scripts/supervision.py").write_text("# legacy launcher fixture\n")
+        database = f"web_rollback_{old.name}"
+        data = self.root / f"data-paper-rollback-{old.name}"
+        url = f"postgresql://fixture:synthetic@rollback.invalid/{database}?sslmode=verify-full"
+        env = {"PATH": os.defpath, "FERTILE_MARKET_SOURCE": "replay", "FERTILE_DATA_ROOT": str(data),
+               "FERTILE_RESEARCH_ROOT": str(data / "research"), "FERTILE_WEB_DATABASE": database,
+               "FERTILE_ROLLBACK_EXTERNAL_DB": "1"}
+        with (patch.dict(os.environ, env, clear=True), patch.object(ctl.shutil, "which", return_value="/bin/true"),
+              patch.object(ctl, "read_env", return_value={"DATABASE_URL": url}) as credentials):
+            plan = ctl.build_plan()
+            web = plan["services"]["web"]
+            self.assertEqual(plan["release"], str(old))
+            self.assertEqual(plan["data"], str(data))
+            self.assertEqual(plan["web_database"], "external")
+            self.assertNotIn("FERTILE_WEB_PEER", plan["services"]["postgres"]["env"])
+            self.assertEqual(web["env"]["PGDATABASE"], database)
+            self.assertEqual(web["env_file"], "web-rollback-database.env")
+            self.assertNotIn("DATABASE_URL", web["env"])
+            self.assertEqual(ctl.local_environment(web)["DATABASE_URL"], url)
+            self.assertEqual(credentials.call_args_list, [call(self.root / "secrets/web-rollback-database.env", secret=True)] * 2)
+            with patch.object(ctl.subprocess, "run") as process:
+                ctl.prepare_web(plan)
+            process.assert_not_called()
+            programs = self.rendered_programs(plan)
+            web_launcher = Path(shlex.split(programs["program:web"]["command"])[1])
+            finance_launcher = Path(shlex.split(programs["program:finance-api"]["command"])[1])
+            self.assertEqual(web_launcher.read_bytes(), (ctl.SCRIPTS / "supervision.py").read_bytes())
+            self.assertEqual(finance_launcher.read_text(), "# legacy launcher fixture\n")
+            self.assertNotIn(url, ctl.SNAPSHOT.read_text())
+            for values in (
+                {}, {"DATABASE_URL": url.replace(database, "web")},
+                {"DATABASE_URL": f"{url}&%64bname=web"}, {"DATABASE_URL": url, "PGDATABASE": "web"},
+            ):
+                with self.subTest(keys=list(values)):
+                    credentials.return_value = values
+                    for action in (ctl.build_plan, lambda: ctl.local_environment(web)):
+                        with self.assertRaisesRegex(ValueError, "explicitly select the restored database") as failure:
+                            action()
+                        self.assertNotIn("synthetic", str(failure.exception))
+            credentials.side_effect = FileNotFoundError
+            with self.assertRaises(FileNotFoundError):
+                ctl.build_plan()
+            with self.assertRaises(FileNotFoundError):
+                ctl.local_environment(web)
+
+    def test_ordinary_external_database_keeps_existing_configuration_and_rules(self):
+        self.releases()
+        env = {"PATH": os.defpath, "FERTILE_MARKET_SOURCE": "replay"}
+        url = "postgresql://fixture@normal.invalid/web"
+        with (patch.dict(os.environ, env, clear=True), patch.object(ctl.shutil, "which", return_value="/bin/true"),
+              patch.object(ctl, "check_secret", return_value=""),
+              patch.object(ctl, "read_env", return_value={"DATABASE_URL": url}) as credentials):
+            plan = ctl.build_plan()
+            self.assertEqual(plan["web_database"], "external")
+            web = plan["services"]["web"]
+            self.assertEqual(web["env_file"], "web-database.env")
+            credentials.assert_called_once_with(self.root / "secrets/web-database.env", secret=True)
+            self.assertEqual(ctl.local_environment(web)["DATABASE_URL"], url)
+            with patch.dict(os.environ, FERTILE_WEB_DATABASE="web_rollback_fixture"):
+                with self.assertRaisesRegex(ValueError, "cannot be combined"):
+                    ctl.build_plan()
 
     def test_switch_only_checks_the_release_and_keeps_services_stopped(self):
         active, target = (self.root / "releases" / (char * 40) for char in ("a", "b"))

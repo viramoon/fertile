@@ -53,7 +53,7 @@ curl -fsS http://127.0.0.1:8090/api/v1/backtests/sample
 
 1. 记录当前 fertile 提交、三个 gitlink 和实际 web 库名，暂停写入，保留旧版制品和可恢复的升级前备份。启用集成凭据录入的实例另存配套密文与接收方密钥。[备份与恢复](backup.md)
 2. 检出获批提交并初始化递归子模块。运行 `scripts/fertile build --ref <fertile-commit>`，核对 `current/manifest.json` 的三个 gitlink 和完整静态目录。systemd 按普通服务器指南在构建前停旧 target，构建后重装指向新版的 unit。[systemd 版本切换](../deploy/linux-server.md#systemd)
-3. 受管 PostgreSQL 由 supervisord 的 `scripts/fertile ensure-up` 或 systemd 启动时的准备步骤以 `fertile_web` 运行新版 `web migrate`，成功后启动新版 web。使用外部 PostgreSQL 时，由数据库管理员安排显式迁移。以 web 运行账户加载服务所用的 `DATABASE_URL` 和 profile，设置 `WEB_CONFIG_DIR="$FERTILE_ROOT/current/web/config"`，执行新版 `current/bin/web migrate`，成功后再重启到新版 web。确认 SQLx 台账已记录 `20261126000000` 成功。
+3. 受管 PostgreSQL 由 supervisord 按[重启检查](#重启与外部入口)启动，或由 systemd 在启动时准备。两者均以 `fertile_web` 运行新版 `web migrate`，成功后启动新版 web。使用外部 PostgreSQL 时，由数据库管理员安排显式迁移。以 web 运行账户加载服务所用的 `DATABASE_URL` 和 profile，设置 `WEB_CONFIG_DIR="$FERTILE_ROOT/current/web/config"`，执行新版 `current/bin/web migrate`，成功后再重启到新版 web。确认 SQLx 台账已记录 `20261126000000` 成功。
 4. 核对新版 web PID、`/healthz/ready` 和 `/api/v1/system/status`，打开终端页面并核对同源 JS/CSS，按[第三方许可证复验](#第三方许可证复验)核对两个第三方路径和根路径 `/NOTICE` 的响应。在部署复验窗口运行 `tests/e2e-smoke.sh local --paper-only`，确认可提交回测。官方历史日线作业按[隔离历史日线验收](#部署后的隔离历史日线验收)使用隔离队列。
 5. 回退 W1 迁移时，将迁移前备份恢复到 `data-paper-rollback-<sha>` 和 `web_rollback_<sha>`，在这对目标上运行旧发布。保留原数据、迁移台账和密文。旧版 SQLx 迁移器会拒绝台账中的新增迁移。跨越 finance `7600be4` 时，还要确认该快照早于首次写入旧版无法读取的四窗口摘要。[从升级前快照回滚并切回新版](#从升级前快照回滚并切回新版)
 
@@ -312,8 +312,10 @@ scripts/fertile down
 
 含新增迁移的发布，先将迁移前备份恢复到新建的 `data-paper-rollback-<sha>` 数据根和 `web_rollback_<sha>` 数据库，再在其上运行旧发布。`<sha>` 为升级前的完整 fertile 提交号。原 `data-paper`、现网库 `web` 及其迁移台账保留给新版。即使兼容性检查通过，旧代码也不得连接新版写过的数据库。
 
-1. 暂停接单和 notifier，排空作业，在部署记录中保存新版完整 fertile SHA、版本指针、数据根、研究根、数据库、PG 端口和业务水位。保全新版快照与配套密文，把已核实的迁移前快照留在轮转目录外。快照必须与旧制品、行情来源和迁移起点相符，并包含 `postgres.dump`。缺少匹配快照时停止回退。先停用直接调用 `up`、`ensure`、`ensure-up` 的巡检、自启与外部调度，并暂停备份发布和通知。停下业务和 supervisor，确认原采集器释放写锁和 IBKR 订阅，再单独启动本机 PostgreSQL。若存在逐服务发布指针，停栈后按[热升级手册](../deploy/hot-upgrade.md#升级与兼容回退)私下归档，确保整栈选用同一旧发布。
-2. 使用能识别独立数据根、研究根和库名的新控制器。下例用于受管 PostgreSQL 与 supervisord 的维护窗口。先在 Bash 会话设置 `FERTILE_ROOT`、实际端口 `FERTILE_POSTGRES_PORT`、旧提交 `old_sha` 和迁移前快照的绝对路径 `pre_upgrade`，并准备已安装的工具链。含 F3 封段的快照需提供能读取该归档的 `FERTILE_BACKUP_WAL_BIN`。库名与目录必须尚未使用。`--dry-run` 校验快照、归档和目标占用。任何失败都应停止，按[恢复步骤](backup.md#恢复步骤)处理，保留已有目标供核对。`runtime.env` 和 `env.sh` 保持原样，快照里的配置只供核对。
+1. 暂停接单和 notifier，排空作业，在部署记录中保存新版完整 fertile SHA、版本指针、数据根、研究根、数据库、PG 端口和业务水位。保全新版快照与配套密文，把已核实的迁移前快照留在轮转目录外。快照必须与旧制品、行情来源和迁移起点相符，并包含 `postgres.dump`。缺少匹配快照时停止回退。先停用直接调用 `up`、`ensure`、`ensure-up` 的巡检、自启与外部调度，并暂停备份发布和通知。停下业务和 supervisor，确认原采集器释放写锁和 IBKR 订阅。受管库此时单独启动本机 PostgreSQL。若存在逐服务发布指针，停栈后按[热升级手册](../deploy/hot-upgrade.md#升级与兼容回退)私下归档，回退期间保持整栈使用同一旧发布。
+2. 从支持外部回退校验的控制器源码检出执行下例。先在 Bash 会话设置 `FERTILE_ROOT`、本机端口 `FERTILE_POSTGRES_PORT`、旧提交 `old_sha` 和迁移前快照的绝对路径 `pre_upgrade`，并准备已安装的工具链。含 F3 封段的快照需提供能读取该归档的 `FERTILE_BACKUP_WAL_BIN`。库名与目录必须尚未使用。`--dry-run` 校验快照、归档和目标占用。任何失败都应停止，按[恢复步骤](backup.md#恢复步骤)处理，保留已有目标供核对。`runtime.env` 和 `env.sh` 保持原样，快照里的配置只供核对。
+
+   外部 PostgreSQL 的 supervisord 实例，把 `rollback_db_mode` 设为 `external`，由 DBA 提供隔离目标所在服务器的 `PGHOST`、`PGPORT`、`PGUSER` 和 libpq 管理认证，以同一快照恢复到 `web_rollback_<sha>`。同时在 `secrets/web-rollback-database.env` 配置仅能访问恢复库的应用身份。该文件是运行账户所有的 0600 常规文件，只包含 `DATABASE_URL` 赋值。连接 URI 的路径须为 `/web_rollback_<sha>`，`dbname` 查询参数会被拒绝。保留正常运行的 `secrets/web-database.env` 供切回新版。受管库使用默认的 `managed` 模式。
 
    ```bash
    (
@@ -325,23 +327,35 @@ scripts/fertile down
      test -s "$pre_upgrade/postgres.dump"
      rollback_record="$FERTILE_ROOT/migration-rollback.sha"
      test ! -e "$rollback_record" && test ! -L "$rollback_record" || exit 1
+     rollback_db_mode=${rollback_db_mode:-managed}
      old_data="$FERTILE_ROOT/data-paper-rollback-$old_sha"
      old_db="web_rollback_$old_sha"
      test ! -e "$old_data" && test ! -L "$old_data" || exit 1
-     local_pg=(env -u PGHOSTADDR -u PGSERVICE "PGHOST=$FERTILE_ROOT/run/postgres"
-               "PGPORT=$FERTILE_POSTGRES_PORT" "PGUSER=$(id -un)")
-     occupied=$("${local_pg[@]}" psql -XAt -v ON_ERROR_STOP=1 -d postgres \
+     pg=(env -u PGHOSTADDR -u PGSERVICE)
+     case "$rollback_db_mode" in
+       managed) pg+=("PGHOST=$FERTILE_ROOT/run/postgres" "PGPORT=$FERTILE_POSTGRES_PORT" "PGUSER=$(id -un)") ;;
+       external) pg+=("PGHOST=${PGHOST:?请设置隔离库服务器}" "PGPORT=${PGPORT:?请设置外部端口}"
+                     "PGUSER=${PGUSER:?请设置恢复角色}") ;;
+       *) exit 1 ;;
+     esac
+     occupied=$("${pg[@]}" psql -XAt -v ON_ERROR_STOP=1 -d postgres \
        -c "SELECT 1 FROM pg_database WHERE datname = '$old_db'")
      test -z "$occupied"
      restore_target=(--target-data-root "$old_data" --target-database "$old_db")
-     "${local_pg[@]}" scripts/restore.sh "$pre_upgrade" --dry-run "${restore_target[@]}"
-     "${local_pg[@]}" scripts/restore.sh "$pre_upgrade" "${restore_target[@]}"
-     scripts/postgres.sh stop
+     "${pg[@]}" scripts/restore.sh "$pre_upgrade" --dry-run "${restore_target[@]}"
+     "${pg[@]}" scripts/restore.sh "$pre_upgrade" "${restore_target[@]}"
 
-     (umask 077; set -C; printf '%s\n' "$old_sha" > "$rollback_record")
-     old_env=(env -u FERTILE_SERVICE_MANIFEST "FERTILE_DATA_ROOT=$old_data"
+     old_env=(env -u FERTILE_SERVICE_MANIFEST -u FERTILE_ROLLBACK_EXTERNAL_DB "FERTILE_DATA_ROOT=$old_data"
               "FERTILE_RESEARCH_ROOT=$old_data/research" "FERTILE_WEB_DATABASE=$old_db"
               FERTILE_ENABLE_WEB_NOTIFIER=0 FERTILE_BACKUP_REMOTE=)
+     rollback_target=("$old_sha")
+     if [[ "$rollback_db_mode" == external ]]; then
+       old_env+=(FERTILE_ROLLBACK_EXTERNAL_DB=1)
+       rollback_target+=(external)
+     else
+       scripts/postgres.sh stop
+     fi
+     (umask 077; set -C; printf '%s\n' "${rollback_target[@]}" > "$rollback_record")
      "${old_env[@]}" scripts/fertile rollback --switch-only "$old_sha"
      "${old_env[@]}" scripts/fertile ensure-up
      "${old_env[@]}" scripts/fertile data-root
@@ -349,14 +363,14 @@ scripts/fertile down
    )
    ```
 
-3. 核对 `current`、实际 web 连接的库名、SQLx 台账、finance 数据根与研究根，再确认 web 和 finance API 就绪并读到升级前已有的作业。核对行情来源和缺口，保持 IBKR paper 只读与单一采集订阅。只有在上述核对通过后才恢复接单。`migration-rollback.sha` 记录已恢复的旧发布 SHA，先写入持久盘再切换 `current`。回退期间的手动启动、重启及巡检恢复一律使用[重启检查](#重启与外部入口)从记录重建隔离参数，继续停用裸启动入口。重新启用 notifier 或异地备份前，先核对回退窗口的状态，避免重复投递或把隔离分支发布为原备份链的后继。
+3. 核对 `current`、实际 web 连接的库名、SQLx 台账、finance 数据根与研究根，再确认 web 和 finance API 就绪并读到升级前已有的作业。核对行情来源和缺口，保持 IBKR paper 只读与单一采集订阅。只有在上述核对通过后才恢复接单。`migration-rollback.sha` 首行记录已恢复的旧发布 SHA，外部库另有一行 `external`，先写入持久盘再切换 `current`。回退期间的手动启动、重启及巡检恢复一律使用[重启检查](#重启与外部入口)从记录重建隔离参数，继续停用裸启动入口。重新启用 notifier 或异地备份前，先核对回退窗口的状态，避免重复投递或把隔离分支发布为原备份链的后继。外部库需另按 [备份操作](backup.md#配置) 为隔离库安排 libpq 备份连接。
 4. 切回新版时，暂停接单、排空旧版作业并停止隔离栈。需要保留窗口内的写入时，将隔离数据根和旧库另作快照，记录待对账的作业、事件、邮件和行情缺口。保持业务停止，先选回并核对部署记录中的新版制品及原数据根、研究根和库，再将 `migration-rollback.sha` 移入本次私有归档。按[重启检查](#重启与外部入口)启动新版，核对迁移台账、就绪和已有作业后恢复业务及普通调度。两套数据分别留存，回退窗口的写入经业务对账后再决定如何补录。
 
-外部 PostgreSQL 由 DBA 恢复到 `web_rollback_<sha>` 并提供仅连接该库的独立 `DATABASE_URL`。现有控制器的 `FERTILE_WEB_DATABASE` 仅用于受管库。systemd 使用独立实例的启动配置和恢复目标，按[普通服务器部署指南](../deploy/linux-server.md#systemd)安装指向旧版的 unit，启动前核对卷和数据库连接。原实例的配置文件保留供切回新版。
+systemd 使用独立实例的启动配置和恢复目标。连接外部库时，在隔离实例的常规 web 凭据文件中配置只指向 `web_rollback_<sha>` 的 `DATABASE_URL`，`FERTILE_WEB_DATABASE` 使用默认值。按[普通服务器部署指南](../deploy/linux-server.md#systemd)安装指向旧版的 unit，启动前核对卷和数据库连接。原实例的配置文件保留供切回新版。
 
 ## 重启与外部入口
 
-主机重启、守护器重建或巡检需启动服务时，先按 [bootstrap](../deploy/bootstrap.md) 恢复工具链，再用下例检查 supervisord 的启动目标。使用部署记录中规范化的绝对 `FERTILE_ROOT` 和实际 `FERTILE_POSTGRES_PORT`。`normal_sha` 是部署记录中核准使用现网目标的新版完整 fertile SHA，须独立于 `current` 取值。回退期间以 `migration-rollback.sha` 中的 SHA 为准，恢复原有隔离目标。记录缺失且 `current` 不匹配新版，或回退记录无效、对应发布或目录不符时，保持停机并核对部署记录。所有常规启动和自启调用都须先通过这些检查。
+主机重启、守护器重建或巡检需启动服务时，先按 [bootstrap](../deploy/bootstrap.md) 恢复工具链，再从支持外部回退校验的控制器源码检出执行下例。使用部署记录中规范化的绝对 `FERTILE_ROOT` 和本机实际 `FERTILE_POSTGRES_PORT`。`normal_sha` 是部署记录中核准使用现网目标的新版完整 fertile SHA，须独立于 `current` 取值。回退期间以 `migration-rollback.sha` 中的 SHA 和外部库标记选回隔离目标。外部库由控制器和进程启动器核对专用凭据指向恢复库，凭据缺失或指向其他库时拒绝启动。记录缺失且 `current` 不匹配新版，或回退记录无效、对应发布或目录不符时，保持停机并核对部署记录。所有常规启动和自启调用都须先通过这些检查。
 
 ```bash
 (
@@ -365,16 +379,22 @@ scripts/fertile down
   export FERTILE_POSTGRES_PORT="${FERTILE_POSTGRES_PORT:?请设置实际 PostgreSQL 端口}"
   [[ "$FERTILE_ROOT" == /* && -L "$FERTILE_ROOT/current" ]]
   rollback_record="$FERTILE_ROOT/migration-rollback.sha"
-  launch_env=(env -u FERTILE_SERVICE_MANIFEST)
+  launch_env=(env -u FERTILE_SERVICE_MANIFEST -u FERTILE_ROLLBACK_EXTERNAL_DB)
   if [[ -e "$rollback_record" || -L "$rollback_record" ]]; then
     [[ -f "$rollback_record" && ! -L "$rollback_record" ]]
-    launch_sha=$(< "$rollback_record")
+    mapfile -t rollback_target < "$rollback_record"
+    launch_sha=${rollback_target[0]:-}
     [[ "$launch_sha" =~ ^[0-9a-f]{40}$ ]]
     old_data="$FERTILE_ROOT/data-paper-rollback-$launch_sha"
     [[ -d "$old_data" && ! -L "$old_data" ]]
     launch_env+=("FERTILE_DATA_ROOT=$old_data" "FERTILE_RESEARCH_ROOT=$old_data/research"
                  "FERTILE_WEB_DATABASE=web_rollback_$launch_sha"
                  FERTILE_ENABLE_WEB_NOTIFIER=0 FERTILE_BACKUP_REMOTE=)
+    if (( ${#rollback_target[@]} == 2 )) && [[ "${rollback_target[1]}" == external ]]; then
+      launch_env+=(FERTILE_ROLLBACK_EXTERNAL_DB=1)
+    elif (( ${#rollback_target[@]} != 1 )); then
+      exit 1
+    fi
   else
     launch_sha="${normal_sha:?请从部署记录设置核准的新版提交}"
     [[ "$launch_sha" =~ ^[0-9a-f]{40}$ ]]

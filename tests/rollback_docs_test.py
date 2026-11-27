@@ -16,6 +16,7 @@ RECOVERY = "从升级前快照回滚并切回新版"
 RESTART = "重启与外部入口"
 BOOTSTRAP = "deploy/bootstrap.md"
 HOT_UPGRADE = "deploy/hot-upgrade.md"
+SUPERVISION_ADR = "docs/adr/ADR-002-process-supervision.md"
 SHA = "0123456789abcdef0123456789abcdef01234567"
 NORMAL_SHA = "a" * 40
 
@@ -25,7 +26,7 @@ LIVE_DATABASE = re.compile(
     r"|\bweb\s*(?:数据库|库)"
 )
 PERMISSION = re.compile(
-    r"(?<![不勿要可得能止])(?:可以|允许|仍能|仍可|照常|无需(?:恢复|还原)|可(?=在|直接|继续|用|连接)"
+    r"(?<![不勿要可得能止])(?:可以|允许|仍能|仍可|照常|默认|让|无需(?:恢复|还原)|可(?=在|直接|继续|用|连接)"
     r"|(?:直接|继续)(?=在|用|运行|启动|连接|使用|沿用|部署|切回))"
 )
 DB_ACTION = re.compile(r"(?:运行|启动|连接|使用|沿用|指向|部署|回退|切回)")
@@ -68,7 +69,7 @@ class RollbackPolicyTests(unittest.TestCase):
                 self.assertRegex(section(document, heading), r"`(?:--)?rollback`[^。]*无新增迁移[^。]*未被新版写过")
 
     def test_no_guide_allows_old_release_on_the_migrated_database(self):
-        for document in (RUNBOOK, "docs/v1-integration.md", HOT_UPGRADE, BOOTSTRAP):
+        for document in (RUNBOOK, "docs/v1-integration.md", HOT_UPGRADE, BOOTSTRAP, SUPERVISION_ADR):
             with self.subTest(document=document):
                 self.assertEqual(unsafe_migration_guidance((ROOT / document).read_text()), [])
 
@@ -80,7 +81,9 @@ class RollbackPolicyTests(unittest.TestCase):
         ):
             content = (ROOT / document).read_text()
             guide = section(document, heading)
-            for conflict in ("迁移后也可以直接在现网 web 数据库运行旧发布", variant):
+            for conflict in ("迁移后也可以直接在现网 web 数据库运行旧发布",
+                             "迁移后默认在现网 PostgreSQL 数据库启动旧版",
+                             "迁移后回退时，让旧版 web 连接现网库", variant):
                 with self.subTest(document=document, heading=heading, conflict=conflict):
                     contaminated = content.replace(guide, f"{guide}\n{conflict}。\n", 1)
                     self.assertIn(conflict, unsafe_migration_guidance(contaminated))
@@ -93,6 +96,22 @@ class RollbackPolicyTests(unittest.TestCase):
                 guide = section(document, heading)
                 self.assertIn(f"#{RESTART})", guide)
                 self.assertNotRegex(guide, r"scripts/fertile\s+(?:up|ensure(?:-up)?)\b")
+
+    def test_recovery_guides_route_existing_instances_through_restart_checks(self):
+        for document, heading in (
+            (SUPERVISION_ADR, "恢复边界"),
+            ("docs/deploy-topology.md", "已实现的环境引导"),
+            ("docs/configuration.md", "web 管理会话与集成凭据"),
+            ("ops/monitoring.md", "运行与配置"),
+            ("ops/ibgateway.md", "Paper 登录"),
+            ("ops/ibgateway.md", "故障与演练"),
+            (RUNBOOK, "v1 阶段 0 重新部署"),
+        ):
+            with self.subTest(document=document, heading=heading):
+                guide = section(document, heading)
+                self.assertIn(f"#{RESTART})", guide)
+                self.assertNotRegex(guide, r"(?:scripts/fertile\s+(?:up|ensure(?:-up)?)|执行\s+`?ensure(?:-up)?)\b")
+        self.assertIn("migration-rollback.sha", section(SUPERVISION_ADR, "恢复边界"))
 
 
 class RollbackExampleTests(unittest.TestCase):
@@ -135,7 +154,7 @@ import sys
 command, *args = sys.argv
 name = Path(command).name
 keys = ("PGHOST", "PGHOSTADDR", "PGSERVICE", "PGPORT", "FERTILE_DATA_ROOT", "FERTILE_RESEARCH_ROOT",
-        "FERTILE_WEB_DATABASE", "FERTILE_ENABLE_WEB_NOTIFIER", "FERTILE_BACKUP_REMOTE")
+        "FERTILE_WEB_DATABASE", "FERTILE_ENABLE_WEB_NOTIFIER", "FERTILE_BACKUP_REMOTE", "FERTILE_ROLLBACK_EXTERNAL_DB")
 with Path(os.environ["TRACE"]).open("a") as trace:
     trace.write(json.dumps([name, args, {key: os.getenv(key) for key in keys}]) + "\\n")
 if name == "psql":
@@ -143,7 +162,10 @@ if name == "psql":
 if name == "restore.sh" and os.getenv("FAIL_RESTORE") == ("dry-run" if "--dry-run" in args else "restore"):
     sys.exit(1)
 if name == "fertile" and args[:2] == ["rollback", "--switch-only"]:
-    assert (Path(os.environ["FERTILE_ROOT"]) / "migration-rollback.sha").read_text() == args[2] + "\\n"
+    record = args[2] + "\\n"
+    if os.getenv("FERTILE_ROLLBACK_EXTERNAL_DB") == "1":
+        record += "external\\n"
+    assert (Path(os.environ["FERTILE_ROOT"]) / "migration-rollback.sha").read_text() == record
 ''')
         stub.chmod(0o700)
         (tools / "psql").symlink_to(stub)
@@ -216,6 +238,51 @@ if name == "fertile" and args[:2] == ["rollback", "--switch-only"]:
         self.link_release(SHA)
         self.assertEqual(self.run_example(status=1, heading=RESTART, normal_sha=NORMAL_SHA), [])
         self.assertEqual(self.run_example(status=1, heading=RESTART), [])
+
+    def test_external_rollback_restores_on_the_explicit_server_and_restarts_from_record(self):
+        trace = self.run_example(status=0, rollback_db_mode="external", PGHOST="restore.invalid", PGPORT="55432",
+                                 PGUSER="fixture_admin")
+        self.assertEqual([(command, args[:1]) for command, args, _ in trace], [
+            ("psql", ["-XAt"]), ("restore.sh", [self.env["pre_upgrade"]]),
+            ("restore.sh", [self.env["pre_upgrade"]]), ("fertile", ["rollback"]),
+            ("fertile", ["ensure-up"]), ("fertile", ["data-root"]), ("fertile", ["status"]),
+        ])
+        for _, args, env in trace[1:3]:
+            self.assertEqual(args[-4:], ["--target-data-root", str(self.target_data), "--target-database", self.target_db])
+            self.assertEqual(env["PGHOST"], "restore.invalid")
+            self.assertEqual(env["PGPORT"], "55432")
+            self.assertIsNone(env["PGHOSTADDR"])
+            self.assertIsNone(env["PGSERVICE"])
+        self.assertEqual(self.rollback_record.read_text(), f"{SHA}\nexternal\n")
+        self.assertEqual(self.rollback_record.stat().st_mode & 0o777, 0o600)
+        self.target_data.mkdir()
+        self.link_release(SHA)
+        self.trace.unlink()
+
+        reboot = self.run_example(status=0, heading=RESTART, old_sha="", pre_upgrade="", normal_sha=NORMAL_SHA)
+        self.assertEqual([(command, args) for command, args, _ in reboot], [
+            ("fertile", ["ensure-up"]), ("fertile", ["status", "--json"]),
+        ])
+        for _, _, env in trace[3:] + reboot:
+            self.assertEqual(env["FERTILE_DATA_ROOT"], str(self.target_data))
+            self.assertEqual(env["FERTILE_RESEARCH_ROOT"], str(self.target_data / "research"))
+            self.assertEqual(env["FERTILE_WEB_DATABASE"], self.target_db)
+            self.assertEqual(env["FERTILE_ROLLBACK_EXTERNAL_DB"], "1")
+            self.assertEqual(env["FERTILE_ENABLE_WEB_NOTIFIER"], "0")
+
+    def test_reboot_refuses_unknown_database_mode(self):
+        self.link_release(SHA)
+        self.target_data.mkdir()
+        for suffix in ("unknown\n", "external\nextra\n"):
+            with self.subTest(suffix=suffix):
+                self.rollback_record.write_text(f"{SHA}\n{suffix}")
+                self.assertEqual(self.run_example(status=1, heading=RESTART), [])
+
+    def test_reboot_ignores_inherited_external_rollback_mode_for_normal_start(self):
+        self.link_release(NORMAL_SHA)
+        reboot = self.run_example(status=0, heading=RESTART, normal_sha=NORMAL_SHA, FERTILE_ROLLBACK_EXTERNAL_DB="1")
+        self.assertEqual(len(reboot), 2)
+        self.assertTrue(all(env["FERTILE_ROLLBACK_EXTERNAL_DB"] is None for _, _, env in reboot))
 
     def test_reboot_refuses_invalid_or_stale_rollback_record(self):
         self.link_release(NORMAL_SHA)
