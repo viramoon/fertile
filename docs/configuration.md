@@ -45,7 +45,7 @@
 
 ## web 管理会话与集成凭据
 
-以下变量可选，写在 `config/runtime.env`，由 supervisord 和 systemd 的控制器传给 web。未启用时省略对应行。修改后，supervisord 运行 `scripts/fertile ensure-up` 重新读取配置并替换配置有变的进程，systemd 重启 `fertile-web.service`。
+以下变量可选，写在 `config/runtime.env`，由 supervisord 和 systemd 的控制器传给 web。未启用时省略对应行。修改后，supervisord 按 [Ruler 重启检查](../ops/ruler-runbook.md#重启与外部入口) 重新读取配置并替换配置有变的进程。systemd 重启安装配置所选实例的 `fertile-web.service`。
 
 | 参数 | 用途和默认行为 |
 | --- | --- |

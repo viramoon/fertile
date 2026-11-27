@@ -13,12 +13,34 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 RUNBOOK = "ops/ruler-runbook.md"
 RECOVERY = "从升级前快照回滚并切回新版"
+RESTART = "重启与外部入口"
+BOOTSTRAP = "deploy/bootstrap.md"
+HOT_UPGRADE = "deploy/hot-upgrade.md"
 SHA = "0123456789abcdef0123456789abcdef01234567"
+NORMAL_SHA = "a" * 40
+
+OLD_RELEASE = re.compile(r"旧\s*(?:web\s*)?(?:发布|版本?|代码|制品)|上(?:一版|一个版本|一个发布)")
+LIVE_DATABASE = re.compile(
+    r"(?:现网|线上|生产|原(?:有)?|已迁移|迁移后|升级后|新版写过的|共享)(?:\s*(?:的|web|PostgreSQL))*\s*(?:数据库|库)"
+    r"|\bweb\s*(?:数据库|库)"
+)
+PERMISSION = re.compile(
+    r"(?<![不勿要可得能止])(?:可以|允许|仍能|仍可|照常|无需(?:恢复|还原)|可(?=在|直接|继续|用|连接)"
+    r"|(?:直接|继续)(?=在|用|运行|启动|连接|使用|沿用|部署|切回))"
+)
+DB_ACTION = re.compile(r"(?:运行|启动|连接|使用|沿用|指向|部署|回退|切回)")
 
 
 def section(document, heading):
     return re.search(rf"^##+ {re.escape(heading)}\n(.*?)(?=^##+ |\Z)",
                      (ROOT / document).read_text(), re.MULTILINE | re.DOTALL)[1]
+
+
+def unsafe_migration_guidance(document):
+    sentences = re.split(r"[。！？；\n]", document.replace("`", " "))
+    return [line.strip() for line in sentences if "WEB_AUTO_MIGRATE" in line or all(
+        pattern.search(line) for pattern in (OLD_RELEASE, LIVE_DATABASE, PERMISSION, DB_ACTION)
+    )]
 
 
 class RollbackPolicyTests(unittest.TestCase):
@@ -45,6 +67,33 @@ class RollbackPolicyTests(unittest.TestCase):
             with self.subTest(document=document):
                 self.assertRegex(section(document, heading), r"`(?:--)?rollback`[^。]*无新增迁移[^。]*未被新版写过")
 
+    def test_no_guide_allows_old_release_on_the_migrated_database(self):
+        for document in (RUNBOOK, "docs/v1-integration.md", HOT_UPGRADE, BOOTSTRAP):
+            with self.subTest(document=document):
+                self.assertEqual(unsafe_migration_guidance((ROOT / document).read_text()), [])
+
+    def test_policy_rejects_conflicting_guidance_in_reviewed_sections(self):
+        for document, heading, variant in (
+            (RUNBOOK, RECOVERY, "直接在原有 PostgreSQL 数据库部署旧制品"),
+            (RUNBOOK, "v1 阶段 0 重新部署", "降级时允许旧版继续连接原库"),
+            (HOT_UPGRADE, "应用 hook 协议 v1", "已迁移的数据库仍可用于启动旧 web 代码"),
+        ):
+            content = (ROOT / document).read_text()
+            guide = section(document, heading)
+            for conflict in ("迁移后也可以直接在现网 web 数据库运行旧发布", variant):
+                with self.subTest(document=document, heading=heading, conflict=conflict):
+                    contaminated = content.replace(guide, f"{guide}\n{conflict}。\n", 1)
+                    self.assertIn(conflict, unsafe_migration_guidance(contaminated))
+        self.assertEqual(unsafe_migration_guidance("旧代码不得连接现网 web 数据库。"), [])
+        self.assertEqual(unsafe_migration_guidance("旧发布不能直接连接现网 web 数据库。"), [])
+
+    def test_bootstrap_and_maintenance_refer_to_checked_restart(self):
+        for document, heading in ((BOOTSTRAP, "重启后恢复工具链"), (RUNBOOK, "整栈维护")):
+            with self.subTest(document=document):
+                guide = section(document, heading)
+                self.assertIn(f"#{RESTART})", guide)
+                self.assertNotRegex(guide, r"scripts/fertile\s+(?:up|ensure(?:-up)?)\b")
+
 
 class RollbackExampleTests(unittest.TestCase):
     def setUp(self):
@@ -53,6 +102,7 @@ class RollbackExampleTests(unittest.TestCase):
         self.root = Path(sandbox.name)
         self.trace = self.root / "trace.jsonl"
         self.instance = self.root / "instance"
+        self.rollback_record = self.instance / "migration-rollback.sha"
         snapshot = self.root / "before-migration"
         snapshot.mkdir()
         self.dump = snapshot / "postgres.dump"
@@ -73,7 +123,7 @@ class RollbackExampleTests(unittest.TestCase):
             "PGHOSTADDR": "192.0.2.1", "PGSERVICE": "wrong_service", "FERTILE_WEB_DATABASE": "web",
             "FERTILE_DATA_ROOT": str(self.instance / "data-paper"),
         }
-        for command in ("env", "id"):
+        for command in ("env", "id", "readlink"):
             (tools / command).symlink_to(shutil.which(command))
         stub = self.root / "record-command"
         stub.write_text(f"#!{sys.executable}\n" + '''
@@ -92,20 +142,29 @@ if name == "psql":
     print(os.getenv("OCCUPIED", ""))
 if name == "restore.sh" and os.getenv("FAIL_RESTORE") == ("dry-run" if "--dry-run" in args else "restore"):
     sys.exit(1)
+if name == "fertile" and args[:2] == ["rollback", "--switch-only"]:
+    assert (Path(os.environ["FERTILE_ROOT"]) / "migration-rollback.sha").read_text() == args[2] + "\\n"
 ''')
         stub.chmod(0o700)
         (tools / "psql").symlink_to(stub)
         for command in ("restore.sh", "postgres.sh", "fertile"):
             (scripts / command).symlink_to(stub)
 
-    def run_example(self, *, status, **env):
-        block, = re.findall(r"^ +```bash\n(.*?)^ +```", section(RUNBOOK, RECOVERY), re.MULTILINE | re.DOTALL)
+    def run_example(self, *, status, heading=RECOVERY, **env):
+        block, = re.findall(r"^ *```bash\n(.*?)^ *```", section(RUNBOOK, heading), re.MULTILINE | re.DOTALL)
         result = subprocess.run([shutil.which("bash"), "--noprofile", "--norc", "-c", block], cwd=self.root,
                                 env=self.env | env, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, status, result.stderr)
         for path in self.protected:
             self.assertEqual(path.read_text(), "synthetic active instance marker\n")
         return [json.loads(line) for line in self.trace.read_text().splitlines()] if self.trace.exists() else []
+
+    def link_release(self, sha):
+        release = self.instance / "releases" / sha
+        release.mkdir(parents=True, exist_ok=True)
+        current = self.instance / "current"
+        current.unlink(missing_ok=True)
+        current.symlink_to(release)
 
     def test_example_restores_before_launch_with_matching_isolated_targets(self):
         trace = self.run_example(status=0)
@@ -134,9 +193,66 @@ if name == "restore.sh" and os.getenv("FAIL_RESTORE") == ("dry-run" if "--dry-ru
             self.assertEqual(env["FERTILE_ENABLE_WEB_NOTIFIER"], "0")
             self.assertEqual(env["FERTILE_BACKUP_REMOTE"], "")
 
+    def test_reboot_reloads_isolated_targets_after_the_initial_shell_exits(self):
+        self.run_example(status=0)
+        self.assertEqual(self.rollback_record.read_text(), f"{SHA}\n")
+        self.assertEqual(self.rollback_record.stat().st_mode & 0o777, 0o600)
+        self.trace.unlink()
+        self.target_data.mkdir()
+        self.link_release(SHA)
+
+        trace = self.run_example(status=0, heading=RESTART, old_sha="", pre_upgrade="", normal_sha=NORMAL_SHA)
+        self.assertEqual([(command, args) for command, args, _ in trace], [
+            ("fertile", ["ensure-up"]), ("fertile", ["status", "--json"]),
+        ])
+        for _, _, env in trace:
+            self.assertEqual(env["FERTILE_DATA_ROOT"], str(self.target_data))
+            self.assertEqual(env["FERTILE_RESEARCH_ROOT"], str(self.target_data / "research"))
+            self.assertEqual(env["FERTILE_WEB_DATABASE"], self.target_db)
+            self.assertEqual(env["FERTILE_ENABLE_WEB_NOTIFIER"], "0")
+            self.assertEqual(env["FERTILE_BACKUP_REMOTE"], "")
+
+    def test_reboot_refuses_old_current_without_a_rollback_record(self):
+        self.link_release(SHA)
+        self.assertEqual(self.run_example(status=1, heading=RESTART, normal_sha=NORMAL_SHA), [])
+        self.assertEqual(self.run_example(status=1, heading=RESTART), [])
+
+    def test_reboot_refuses_invalid_or_stale_rollback_record(self):
+        self.link_release(NORMAL_SHA)
+        for recorded in ("web", SHA):
+            with self.subTest(recorded=recorded):
+                self.rollback_record.write_text(f"{recorded}\n")
+                self.target_data.mkdir(exist_ok=True)
+                self.assertEqual(self.run_example(status=1, heading=RESTART, normal_sha=NORMAL_SHA), [])
+        self.rollback_record.unlink()
+        self.rollback_record.symlink_to(self.instance / "missing")
+        self.assertEqual(self.run_example(status=1, heading=RESTART, normal_sha=NORMAL_SHA), [])
+
+    def test_reboot_refuses_missing_or_symlinked_restored_data(self):
+        self.link_release(SHA)
+        self.rollback_record.write_text(f"{SHA}\n")
+        self.assertEqual(self.run_example(status=1, heading=RESTART), [])
+        self.target_data.symlink_to(self.instance / "data-paper")
+        self.assertEqual(self.run_example(status=1, heading=RESTART), [])
+
+    def test_reboot_uses_live_settings_only_with_the_approved_release(self):
+        self.link_release(NORMAL_SHA)
+        trace = self.run_example(status=0, heading=RESTART, normal_sha=NORMAL_SHA)
+        self.assertEqual([(command, args) for command, args, _ in trace], [
+            ("fertile", ["ensure-up"]), ("fertile", ["status", "--json"]),
+        ])
+        for _, _, env in trace:
+            self.assertEqual(env["FERTILE_DATA_ROOT"], str(self.instance / "data-paper"))
+            self.assertEqual(env["FERTILE_WEB_DATABASE"], "web")
+
     def test_example_stops_before_restore_on_existing_directory(self):
         self.target_data.mkdir()
         self.assertEqual(self.run_example(status=1), [])
+
+    def test_example_preserves_an_existing_rollback_record(self):
+        self.rollback_record.write_text(f"{NORMAL_SHA}\n")
+        self.assertEqual(self.run_example(status=1), [])
+        self.assertEqual(self.rollback_record.read_text(), f"{NORMAL_SHA}\n")
 
     def test_example_stops_before_restore_on_existing_database(self):
         self.assertEqual([command for command, _, _ in self.run_example(status=1, OCCUPIED="1")], ["psql"])

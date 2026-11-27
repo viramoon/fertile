@@ -2,7 +2,7 @@
 
 支持 Debian 12 和 Ubuntu 24.04（x86_64），从公开的 fertile 仓库检出源码，以实际运行账户操作。源码目录与运行根分开。bootstrap 按 `FERTILE_ROOT`、`$FERTILE_BOX_HOME/fertile`、profile 默认值的顺序选根。普通 Linux 服务器使用 `stable`，默认 `/var/lib/fertile`，安装与启动见 [普通服务器部署指南](linux-server.md)。云盒子使用 `cloudbox`，默认 `/home/box/fertile`。
 
-以下命令从云盒子上的源码目录执行，已有自定义路径时继续使用该实例的设置。未设置 `FERTILE_ROOT` 时，bootstrap 会在最后一行报告 `env.sh` 的实际路径。
+以下命令用于云盒子首次部署，从源码目录执行。已有实例重启时，按下方[恢复工具链](#重启后恢复工具链)步骤处理。未设置 `FERTILE_ROOT` 时，bootstrap 会在最后一行报告 `env.sh` 的实际路径。
 
 ```sh
 export FERTILE_PROFILE=cloudbox
@@ -20,7 +20,9 @@ bootstrap 可重入，系统包按需重装，锁定工具与 PostgreSQL 安装�
 
 运维脚本需要 PyYAML。加载 `env.sh` 后可运行 `scripts/setup-supervisor.sh`，将锁定的 PyYAML 和 Supervisor 安装到 `$FERTILE_ROOT/tools/supervisor`。日常使用 `scripts/healthwatch`、`scripts/fertile`。如需直接调用系统 Python，由管理员通过 apt 安装 `python3-yaml`。[控制端 Python 依赖](linux-server.md#控制端-python-依赖)
 
-重启后若系统依赖丢失，重新执行 bootstrap 并加载 env.sh，然后运行 scripts/fertile ensure。盒子没有已确认的持久启动钩子；Maas · Ruler 在重启后和定期巡检中执行 ensure 并检查各服务 ready。应急、回滚和外部访问验证见 [Ruler 手册](../ops/ruler-runbook.md)。
+## 重启后恢复工具链
+
+重启后若系统依赖丢失，只重新执行 `scripts/bootstrap-box.sh` 恢复工具链并加载 `env.sh`，保留已有发布选择。启动服务和定期巡检统一使用 [Ruler 重启检查](../ops/ruler-runbook.md#重启与外部入口)。存在 `migration-rollback.sha` 时，按记录从隔离数据根和库启动旧发布。没有记录时，只有 `current` 匹配部署记录中核准使用现网目标的新版才可启动。检查失败时保持停机。回退期间停用直接调用 `up`、`ensure` 或 `ensure-up` 的启动任务。
 
 ## PostgreSQL 时区
 

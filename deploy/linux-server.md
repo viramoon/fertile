@@ -106,7 +106,7 @@ unit 指向安装时选定的基准发布。拥有目标 unit 启停权限的运
 
 ### supervisord
 
-没有 systemd 的环境和现有本地压测盒子可由运行账户加载 `env.sh` 后使用以下命令。首次启动会准备 supervisor 控制端和本机数据库。
+没有 systemd 的环境和现有本地压测盒子可由运行账户加载 `env.sh` 后使用以下命令首次启动，准备 supervisor 控制端和本机数据库。已有实例的启停恢复和巡检按 [Ruler 重启检查](../ops/ruler-runbook.md#重启与外部入口)选择版本、数据根和库。
 
 ```bash
 scripts/fertile ensure-up
@@ -115,7 +115,7 @@ scripts/fertile logs web
 scripts/fertile restart web
 ```
 
-`status` 读取本实例私有 socket 并检查健康端点，`restart` 重启同一个 supervisor 管理的服务，`logs` 从 `$FERTILE_ROOT/logs/<service>/stdout.log` 读取。停止用 `scripts/fertile down`。无开机钩子的环境由运维按 [bootstrap](bootstrap.md) 在重启后恢复。
+`status` 读取本实例私有 socket 并检查健康端点，`restart` 重启同一个 supervisor 管理的服务，`logs` 从 `$FERTILE_ROOT/logs/<service>/stdout.log` 读取。停止用 `scripts/fertile down`。无开机钩子的环境由运维按 [bootstrap](bootstrap.md#重启后恢复工具链) 和 [Ruler 重启检查](../ops/ruler-runbook.md#重启与外部入口) 恢复。
 
 ### tini 容器
 

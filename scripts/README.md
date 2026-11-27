@@ -8,7 +8,7 @@
 | scripts/fertile build [--ref SHA] | 从指定总仓提交的 gitlink 构建 finance、web、前端，校验产物并原子切换 current。 |
 | scripts/fertile build --stage-only [--ref SHA] | 复用构建与制品校验，将下一发布保存在 `releases/` 待选择。 |
 | scripts/fertile container | 以 tini 管理前台 supervisord，作为容器入口加载同一进程清单。 |
-| scripts/fertile up / ensure / down | supervisord 依序启动、重启后恢复、逆序优雅停止服务。 |
+| scripts/fertile up / ensure / down | supervisord 依序启动、恢复、逆序优雅停止服务。已有实例的启动与恢复经 [Ruler 重启检查](../ops/ruler-runbook.md#重启与外部入口) 选择版本和目标。 |
 | scripts/fertile install-systemd --root PATH --user USER --group GROUP | 管理员为选定发布安装核心服务 unit，启用 `fertile.target` 开机启动。 |
 | scripts/fertile uninstall-systemd --root PATH | 管理员停止并停用该实例的 `fertile.target`，移除本仓库安装的 unit。 |
 | scripts/fertile verify-systemd | 渲染并静态检查样例 unit。若有 systemd-analyze 则执行 verify。 |

@@ -114,7 +114,7 @@ operations:
     verify_systemd: scripts/fertile verify-systemd
     up: scripts/fertile up
     down: scripts/fertile down
-    ensure: scripts/fertile ensure-up
+    ensure: scripts/fertile ensure-up # 已有实例先执行 Ruler 手册的「重启与外部入口」检查。
     status: scripts/fertile status --json
     restart: scripts/fertile restart <service>
     logs: scripts/fertile logs <service>

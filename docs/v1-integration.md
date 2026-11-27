@@ -35,6 +35,8 @@ CI 的 Integration 作业从本批 gitlink 构建制品。九只股票的回放 
 
 回退前暂停 notifier 并清点 outbox。将迁移前备份恢复到新建的 `data-paper-rollback-<sha>` 和 `web_rollback_<sha>`，在这对目标上运行旧发布。`<sha>` 为升级前的 fertile 提交号。旧代码不得连接新版写过的数据库，原数据根、数据库和台账留给新版。切回新版时按部署记录恢复原指针，将隔离窗口的写入另存并对账。[Ruler 回退步骤](../ops/ruler-runbook.md#从升级前快照回滚并切回新版) · [热回退适用范围](../deploy/hot-upgrade.md#升级与兼容回退)
 
+supervisord 回退期间的启动和巡检须按 `migration-rollback.sha` 重建隔离参数。[Ruler 重启检查](../ops/ruler-runbook.md#重启与外部入口)
+
 ## 后续批次
 
 - **质量接口。** 断源、补数与浏览器质量报告贯通验收随上游接线推进。
