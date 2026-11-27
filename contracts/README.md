@@ -25,13 +25,13 @@ python3 -B tests/t3a_contract_test.py
 
 检查将三个子模块的 HEAD 与 fertile 的 Git 索引逐一核对，从锁定提交的临时 Git 归档重新导出两份 OpenAPI，再与快照逐字节比对。消费方记载的提交允许是同树 squash 前提交。若记载的是生产者 gitlink 的祖先，两份独立导出的 HTTP OpenAPI 必须逐字节一致。Finance 祖先还必须有相同的版本化协议文件，两边都重新导出并比对 v1 读流的三份产物。两个消费方继续用原有生成器按各自输入验证客户端。导出使用 `CARGO_TARGET_DIR` 下的独立 `contract-exports` 缓存，持锁按顺序解包，解包时刷新源码时间戳，确保 Cargo 能识别不同提交的源码。依赖已经缓存时可通过 `CARGO_NET_OFFLINE=true` 离线运行。已有固定版本的 OpenAPI Generator JAR 时，可设置 `OPENAPI_GENERATOR_JAR`，web 仍会校验 SHA256。
 
-负向演练在一次性克隆中分别改动快照格式、生产者提交号、Rust 和 TypeScript 生成代码及版本化读流文件。生产者提交号用例覆盖缺失提交和非祖先的不同 Git 树。W4 过渡条件只接受此前核对的固定提交组合。
+负向演练在一次性克隆中分别改动快照格式、生产者提交号、Rust 和 TypeScript 生成代码及版本化读流文件。生产者提交号用例覆盖缺失提交和非祖先的不同 Git 树。W4 过渡条件只接受此前核对的固定提交组合。锁定 W6 时，演练还会切换至仍使用 W2a 快照的 U5 gitlink，核对契约检查拒绝该组合。
 
 ### T3a（#53）当前候选
 
 W6 `6e5fd80a56c3ab2fd0634fd69ecec3b7315dcd06` 的 `openapi/finance.commit` 精确匹配 finance `fc5e153e9727181f5748659c0610b2fbc2b49769`。finance 新增 F6 bars 与 indicators 路径，F4 在 v2 事件与能力 schema 中加入 `funding_rate`、`open_interest` 和相关控制帧。W6 保存同一 finance 提交导出的三份 1.0 读流产物。F12 独立测试目录由总仓锁定的 finance gitlink 归档创建。
 
-前端 U5 `adce47d05acbf58aeb95c4bd8562ef7ebdf36f16` 的 `openapi/web.commit` 指向 W2a `9132c5dc2e40f94d96151fbcc2989abbbb53d778`。W6 导出与 W2a 存在字节差异，涉及 `Event`、`Message`、`FundingRate`、`OpenInterest` 与质量水位组件。现有严格检查会拒绝这组 frontend 与 web 提交。接续时先由 frontend 对 W6 的已合并 SHA 再生成快照与客户端，复测使用行情或质量类型的适配层，合入 frontend main 后再更新本仓 gitlink。
+前端 U6 `dda817d41cd9b66d75a49b70946ca38790e2fe7b` 的 `openapi/web.commit` 精确匹配 W6 `6e5fd80a56c3ab2fd0634fd69ecec3b7315dcd06`。`frontend/openapi/web.openapi.json` 与 W6 生产者快照及总仓快照逐字节一致。U6 重新生成客户端，恢复适配器直接使用 `QualityGapsPage`，系统页从覆盖项读取 `QualityWatermarks`。与 W2a 相比，W6 导出的差异涉及 `Event`、`Message`、`FundingRate`、`OpenInterest` 与质量水位组件。
 
 W6 将 `/api/v1/quality/gaps` 使用的水位和源序号组件分别导出为 `QualityWatermarks` 和 `QualitySourceObservation`。质量接口水位字段为 `local_durable`、`projected`、`remote_verified`、`source_latest`。`/api/v1/market/watermarks` 沿用 finance 的 `MarketWatermarks` 和 `SourceObservation`。总仓测试检查质量响应结构，子仓 `quality_publish` 使用合成输入验证发布及读取路径。[T3a 验收范围](../docs/v1-integration.md)
 

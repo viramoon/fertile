@@ -34,7 +34,7 @@
 
 `data-guard.py` 提供 Git 索引、push 记录、CI 提交范围、私有目录和公开报告检查。钩子安装与共享规则见 [四仓数据发布政策](../docs/data-policy.md)。
 
-接口不变的祖先升级需通过实际导出内容的比较。T3a 的 W6 已对齐 finance，指定的 U5 仍记录 W2a。两版 web 导出有字节差异，契约检查会阻断，需由 frontend 对 W6 再生成并复测后前移。[契约验证流程](../contracts/README.md#验证)
+接口不变的祖先升级需通过实际导出内容的比较。T3a 的 W6 锁定 finance `fc5e153`，U6 锁定 web `6e5fd80`。契约检查核对两个生产者的导出及下游客户端。[契约验证流程](../contracts/README.md#验证)
 
 本机压力测试与部署复验使用 `tests/e2e-smoke.sh local --paper-only`，其中覆盖根路径 `/NOTICE` 和第三方许可证路径。手工核对响应与静态制品的方法见 [第三方许可证复验](../ops/ruler-runbook.md#第三方许可证复验)。公网巡检按默认配置跳过。
 

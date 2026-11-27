@@ -45,6 +45,16 @@ printf '\n// deliberate TypeScript client drift\n' >> "$target/frontend/src/api/
 expect_failure 'generated TypeScript client drift' 'deliberate TypeScript client drift'
 git -C "$target/frontend" restore src/api/generated/index.ts
 
+if [[ $(git -C "$target/web" rev-parse HEAD) == 6e5fd80a56c3ab2fd0634fd69ecec3b7315dcd06 ]]; then
+    # Reproduce the published U5 pin, whose generated client still used W2a.
+    frontend_pin=$(git -C "$target/frontend" rev-parse HEAD)
+    git -C "$target/frontend" checkout --quiet --detach adce47d05acbf58aeb95c4bd8562ef7ebdf36f16
+    git -C "$target" add frontend
+    LC_ALL=C expect_failure 'W6 paired with the stale U5 client' 'frontend/openapi/web.openapi.json differ'
+    git -C "$target/frontend" checkout --quiet --detach "$frontend_pin"
+    git -C "$target" add frontend
+fi
+
 if [[ $(git -C "$target/frontend" rev-parse HEAD) == 3788ae986ea61762b4219fd17547b5e2840c93cb ]]; then
     # The old W4 frontend baseline is allowed only with the reviewed W2a gitlink.
     review_pin=$(git -C "$target/web" rev-parse HEAD)
