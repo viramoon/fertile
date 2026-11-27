@@ -74,7 +74,7 @@ with path.open("x", encoding="utf-8") as stream:
 PY
 ```
 
-浏览器管理会话和集成凭据按需配置。可选变量、HTTPS origin、权限和默认行为见 [web 管理会话与集成凭据](../docs/configuration.md#web-管理会话与集成凭据)。升级已有数据库时按 [v1 阶段 0 重新部署](../ops/ruler-runbook.md#v1-阶段-0-重新部署) 执行迁移和复验。
+浏览器管理会话和集成凭据按需配置。可选变量、HTTPS origin、权限和默认行为见 [web 管理会话与集成凭据](../docs/configuration.md#web-管理会话与集成凭据)。已有实例升级或迁移按[受监管启停与手动排空](../ops/ruler-runbook.md#受监管启停与手动排空)选择操作顺序和复验项目。
 
 ## 3. 启动服务
 
@@ -98,7 +98,11 @@ scripts/fertile logs web
 
 运行参数在启动时从 `config/runtime.env` 读取。安装 unit 时会绑定当时解析出的行情根和研究根，并为各进程生成对实际卷的挂载依赖。外部数据盘可用 fstab 声明挂载点，数据根可位于该挂载点之下。未发现可用上级挂载点时，将外部数据根本身视为预期挂载点。启动时检查实际挂载，空的挂载点目录无法通过。若更改行情源或路径导致解析出的数据根或研究根变化，在维护窗口停止整栈并重新安装 unit，再启动和复验。其它全栈参数可通过重启 target 应用。
 
-unit 指向安装时选定的基准发布。拥有目标 unit 启停权限的运行账户可按应用就绪与兼容证明逐个切换服务。维护窗口内整体换版时，先用 `sudo systemctl stop fertile.target` 停止整栈，以运行账户构建下一版本，再用同一参数重跑 `install-systemd`，启动 target 并复验。注销这个实例的 unit、停用自启并停止服务时，由管理员执行 `sudo scripts/fertile uninstall-systemd --root "$FERTILE_ROOT"`。[热升级与本机接口](hot-upgrade.md)
+unit 指向安装时选定的基准发布。拥有目标 unit 启停权限的运行账户可按应用就绪与兼容证明逐个切换服务。[热升级与本机接口](hot-upgrade.md)
+
+维护窗口内整体换版时，先暂停提交并确认 worker 已排空。执行 `sudo systemctl stop fertile-finance-backtest-worker.service`，确认 worker 和引擎均已退出，再执行 `sudo systemctl stop fertile.target`。以运行账户启用已暂存的候选制品。含新增迁移时，在启动 target 前单独完成 `web migrate` 并核对 SQLx 台账。完成所需迁移和核对后，用同一参数重跑 `install-systemd`，再执行 `sudo systemctl start fertile.target` 并复验。[受监管启停与手动排空](../ops/ruler-runbook.md#受监管启停与手动排空)
+
+注销这个实例的 unit、停用自启并停止服务时，由管理员执行 `sudo scripts/fertile uninstall-systemd --root "$FERTILE_ROOT"`。
 
 含新增迁移的发布回退时，先将迁移前备份恢复到 `data-paper-rollback-<sha>` 和 `web_rollback_<sha>`。在独立实例中配置这对目标及旧发布，核对 unit 使用的卷与实际数据库连接后再启动旧版。同一主机上的托管 unit 名固定，切换实例须先停用并移除原实例的 unit。保留原实例的配置和数据供新版切回。[从升级前快照回滚并切回新版](../ops/ruler-runbook.md#从升级前快照回滚并切回新版)
 

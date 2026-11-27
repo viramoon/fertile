@@ -44,6 +44,7 @@ components:
     port: 8090
     health: {live: /healthz/live, ready: /healthz/ready, system: /api/v1/system/status}
     processes:
+      # FERTILE_ENABLE_WEB_NOTIFIER=0 时守护器不启动该进程，复验见 Ruler 手册的「v1 T3a 首批运行时核对」。
       web-notifier: {command: current/bin/web-notifier, enable_env: FERTILE_ENABLE_WEB_NOTIFIER, default_enabled: false}
 artifacts:
   - name: frontend-dist
@@ -95,7 +96,7 @@ operations:
   data_publication_policy: docs/data-policy.md
   bootstrap: deploy/bootstrap.md
   server_guide: deploy/linux-server.md
-  runbook: ops/ruler-runbook.md
+  runbook: ops/ruler-runbook.md # WebSocket 入口核对、受监管启停与手动排空
   health_checks: ops/health-checks.md
   supervisor: supervisord
   container_init: tini

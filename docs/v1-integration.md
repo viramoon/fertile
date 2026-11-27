@@ -31,6 +31,12 @@ CI 的 Integration 作业从本批 gitlink 构建制品。九只股票的回放 
 
 独立复验先按 [契约验证](../contracts/README.md#验证)从干净克隆检查 gitlinks 与生成物，再执行 [Integration](../.github/workflows/integration.yml) 和 [Recovery](../.github/workflows/recovery.yml) 的隔离用例。保留可公开的测试状态和计数。数据正文、邮件正文、数据库、日志和截图留在本地临时目录，处理边界见[四仓数据政策](data-policy.md)。
 
+## 部署入口与升级路径
+
+- 市场 WebSocket 的代理升级头和 `Origin` 转发核对只适用于前置反向代理。直连 web 的回环监听端口时，核对本机 ready、系统状态及鉴权后的市场流握手、收帧和重连。[WebSocket 入口核对](../ops/ruler-runbook.md#websocket-入口核对)
+- 除[单进程热升级](../deploy/hot-upgrade.md#升级与兼容回退)外，维护窗口可走受监管启停与手动排空。暂停新回测提交，核对 `queued`、`running` 及 F13 租约归零并确认无在途引擎子进程后，再由守护器停止 worker。含新增迁移的发布在新版业务进程启动前单独执行 `web migrate` 并核对 SQLx 台账，回退按下节隔离执行。换版后核对持久队列、采集水位和入口就绪，再恢复接入。[受监管启停与手动排空](../ops/ruler-runbook.md#受监管启停与手动排空)
+- `FERTILE_ENABLE_WEB_NOTIFIER=0` 时守护器不启动 `web-notifier`。核对 `disabled` 与 PID `0`。W11 的直接启动安全空转是 web 新版二进制的行为。[邮件运行时核对](../ops/ruler-runbook.md#v1-t3a-首批运行时核对)
+
 ## 含迁移发布的回退
 
 回退前暂停 notifier 并清点 outbox。将迁移前备份恢复到新建的 `data-paper-rollback-<sha>` 和 `web_rollback_<sha>`，在这对目标上运行旧发布。`<sha>` 为升级前的 fertile 提交号。旧代码不得连接新版写过的数据库，原数据根、数据库和台账留给新版。切回新版时按部署记录恢复原指针，将隔离窗口的写入另存并对账。[Ruler 回退步骤](../ops/ruler-runbook.md#从升级前快照回滚并切回新版) · [热回退适用范围](../deploy/hot-upgrade.md#升级与兼容回退)
