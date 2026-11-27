@@ -25,6 +25,8 @@
 
 控制器为 web 注入同一 release 的 WEB_STATIC_ROOT、finance HTTP 地址和 PostgreSQL socket。本机 web 使用独立的 fertile_web PostgreSQL 登录角色，通过 Unix socket peer 映射认证。运行时角色仅在其私有迁移 schema、app 和 blog 内具有相应权限，首次 SQLx 迁移的数据库 CREATE 权限由控制器临时授予并收回。管理员备份继续使用原 peer 身份。外部 DATABASE_URL 放在 `secrets/web-database.env`，使用外部连接时保留 `FERTILE_WEB_DATABASE` 默认值。单进程热升级由控制器持久化服务制品指针和事务，格式与恢复步骤见[热升级与本机接口](../deploy/hot-upgrade.md)。实例日常操作见 [普通服务器部署指南](../deploy/linux-server.md) 与 [Ruler 手册](../ops/ruler-runbook.md)。
 
+重复准备受管库时复用带部署标记且符合权限约束的 `fertile_web` 角色，并保留角色 OID。遇到标记缺失或不符、角色属性不符合要求，或存在角色成员关系时，准备步骤会拒绝继续并保留原角色。集成演练分别检查旧库接管、受管身份复用和非受管角色拒绝。
+
 本机只做本地压力测试和部署复验。保持 `FERTILE_PUBLIC_ORIGIN` 未设置，巡检覆盖文件中的 `public_origin` 省略或设为 `null`。公网采样记录为跳过，部署冒烟使用 `tests/e2e-smoke.sh local --paper-only`。未来的生产服务器由运维配置自己的 HTTPS origin。公网冒烟还需在 `tests/e2e-smoke.sh public` 后显式传入该 origin。[巡检与告警](../ops/monitoring.md)
 
 ## web 管理会话与集成凭据
