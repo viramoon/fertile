@@ -309,7 +309,7 @@ fi
 ### 受监管启停与手动排空
 
 1. **准备维护窗口。** 确定唯一的进程守护器、允许中断的时段和排空截止时间。记录两版 fertile 提交及三个 gitlink、实际服务 PID、数据根、研究根、web 库名、迁移台账、行情来源与水位。保留旧版完整制品，用 `scripts/fertile build --stage-only --ref "$candidate"` 暂存已通过隔离验收的完整候选，提前确认可恢复备份。核对热升级状态，先解决未完成的交接事务。挂起可能重启服务或继续写入的巡检、自启和调度，核对 notifier 的实际启用状态。
-2. **先排空 worker。** 在入口封住新回测提交，覆盖浏览器、提交脚本、定时任务和可直连 finance API 的提交方。确认在途提交均已结算，保持旧 worker 运行，由它处理现有 `queued` 和 `running` 作业。在已确认的实际数据根，对 `finance-state/backtests/jobs.sqlite3` 使用只读 SQLite 连接，例如 `sqlite3 -readonly`，检查以下三个计数。使用未采用 F13 租约表的旧发布时，只查前两项，并核对仍在运行的引擎子进程。排空条件是 `queued`、`running`、租约均为 `0`，且没有在途引擎子进程。记录最后一次核对时间和计数。超时或有孤立作业、租约时暂停换版，按旧版作业恢复流程核对进程与锁，保留队列和锁文件。[finance worker 运行与恢复](https://github.com/viramoon/finance/blob/fc5e153e9727181f5748659c0610b2fbc2b49769/docs/backtest-jobs.md#worker-运行与恢复)
+2. **先排空 worker。** 在入口封住新回测提交，覆盖浏览器、提交脚本、定时任务和可直连 finance API 的提交方。确认在途提交均已结算，保持旧 worker 运行，由它处理现有 `queued` 和 `running` 作业。在已确认的实际数据根，对 `finance-state/backtests/jobs.sqlite3` 使用只读 SQLite 连接，例如 `sqlite3 -readonly`。先按旧制品和实际 schema 核对队列版本，可用 `SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'job_leases'` 查租约表。存在 `job_leases` 表时执行以下查询，确认 `queued`、`running`、租约均为 `0`，且没有在途引擎子进程。
 
    ```sql
    SELECT (SELECT count(*) FROM jobs WHERE status = 'queued') AS queued,
@@ -317,8 +317,24 @@ fi
           (SELECT count(*) FROM job_leases) AS leases;
    ```
 
+   确认旧发布未采用 F13 且无 `job_leases` 表时，执行以下旧队列查询。两个计数均为 `0` 且没有在途引擎子进程才算排空。若旧制品应有租约表但实际缺失，保持维护状态并核对队列版本。
+
+   ```sql
+   SELECT (SELECT count(*) FROM jobs WHERE status = 'queued') AS queued,
+          (SELECT count(*) FROM jobs WHERE status = 'running') AS running;
+   ```
+
+   记录最后一次核对时间和计数。超时或有孤立作业、租约时暂停换版，按旧版作业恢复流程核对进程与锁，保留队列和锁文件。[finance worker 运行与恢复](https://github.com/viramoon/finance/blob/fc5e153e9727181f5748659c0610b2fbc2b49769/docs/backtest-jobs.md#worker-运行与恢复)
+
 3. **确认排空后才由守护器停止。** 对已启用的 notifier，先清点待发及已静默项，确认停止宽限覆盖当前尝试的结算时限。采集器若支持交接，在停机前按源记录封段截点和最后水位。supervisord 实例先执行 `scripts/fertile stop finance-backtest-worker`，核对原 worker 与引擎均已退出，再用 `scripts/fertile down` 停整栈。systemd 实例先执行 `sudo systemctl stop fertile-finance-backtest-worker.service`，核对该 unit 已停止且无残留引擎，再用 `sudo systemctl stop fertile.target` 停整栈。若另有受管 worker 共用队列，逐一核对并在停整栈前停止。停栈后确认 notifier 的在途尝试已结算，并核对旧采集器已退出、写者锁及源订阅已释放，再允许新采集器接手。IBKR 继续使用 paper 只读，保持唯一行情订阅拥有者。[采集交接与缺口](../deploy/hot-upgrade.md#应用-hook-协议-v1)
-4. **切换并受监管启动。** 业务写入停止后保留迁移前快照，含旧队列、web 库和所需配套文件，对快照运行 `scripts/restore.sh <快照> --dry-run`。需要时按[备份手册](backup.md)由部署账户或 DBA 单独准备数据库供备份和迁移。在停栈状态归档逐服务发布指针，用 `scripts/fertile build --ref "$candidate"` 验证并启用已暂存制品，核对 `current` 与 manifest 中的三个 gitlink。含新增迁移时，在新业务进程启动前确认目标库完成新版 `web migrate` 并核对 SQLx 台账。受管库可用守护器的既有准备流程，外部库由 DBA 显式迁移。计划恢复邮件时，在守护器启动 notifier 前核对 outbox、目标库和制品。投递状态尚待对账时以 `FERTILE_ENABLE_WEB_NOTIFIER=0` 启动。supervisord 实例按[重启检查](#重启与外部入口)选择发布与目标再启动。systemd 实例按[普通服务器部署指南](../deploy/linux-server.md#systemd)重装指向新版的 unit，再用 `sudo systemctl start fertile.target`。
+4. **切换并受监管启动。** 业务写入停止后按[备份手册](backup.md)保留迁移前快照，含旧队列、web 库和所需配套文件。备份受管库需要 PostgreSQL 时单独启动数据库。对快照运行 `scripts/restore.sh <快照> --dry-run`。在停栈状态归档逐服务发布指针，用 `scripts/fertile build --ref "$candidate"` 验证并启用已暂存制品，核对 `current` 与 manifest 中的三个 gitlink。
+
+   含新增迁移时，在启动新版业务进程前单独执行新版 `web migrate`，并核对目标库的 SQLx 台账。此时只运行 PostgreSQL，保持 finance API、collector、worker、web 和 notifier 停止。
+
+   - 受管 PostgreSQL 由部署账户核对原实例根、实际端口和目标库。若备份阶段已单独启动 PostgreSQL，先停止该进程。用候选制品的 `fertile/scripts/postgres.sh foreground` 单独启动 PostgreSQL，设置 `FERTILE_WEB_PEER=1` 并传入该实例的 `FERTILE_WEB_DATABASE` 和 `FERTILE_POSTGRES_PORT`。连接 URI 使用 `fertile_web`、实际库名与端口，并将 `$FERTILE_ROOT/run/postgres` 做 URL 百分号编码后作为 `host` 查询参数。若旧库仍需准备角色、权限或 SQLx 搜索路径，由数据库管理员先按候选制品的 `fertile/scripts/prepare-web-db.sql` 准备并核对目标。
+   - 外部 PostgreSQL 由 DBA 确认目标库、迁移角色和权限。两类库均使用部署核准的 `DATABASE_URL` 和 profile，设 `WEB_CONFIG_DIR="$FERTILE_ROOT/current/web/config"`，运行 `"$FERTILE_ROOT/current/bin/web" migrate`。核对退出码与该库台账中候选制品要求的版本及成功状态。
+
+   supervisord 的 web 准备和 systemd 的 web `ExecStartPre` 都在 finance 服务启动阶段之后轮到 web 时执行。迁移或台账核对失败时保持业务进程停止，按第 6 步处理。计划恢复邮件时，在守护器启动 notifier 前核对 outbox、目标库和制品。投递状态尚待对账时以 `FERTILE_ENABLE_WEB_NOTIFIER=0` 启动。迁移及台账核对通过后，先用 `scripts/postgres.sh stop` 停止本次单独启动的受管 PostgreSQL，再交回守护器。supervisord 实例按[重启检查](#重启与外部入口)选择发布与目标再启动。systemd 实例按[普通服务器部署指南](../deploy/linux-server.md#systemd)重装指向新版的 unit，再用 `sudo systemctl start fertile.target`。
 5. **复验后恢复接入。** 核对守护器报告的发布、服务 PID、实际数据根和库、HTTP 就绪、旧回测结果以及 worker 已就绪并使用原持久队列。按[WebSocket 入口核对](#websocket-入口核对)复验市场流。确认单一采集器接手、订阅恢复且水位推进，记录停机区间的缺口或未知状态。核对 notifier 与计划启用状态一致，再恢复提交与调度。
 6. **失败时保持维护状态。** 含新增迁移的发布按[从升级前快照回滚并切回新版](#从升级前快照回滚并切回新版)执行。将迁移前备份恢复到新建的 `data-paper-rollback-<sha>` 和 `web_rollback_<sha>`，再在这对目标上运行旧发布，保留新版原数据与迁移台账。旧代码不得连接新版写过的数据库。原目标上的回退只在无新增迁移、两版数据和配置兼容、且旧发布所连接的数据库未被新版写过时适用。其余情况保持业务停止，按隔离恢复流程核对可用快照与恢复目标。
 
