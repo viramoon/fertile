@@ -27,14 +27,14 @@
 | python3 scripts/backup_remote.py prune | 在有近期成功恢复凭据时按日、周和父链规则清理远端。详见 [异地备份](../ops/backup.md#私人-google-drive-加密备份)。 |
 | scripts/restore.sh SNAPSHOT --target-data-root PATH --target-database NAME | 校验快照并恢复到显式目标。`--dry-run` 只读校验，在指定目标时也检查占用。`--overwrite` 在正式恢复时允许覆盖，在 dry-run 时警告非空目标的处理方式。`--target-research-root` 单独指定研究 catalog。参见 [备份操作](../ops/backup.md)。 |
 | scripts/check-submodules.sh [--ref BRANCH] | 检查三个 gitlink、干净的递归工作树、远端分支上已推送的提交，默认 main。 |
-| scripts/contract-diff.sh | 从两个生产者代码导出 OpenAPI，并重跑两端客户端生成检查。 |
+| scripts/contract-diff.sh | 从两个生产者代码导出 OpenAPI，校验 finance 流契约，并重跑两端客户端生成检查。 |
 | scripts/release.sh --dry-run | 从 Git 和 GitHub 读取版本、包含的提交与 PR、关闭 issue，向标准输出写入预览。 |
 
 服务使用 [部署清单](../deploy/service.yaml)。systemd 的安装和切换步骤见 [普通服务器部署指南](../deploy/linux-server.md)，压测盒子操作、备份与故障处理见 [Ruler 手册](../ops/ruler-runbook.md)，系统版本规则见 [发版文档](../docs/release.md)。
 
 `data-guard.py` 提供 Git 索引、push 记录、CI 提交范围、私有目录和公开报告检查。钩子安装与共享规则见 [四仓数据发布政策](../docs/data-policy.md)。
 
-静态路由等 OpenAPI 未变的 web 升级可以保留 frontend 记录的 web 祖先提交。契约检查会从该祖先和新版 gitlink 的独立 Git 归档分别导出 OpenAPI 并逐字节比较。两个客户端仍按锁定的输入重新生成校验，两份快照仍与锁定提交的导出比对。[契约验证流程](../contracts/README.md#验证)
+接口不变的祖先升级需通过实际导出内容的比较。T3a 的 W6 锁定 finance `fc5e153`，U6 锁定 web `6e5fd80`。契约检查核对两个生产者的导出及下游客户端。[契约验证流程](../contracts/README.md#验证)
 
 本机压力测试与部署复验使用 `tests/e2e-smoke.sh local --paper-only`，其中覆盖根路径 `/NOTICE` 和第三方许可证路径。手工核对响应与静态制品的方法见 [第三方许可证复验](../ops/ruler-runbook.md#第三方许可证复验)。公网巡检按默认配置跳过。
 

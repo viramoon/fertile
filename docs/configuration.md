@@ -29,6 +29,20 @@
 
 本机只做本地压力测试和部署复验。保持 `FERTILE_PUBLIC_ORIGIN` 未设置，巡检覆盖文件中的 `public_origin` 省略或设为 `null`。公网采样记录为跳过，部署冒烟使用 `tests/e2e-smoke.sh local --paper-only`。未来的生产服务器由运维配置自己的 HTTPS origin。公网冒烟还需在 `tests/e2e-smoke.sh public` 后显式传入该 origin。[巡检与告警](../ops/monitoring.md)
 
+## finance 独立程序参数
+
+以下变量属于 finance 进程环境。控制器为受管进程选择本次发布的配置目录和 Python 环境，并为受管 worker 将 `FINANCE_STRATEGY_BIN` 设为所选发布的 `bin/finance-strategy`。独立 launcher 的参数由其进程配置提供。
+
+| 程序 | 配置与默认行为 |
+| --- | --- |
+| F4 `finance-binance` | `FERTILE_PROFILE` 选择 `cloudbox` 或 `stable`。`FINANCE_CONFIG_DIR` 与 `FINANCE_BINANCE_CONFIG` 选择配置，默认 `config/binance/<profile>.yaml`。两种自带配置均为 `enabled: false`，缺失配置也关闭。`FINANCE_PYTHON` 和 `PYTHONPATH` 指定 Nautilus 传输运行环境，`FERTILE_DATA_ROOT` 指定 F3 数据根。总仓独立服务模板默认关闭。 |
+| F9b 行情线调度 | 由 Rust 调用方显式启动的 paper 只读库，默认常驻股票／热点期权／轮换期权／预留为 9／16／45／30。需要可用的专用行情 client ID。配置由调用方传入，受管 collector 入口保持原有 `ib`／`replay` 配置。 |
+| F12 历史期权 | 调用方提供已确认的未到期候选合约、只读 `PaperMarket` 会话和数据根，probe client ID 和节流状态沿用历史任务。Databento 默认关闭，调用方提供 `EstimateConfig` 可离线估算。本仓为 F12 增加的独立常驻进程及环境开关数量为零。 |
+| F13 `finance-backtest-worker` | 原 launcher 读取所选发布的 `FINANCE_BUILD_ROOT`，与 API 使用同一 `FERTILE_DATA_ROOT` 的 SQLite 队列。`FINANCE_WORKER_LEASE_SECONDS` 默认 15 秒，`FINANCE_WORKER_CONCURRENCY` 默认 1，`FINANCE_JOB_TIMEOUT_SECONDS` 默认 600，`FINANCE_JOB_MEMORY_MB` 默认 8192。配置作业通过 `FINANCE_STRATEGY_BIN` 指向同一 finance 制品。替代 worker 模板默认关闭。 |
+| F13 `finance-decision` | 总仓模板默认关闭。独立 launcher 默认 `python3`，`FINANCE_PYTHON` 可指定构建的 Python 解释器。要求 `FERTILE_DATA_ROOT`、`--plan` 和 `--replay`，可用 `--follow` 跟随追加文件。配置策略使用同构建的 `FINANCE_STRATEGY_BIN` 或从 `PATH` 查找。结果写入实例的 `finance-state/decisions/decisions.sqlite3`。 |
+
+程序参数以锁定 finance 文档为准。[Binance 公共行情](https://github.com/viramoon/finance/blob/fc5e153e9727181f5748659c0610b2fbc2b49769/docs/integrations/binance.md) · [历史期权链](https://github.com/viramoon/finance/blob/fc5e153e9727181f5748659c0610b2fbc2b49769/docs/option-history.md) · [回测作业](https://github.com/viramoon/finance/blob/fc5e153e9727181f5748659c0610b2fbc2b49769/docs/backtest-jobs.md#worker-运行与恢复) · [实时决策](https://github.com/viramoon/finance/blob/fc5e153e9727181f5748659c0610b2fbc2b49769/docs/decision-process.md)
+
 ## web 管理会话与集成凭据
 
 以下变量可选，写在 `config/runtime.env`，由 supervisord 和 systemd 的控制器传给 web。未启用时省略对应行。修改后，supervisord 运行 `scripts/fertile ensure-up` 重新读取配置并替换配置有变的进程，systemd 重启 `fertile-web.service`。

@@ -17,7 +17,16 @@ import supervision
 
 INITIAL = "20261122000000"
 W1 = "20261126000000"
-APPLIED = f"{INITIAL},{W1}"
+APPLIED = ",".join((
+    INITIAL,
+    W1,
+    "20261127000000",  # W3 notifications
+    "20261127010000",  # W3 notification replacements
+    "20261127020000",  # W4 integration evidence
+    "20261127030000",  # W4 SMTP snapshots
+    "20261127040000",  # W2a market watchlists
+    "20261127074531",  # W5 notification silences
+))
 
 def run(*args, env, capture=False, check=True):
     return subprocess.run(args, env=env, text=True, capture_output=capture, check=check)

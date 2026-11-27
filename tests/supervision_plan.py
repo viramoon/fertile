@@ -56,6 +56,27 @@ class RuntimeRoot(unittest.TestCase):
                 self.assertEqual(resolve_root(), Path(expected))
 
 
+class FinanceReleaseArtifacts(unittest.TestCase):
+    def test_optional_finance_binaries_come_from_selected_cargo_targets(self):
+        manifest = Path(__file__).resolve().parents[1] / "scripts/release-manifest.py"
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "cargo-metadata.json"
+            for declared, expected in (
+                (("finance-binance", "finance-market-wal", "finance-strategy"),
+                 ["finance-binance", "finance-market-wal", "finance-strategy"]),
+                (("finance-market-wal",), ["finance-market-wal"]),
+            ):
+                source.write_text(json.dumps({"packages": [{"targets": [
+                    *({"name": name, "kind": ["bin"]} for name in declared),
+                    {"name": "finance-api", "kind": ["bin"]},
+                    {"name": "finance-decision", "kind": ["bin"], "required-features": ["extra"]},
+                ]}]}))
+                result = subprocess.check_output(
+                    [sys.executable, manifest, "optional-bins", "finance", source], text=True,
+                )
+                self.assertEqual(result.splitlines(), expected)
+
+
 class RuntimePlan(unittest.TestCase):
     def setUp(self):
         tmp = TemporaryDirectory()
@@ -100,6 +121,22 @@ class RuntimePlan(unittest.TestCase):
         parser = configparser.RawConfigParser()
         parser.read(self.run / "programs.conf")
         return parser
+
+    def test_worker_uses_the_indicator_binary_from_its_selected_release(self):
+        base, previous = self.releases()
+        with (patch.dict(os.environ, {"PATH": os.defpath, "FERTILE_MARKET_SOURCE": "replay"}, clear=True),
+              patch.object(ctl.shutil, "which", return_value="/bin/true")):
+            for release in (base, previous):
+                if release == previous:
+                    service_releases.select(self.root, base, "finance-backtest-worker", previous)
+                services = ctl.build_plan()["services"]
+                worker = services["finance-backtest-worker"]
+                self.assertFalse(worker["skip"])
+                self.assertEqual(worker["env"]["FINANCE_STRATEGY_BIN"], str(release / "bin/finance-strategy"))
+                self.assertEqual(worker["command"], [str(release / "finance/scripts/finance-backtest-worker")])
+                self.assertEqual(services["finance-backtest-worker-f13"]["skip"], "disabled")
+                self.assertEqual(services["finance-live-decision"]["skip"], "disabled")
+                self.assertEqual(services["finance-collector-binance"]["skip"], "disabled")
 
     def test_pinned_web_uses_selected_payload_without_reconfiguring_collector(self):
         base, previous = self.releases()
