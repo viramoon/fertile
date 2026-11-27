@@ -17,6 +17,8 @@ from urllib.parse import urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from uuid import uuid4
 
+from replay_fixture import EQUITIES
+
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -241,6 +243,7 @@ def check_assets(http):
         media, data = http.read(url, asset=True)
         allowed = {"application/javascript", "text/javascript", "application/ecmascript"} if kind == "js" else {"text/css"}
         require(media in allowed and data.strip() and not data.lstrip().startswith(b"<"), f"invalid {kind} asset")
+    return body
 
 
 def check_licenses(http):
@@ -295,7 +298,16 @@ def check_market(market):
     log("market", source=market["source"], updated_at=market["updated_at"], instruments=market["instruments"])
 
 
-def smoke(http, secret, skipped, protocol_fixture=False, *, paper_only=False):
+def check_replay_nine(market):
+    require(market["source"] == "replay", "nine-equity replay requires the replay source")
+    require(sorted(row["instrument"] for row in market["instruments"]) == sorted(EQUITIES),
+            "replay did not collect all nine configured equities exactly once")
+    log("nine equities ready", source="replay", count=len(EQUITIES))
+
+
+def smoke(http, secret, skipped, protocol_fixture=False, *, paper_only=False, replay_nine=False):
+    if replay_nine:
+        require(http.local and not (protocol_fixture or paper_only), "nine-equity replay requires local replay mode")
     require(http.read("/healthz/live").get("status") == "ok", "web is not live")
     ready = http.read("/healthz/ready")
     require(ready.get("status") == "ready" and ready.get("checks")
@@ -305,6 +317,8 @@ def smoke(http, secret, skipped, protocol_fixture=False, *, paper_only=False):
             "database/finance/circuit unhealthy in web system status")
     require(state["web"].get("version") and state["web"].get("commit") not in (None,"","unknown"), "missing web build identity")
     system_market = state["market"]
+    if replay_nine:
+        require(system_market["source"] == "replay", "nine-equity replay requires the replay source")
     recovering = paper_only and system_market["state"] == "recovering"
     if recovering:
         require(system_market["fresh"] is False and system_market["source"] in {"ib", "ib-realtime", "ib-delayed"},
@@ -328,6 +342,8 @@ def smoke(http, secret, skipped, protocol_fixture=False, *, paper_only=False):
     require(system_market["source"] == market["source"]
             and system_market["instrument_count"] == len(market["instruments"]),
             "market summaries disagree across status routes")
+    if replay_nine:
+        check_replay_nine(market)
     if protocol_fixture:
         require(market["source"] in {"ib-realtime", "ib-delayed"}, "protocol fixture requires the IB collector")
         log("synthetic loopback IB protocol fixture", external_services=skipped,
@@ -335,7 +351,7 @@ def smoke(http, secret, skipped, protocol_fixture=False, *, paper_only=False):
     elif skipped and not paper_only:
         require(market["source"] == "replay", "required external services are unavailable for paper acceptance")
         log("replay external services skipped", services=skipped)
-    check_assets(http)
+    app_html = check_assets(http)
     if http.local:
         check_licenses(http)
 
@@ -357,6 +373,9 @@ def smoke(http, secret, skipped, protocol_fixture=False, *, paper_only=False):
             result = job["summary"]
             require(result["strategy"] == JOB["strategy"] and result["instrument"] == JOB["instrument"],
                     "job summary does not match the submission")
+            if replay_nine:
+                deep_link = http.read(f"/backtests?job={job_id}", json_body=False)
+                require(deep_link == ("text/html", app_html), "old backtest deep link did not serve the SPA entry")
             log("completed", id=job_id, **summary(result))
             return
         require(phase in {"queued", "running"}, f"backtest {job_id} entered {phase}")
@@ -421,6 +440,8 @@ def main():
     local_profile = local.add_mutually_exclusive_group()
     local_profile.add_argument("--protocol-fixture", action="store_true",
                                help="isolated loopback IB wire test only; requires FERTILE_SMOKE_FIXTURE_PID")
+    local_profile.add_argument("--replay-nine", action="store_true",
+                               help="require fresh ReplaySource bars for the nine v1 US equities")
     public = modes.add_parser("public")
     public.add_argument("origin", nargs="?", type=public_origin, metavar="HTTPS_ORIGIN",
                         help="explicitly configured HTTPS origin (required)")
@@ -451,7 +472,8 @@ def main():
         secret = Path(os.environ.get("WEB_ADMIN_TOKEN_FILE", root / "secrets/web.env"))
         log("smoke", mode=args.mode, origin=origin, paper_only=args.paper_only, timeout_seconds=args.timeout_seconds)
         http = HTTP(origin, args.mode == "local")
-        smoke(http, secret, skipped, fixture, paper_only=args.paper_only)
+        smoke(http, secret, skipped, fixture, paper_only=args.paper_only,
+              replay_nine=args.mode == "local" and args.replay_nine)
         if args.research_instrument:
             research_smoke(http, secret, args.research_instrument, args.research_kind)
     finally:

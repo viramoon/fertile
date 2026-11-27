@@ -88,6 +88,21 @@ curl -fsS http://127.0.0.1:8090/api/v1/backtests/sample
 )
 ```
 
+## v1 T3 首批运行时核对
+
+选用通过集成检查的完整制品。维护前备份 web 库、回测队列和已授权数据，记录旧制品与数据根。三个 gitlink、隔离验收入口和待后续批次的能力见[首批集成说明](../docs/v1-integration.md)。
+
+| 项目 | 操作 |
+| --- | --- |
+| web 与前端 | 重建 `web`、`web-notifier` 与完整前端 `dist`。先在同一 web 库运行新版 `web migrate`，确认成功应用至 `20261127074531`，再切换 web 与启用中的 notifier。受管库由现有准备流程迁移，外部库由管理员显式执行。既有端口仍提供 HTTP、SSE 和 WebSocket，代理要保留 WebSocket 升级头与 Origin。 |
+| finance | 采集、API、回测 worker 保留原入口。F3 的 `finance-market-wal` 与 Python 投影随候选制品构建。要启用投影，设置 `FERTILE_ENABLE_FINANCE_PROJECTOR=1`，核对产品记录许可、单写者和 WAL/投影水位。保留旧 bar catalog 与队列。 |
+| 邮件 | `FERTILE_ENABLE_WEB_NOTIFIER=1` 时由守护器启动 `web-notifier`。与 web 共用已迁移数据库，无监听端口。先用专属 `web-notifier.env` 配好固定 SMTP 中继、发件地址、本人收件地址和可选凭据文件引用。启用前用隔离 outbox 复验状态。[进程条件](../deploy/hot-upgrade.md#宿主与持久目录) |
+| 备份 | offsite 默认关闭。仅在确认产品云端备份许可、接收方账户与离线密钥安排后配置 T2b，接入 F3 时显式设置 `FERTILE_BACKUP_WAL_BIN`，按产品授权选择封段。远端和收件人由 vira 决定。[备份与恢复](backup.md#私人-google-drive-加密备份) |
+
+两个新增可选进程默认关闭。W4 的 SMTP 候选快照和备份/采集状态文件需要后续部署接线，本批进程清单使用 W3 固定中继设置。Binance 与独立实时决策模板继续关闭。IBKR 允许范围为 paper 只读行情。九标的回放与现网实例使用独立数据根。
+
+回退前先暂停 notifier，清点待发与已静默记录。保留升级后的 PostgreSQL、已授权 WAL 和回测结果；需要运行旧 SQLx 迁移器时用升级前快照恢复兼容的独立库，再恢复旧制品。投影可以在隔离根从已封段 WAL 重建。详见[跨版本恢复](#从升级前快照回滚并切回新版)与[单写者交接](../deploy/hot-upgrade.md)。
+
 ## 部署后的隔离历史日线验收
 
 **本机验收禁令。** 不修改 `runtime.env` 或 `env.sh`，不重启或重指 live API / worker，不对 `data-paper` 或 live 库 `web` 做正式 restore。本机不要运行 `scripts/fertile up`、`ensure`、`ensure-up`、`down` 或 `rollback`，这些入口会调用 ensure、启动 healthwatch 或改变 live 服务状态。不要通过 `/backtests` 页面或 8090 提交，也不要执行 `tests/e2e-smoke.sh local --research-instrument …`。这些入口写入 live 队列 `data-paper/finance-state/backtests/jobs.sqlite3`，冒烟还会先提交示例作业。

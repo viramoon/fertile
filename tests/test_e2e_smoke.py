@@ -1,6 +1,7 @@
 """Regression tests for the acceptance script's evidence and credential boundaries."""
 import argparse
 from contextlib import redirect_stderr, redirect_stdout
+import csv
 from datetime import datetime, timedelta, timezone
 from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,6 +19,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 
 import e2e_smoke as check
+from replay_fixture import write_replay_fixture
 
 
 TEST_HOST = "deployment.invalid"
@@ -183,6 +185,38 @@ class SmokeTests(unittest.TestCase):
             check.token_from(self.secret)
         with self.assertRaisesRegex(check.SmokeError, "cross-origin"):
             self.http.read("https://other.invalid/a.js", asset=True)
+
+
+class ReplayFixtureTests(unittest.TestCase):
+    def test_nine_equity_replay_config_matches_the_smoke_and_uses_exact_prices(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = json.loads(write_replay_fixture(Path(directory)).read_text(encoding="utf-8"))
+            with Path(config["replay"]["fixture"]).open(newline="", encoding="utf-8") as file:
+                candles = list(csv.DictReader(file))
+        self.assertEqual(config["source"], "replay")
+        self.assertEqual(config["instruments"], [
+            "QQQ.XNAS", "SPY.ARCA", "AAPL.XNAS", "MSFT.XNAS", "NVDA.XNAS",
+            "AMZN.XNAS", "GOOGL.XNAS", "META.XNAS", "TSLA.XNAS",
+        ])
+        self.assertEqual([row["close"] for row in candles], ["100.123456794", "100.123456814", "100.123456834"])
+        with redirect_stdout(io.StringIO()) as output:
+            check.check_replay_nine({"source": "replay", "instruments": [
+                {"instrument": instrument} for instrument in reversed(config["instruments"])
+            ]})
+        self.assertIn("nine equities ready", output.getvalue())
+
+    def test_nine_equity_replay_rejects_missing_duplicate_and_ib_bars(self):
+        for instruments in (check.EQUITIES[:-1], check.EQUITIES[:-1] + (check.EQUITIES[0],)):
+            with self.subTest(instruments=instruments), self.assertRaisesRegex(
+                check.SmokeError, "all nine configured equities exactly once"
+            ):
+                check.check_replay_nine({"source": "replay", "instruments": [
+                    {"instrument": instrument} for instrument in instruments
+                ]})
+        with self.assertRaisesRegex(check.SmokeError, "requires the replay source"):
+            check.check_replay_nine({"source": "ib-realtime", "instruments": [
+                {"instrument": instrument} for instrument in check.EQUITIES
+            ]})
 
 
 class PublicOriginTests(unittest.TestCase):

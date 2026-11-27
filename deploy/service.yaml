@@ -26,10 +26,11 @@ components:
       finance-collector: {command: current/bin/finance-collector, host: 127.0.0.1, port: 8082, sources: [ib, replay]}
       finance-collector-binance: {status: integration-template, default_enabled: false}
       finance-collector-hyperliquid: {status: integration-template, default_enabled: false}
-      finance-projector: {module: fertile_finance.market_projector, wal_command: current/bin/finance-market-wal, status: requires-f3, enable_env: FERTILE_ENABLE_FINANCE_PROJECTOR, default_enabled: false}
+      finance-projector: {module: fertile_finance.market_projector, wal_command: current/bin/finance-market-wal, status: optional, enable_env: FERTILE_ENABLE_FINANCE_PROJECTOR, default_enabled: false}
       finance-backtest-worker: {command: current/finance/scripts/finance-backtest-worker}
       finance-backtest-worker-f13: {status: integration-template, default_enabled: false}
       finance-live-decision: {status: integration-template, default_enabled: false}
+    market_state: {wal: finance-state/market-wal, projection: finance-state/market-projection, catalog: catalog/market-events}
     health: {live: /healthz/live, ready: /healthz/ready, market: /api/v1/market/status}
   - name: web
     submodule: web
@@ -37,6 +38,7 @@ components:
     target: cloudbox # 当前压测部署，普通服务器使用 stable profile
     command: current/bin/web serve
     migrate: current/bin/web migrate
+    migration_head: "20261127074531" # W5 主动静默，包含此前 W3、W4 和 W2a 迁移
     host: 127.0.0.1
     port: 8090
     health: {live: /healthz/live, ready: /healthz/ready, system: /api/v1/system/status}
@@ -98,6 +100,7 @@ operations:
   container_init: tini
   systemd: deploy/systemd
   hot_upgrade: deploy/hot-upgrade.md
+  v1_integration: docs/v1-integration.md
   commands:
     build: scripts/fertile build
     stage: scripts/fertile build --stage-only --ref SHA

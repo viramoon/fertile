@@ -197,6 +197,58 @@ jobs:
           fi
           source "$FERTILE_ROOT/env.sh"
           scripts/setup-supervisor.sh
+      - name: Prepare locked test dependencies and rclone for the local encrypted remote
+        run: |
+          source "$FERTILE_ROOT/env.sh"
+          cargo_host=$(rustc -vV | sed -n 's/^host: //p')
+          (cd finance && cargo fetch --locked --target "$cargo_host")
+          (cd web && cargo fetch --locked --target "$cargo_host")
+          (
+            cd "$RUNNER_TEMP"
+            archive=rclone-v1.76.0-linux-amd64.zip
+            curl -fsSLo "$archive" --retry 3 "https://downloads.rclone.org/v1.76.0/$archive"
+            echo "b00f00b3266c3764413afe599d3ec316f6f43b3e0ea8a0bc1d186d2133e46df7  $archive" | sha256sum -c -
+            unzip -q "$archive"
+          )
+      - name: Exercise the pinned outbox, gap recovery and encrypted WAL restore
+        run: |
+          source "$FERTILE_ROOT/env.sh"
+          export FERTILE_TEST_RCLONE="$RUNNER_TEMP/rclone-v1.76.0-linux-amd64/rclone"
+          export FERTILE_BACKUP_TEST_WAL="$FERTILE_ROOT/current/bin/finance-market-wal"
+          export FINANCE_F3_TEST_PYTHON="$FERTILE_ROOT/current/runtime/venv/bin/python"
+          test -x "$FERTILE_TEST_RCLONE"
+          test -x "$FERTILE_BACKUP_TEST_WAL"
+          test -x "$FINANCE_F3_TEST_PYTHON"
+          export CARGO_NET_OFFLINE=true SQLX_OFFLINE=true
+          (
+            cd finance
+            cargo test --offline --locked --release -p finance-collector --lib market_
+            cargo test --offline --locked --release -p finance-collector --test option_exposure
+            cargo test --offline --locked --release -p finance-collector --test market_wal_projector \
+              -- --include-ignored
+          )
+          (
+            cd web
+            cargo test --offline --locked --release --lib notifications
+            cargo test --offline --locked --release --test api notifications
+          )
+          python3 -B tests/backup_remote_test.py EncryptedRecovery.test_encrypted_wal_full_and_hourly_restore_gap_and_new_epoch
+      - name: Verify the F12 producer separately from the candidate gitlink
+        run: |
+          source "$FERTILE_ROOT/env.sh"
+          f12=f4786109e3812e4946adb92e97e513f1fbae5d79
+          producer=$(mktemp -d "$RUNNER_TEMP/finance-f12.XXXXXXXX")
+          trap 'rm -rf -- "$producer"' EXIT
+          git -C finance archive "$f12" | tar -xm -C "$producer"
+          cd "$producer"
+          # Revisions of the same Cargo packages must not share compiled artifacts.
+          export CARGO_TARGET_DIR="$producer/target"
+          cargo_host=$(rustc -vV | sed -n 's/^host: //p')
+          cargo fetch --locked --target "$cargo_host"
+          export CARGO_NET_OFFLINE=true
+          cargo test --offline --locked --release -p finance-collector --test option_history
+          cargo test --offline --locked --release -p finance-ib --lib \
+            verified_paper_option_history_requests_and_decodes_synthetic_bars
       - name: Switch the real finance API while synthetic collection advances
         run: |
           "$FERTILE_ROOT/tools/supervisor/bin/python" -B tests/container_hot_upgrade_test.py --require-native \
@@ -213,13 +265,23 @@ jobs:
           set -eu
           source "$FERTILE_ROOT/env.sh"
           umask 077
-          mkdir -p "$FERTILE_ROOT/config" "$FERTILE_ROOT/secrets"
-          printf '%s\n' FERTILE_MARKET_SOURCE=replay > "$FERTILE_ROOT/config/runtime.env"
+          mkdir -p "$FERTILE_ROOT/config" "$FERTILE_ROOT/secrets" "$FERTILE_ROOT/run"
+          python3 -B tests/replay_fixture.py "$FERTILE_ROOT/run"
           python3 - <<'PYTHON'
+          from contextlib import ExitStack
           import os
           import secrets
+          import socket
           from pathlib import Path
-          with Path(os.environ["FERTILE_ROOT"], "secrets/web.env").open("x") as token:
+
+          root = Path(os.environ["FERTILE_ROOT"])
+          with ExitStack() as stack, (root / "config/runtime.env").open("x") as settings:
+              settings.write(f"FERTILE_MARKET_SOURCE=replay\nFINANCE_COLLECTOR_CONFIG={root}/run/replay-nine.yaml\n")
+              for name in ("FINANCE_API_PORT", "FINANCE_COLLECTOR_PORT", "WEB_PORT"):
+                  listener = stack.enter_context(socket.socket())
+                  listener.bind(("127.0.0.1", 0))
+                  settings.write(f"{name}={listener.getsockname()[1]}\n")
+          with (root / "secrets/web.env").open("x") as token:
               token.write("WEB_ADMIN_TOKEN=" + secrets.token_hex(32) + "\n")
           PYTHON
           scripts/fertile up
@@ -233,7 +295,7 @@ jobs:
           WEB_DATABASE_TEST_BIN="$FERTILE_ROOT/current/bin/web" WEB_DATABASE_TEST_CONFIG="$FERTILE_ROOT/current/web/config" \
             "$FERTILE_ROOT/tools/supervisor/bin/python" -B tests/web-database.py
           python3 tests/test_e2e_smoke.py
-          tests/e2e-smoke.sh local --research-instrument FIXTURE.XNYS --research-kind fixture
+          tests/e2e-smoke.sh local --replay-nine --research-instrument FIXTURE.XNYS --research-kind fixture
           python3 tests/chaos/services.py postgres
       - name: Shut down the private test instance
         if: always()

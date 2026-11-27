@@ -31,7 +31,9 @@ def build_api(source, revision, work, target):
     checkout = work / revision
     checkout.mkdir()
     with subprocess.Popen(["git", "-C", source, "archive", revision], stdout=subprocess.PIPE) as archive:
-        subprocess.run(["tar", "-x", "-C", checkout], stdin=archive.stdout, check=True)
+        # Fresh source mtimes prevent Cargo from reusing the other revision's
+        # older workspace artifacts when the caller supplies a shared target.
+        subprocess.run(["tar", "-xm", "-C", checkout], stdin=archive.stdout, check=True)
         require(archive.wait() == 0, "failed to archive the pinned finance source")
     subprocess.run(
         ["cargo", "build", "--offline", "--locked", "--release", "-p", "finance-api",
@@ -181,7 +183,7 @@ def main():
     subprocess.run(["git", "-C", source, "merge-base", "--is-ancestor", old_pin, pin], check=True)
     with tempfile.TemporaryDirectory(prefix="fertile-published-queue.", dir="/tmp") as directory:
         work = Path(directory)
-        target = Path(os.environ.get("CARGO_TARGET_DIR", work / "target")).resolve()
+        target = Path(os.environ.get("CARGO_TARGET_DIR", work / "target")).resolve() / "published-queue"
         if args.candidate:
             release = installed_candidate(args.candidate.resolve(strict=True), pin)
             candidate = Path(shutil.copy2(release, work / "candidate-api"))

@@ -61,6 +61,17 @@ class WorkflowPolicy(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result)
         self.assertIn("制品上传入口", result.stdout)
 
+    def test_docs_accept_refs_only_for_the_t3_batch(self):
+        script = step_script("docs-check", "docs", "检查文档与 PR 描述")
+        branch = "issue-44-contracts-gitlinks-e2e"
+        for ref, issue, valid in ((branch, 44, True), (branch, 45, False),
+                                  ("issue-45-other", 44, False)):
+            with self.subTest(ref=ref, issue=issue):
+                result = self.shell(script, PR_BODY=f"Refs #{issue}\n\n## 测试结果\n合成检查。", HEAD_REF=ref)
+                self.assertEqual(result.returncode == 0, valid, result)
+                if not valid:
+                    self.assertIn("PR 描述缺少", result.stderr)
+
     def test_bootstrap_output_stays_in_runner_log_on_success_and_failure(self):
         script = step_script("bootstrap-box", "bootstrap", "首次安装、二次跳过、版本与 Postgres")
         workspace = self.root / "workspace"

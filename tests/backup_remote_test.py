@@ -2,12 +2,14 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, nullcontext, redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
+import hashlib
 import io
 import json
 import os
 from pathlib import Path
 import shutil
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
@@ -16,13 +18,16 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "scripts"))
 import backup
 import backup_remote as remote_backup
 from backup_crypt import CryptError, CryptRemote
+from backup_wal import WAL_ROOT, activate_wal
 
 RCLONE = shutil.which(os.environ.get("FERTILE_TEST_RCLONE", "rclone"))
 TEST_POSTGRES = os.environ.get("FERTILE_TEST_POSTGRES") == "1"
+TEST_WAL = os.environ.get("FERTILE_BACKUP_TEST_WAL")
 UTC = timezone.utc
 
 
@@ -150,6 +155,85 @@ class EncryptedRecovery(unittest.TestCase):
                 self.assertFalse((target / "config/credentials").exists())
                 with closing(sqlite3.connect(target / "finance-state/queue.sqlite3")) as db:
                     self.assertEqual([row[0] for row in db.execute("SELECT revision FROM jobs")], revisions)
+
+    @unittest.skipUnless(TEST_WAL, "Set FERTILE_BACKUP_TEST_WAL to the pinned finance-market-wal binary")
+    def test_encrypted_wal_full_and_hourly_restore_gap_and_new_epoch(self):
+        # The pinned F1 generator supplies deterministic trades, a correction,
+        # a gap, and the reset/status pair from a different epoch. Frame them
+        # with the documented F3 sealed WAL v1 format. The real F3 CLI validates
+        # and activates each prefix before T2b sees it.
+        examples = REPO / "finance/protocol/v1/examples.json"
+        events = json.loads(examples.read_bytes())["events"][:6]
+        self.assertEqual([event["kind"] for event in events],
+                         ["trade", "trade", "correction", "gap", "reset", "status"])
+        self.assertNotEqual(events[3]["epoch"], events[4]["epoch"])
+        self.assertEqual(events[4]["epoch"], events[5]["epoch"])
+        self.assertEqual(events[5]["payload"], {"state": "connected"})
+        source, product = events[0]["source"], events[0]["product"]
+        policy = {"source": source, "product": product, "license": "fixture.synthetic",
+                  "display_live": True, "record_local": True, "derive_non_display": True,
+                  "backup_personal_drive": True}
+
+        def seed(root, groups):
+            path = root / WAL_ROOT / source / product
+            path.mkdir(parents=True)
+            segments = []
+            position = 1
+            for group in groups:
+                first = position
+                contents = bytearray(b"FINWAL1\n")
+                for event in group:
+                    body = struct.pack("<QQ", position, 1) + json.dumps(event).encode()
+                    length = struct.pack("<I", len(body))
+                    contents.extend(length + hashlib.sha256(length + body).digest() + body)
+                    position += 1
+                name = f"{first:020}"
+                segment = path / f"{name}.wal"
+                segment.write_bytes(contents)
+                segments.append({"id": name, "path": segment.relative_to(root / WAL_ROOT).as_posix(),
+                                 "first": str(first), "last": str(position - 1), "bytes": str(len(contents)),
+                                 "sha256": hashlib.sha256(contents).hexdigest()})
+            manifest = root / "sealed.json"
+            manifest.write_text(json.dumps({"access": policy, "wal": {
+                "version": 1, "source": source, "product": product,
+                "sealed_through": str(position - 1), "segments": segments,
+            }}))
+            subprocess.run([TEST_WAL, "--data-root", root, "restore", "--manifest", manifest], check=True)
+
+        def wal_json(root, command):
+            lines = subprocess.check_output([TEST_WAL, "--data-root", root, command,
+                                             "--source", source, "--product", product], text=True)
+            return [json.loads(line) for line in lines.splitlines()]
+
+        os.environ.update(FERTILE_BACKUP_WAL_BIN=TEST_WAL, FERTILE_BACKUP_WAL_PRODUCTS=f"{source}/{product}")
+        seed(self.data, [events[:2]])
+        full = self.success("full")["point"]
+        later = self.root / "later-data"
+        seed(later, [events[:2], events[2:]])
+        (self.data / WAL_ROOT).rename(self.root / "first-wal")
+        (later / WAL_ROOT).rename(self.data / WAL_ROOT)
+        hourly = self.success("hourly")["point"]
+
+        inventory = self.read_inventory()
+        self.assertEqual([point.id for point in inventory.chain(hourly)], [full, hourly])
+        segment_prefix = f"wal/segments/{source}/{product}/"
+        self.assertEqual(
+            [path for path in inventory.points[hourly].files if path.startswith(segment_prefix)],
+            [f"{segment_prefix}{3:020}.wal"],
+        )
+        for point, cutoff in ((full, 2), (hourly, 6)):
+            with self.subTest(cutoff=cutoff):
+                archive = self.root / point
+                self.success("restore", point, "--snapshot-to", archive)
+                expected_watermark = {source: {product: str(cutoff)}}
+                self.assertEqual(backup.verify(archive)["wal"], expected_watermark)
+                target = self.root / f"recovered-{cutoff}"
+                target.mkdir()
+                self.assertEqual(activate_wal(TEST_WAL, target, archive / "wal"), expected_watermark)
+                self.assertEqual(wal_json(target, "watermarks")[0]["local_durable"], str(cutoff))
+                rows = wal_json(target, "read")
+                self.assertEqual([row["position"] for row in rows], [str(i) for i in range(1, cutoff + 1)])
+                self.assertEqual([row["event"] for row in rows], events[:cutoff])
 
     @unittest.skipUnless(TEST_POSTGRES, "Set FERTILE_TEST_POSTGRES=1 for the isolated PG17 drill")
     def test_postgres_and_sqlite_restore_into_empty_targets(self):
