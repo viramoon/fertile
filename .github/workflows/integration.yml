@@ -143,7 +143,47 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - name: Read the OpenAPI Generator pin from web
+        id: openapi-pin
+        shell: bash
+        run: |
+          # Read the existing web pins without sourcing the generator.
+          generator=web/scripts/gen-finance-client.sh
+          version=$(sed -n 's/^version=//p' "$generator")
+          sha256=$(sed -n 's/^checksum=//p' "$generator")
+          url=$(sed -nE 's|^[[:space:]]*"(https://[^"]+)" -o "\$download"$|\1|p' "$generator")
+          url=${url//\$version/$version}
+          if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! $sha256 =~ ^[0-9a-f]{64}$ ||
+                ! $url =~ ^https://[^[:space:]]+$ || $url == *'$'* ]]; then
+            echo "::error::Cannot read the pinned OpenAPI Generator version, SHA-256 and HTTPS URL from $generator."
+            exit 1
+          fi
+          printf 'version=%s\nsha256=%s\nurl=%s\njar=%s/openapi-generator-cli-%s.jar\n' \
+            "$version" "$sha256" "$url" "$RUNNER_TEMP" "$version" >> "$GITHUB_OUTPUT"
+      - name: Restore the pinned OpenAPI Generator JAR
+        id: restore-openapi
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.openapi-pin.outputs.jar }}
+          key: fertile-openapi-generator-${{ steps.openapi-pin.outputs.version }}-${{ steps.openapi-pin.outputs.sha256 }}
+      - name: Verify or download the pinned OpenAPI Generator JAR
+        env:
+          CACHE_HIT: ${{ steps.restore-openapi.outputs.cache-hit }}
+          OPENAPI_GENERATOR_JAR: ${{ steps.openapi-pin.outputs.jar }}
+          OPENAPI_GENERATOR_SHA256: ${{ steps.openapi-pin.outputs.sha256 }}
+          OPENAPI_GENERATOR_URL: ${{ steps.openapi-pin.outputs.url }}
+        run: |
+          bash scripts/fetch-openapi-generator.sh "${CACHE_HIT:-false}" \
+            "$OPENAPI_GENERATOR_URL" "$OPENAPI_GENERATOR_SHA256" "$OPENAPI_GENERATOR_JAR"
+      - name: Save the verified OpenAPI Generator JAR
+        if: steps.restore-openapi.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.openapi-pin.outputs.jar }}
+          key: fertile-openapi-generator-${{ steps.openapi-pin.outputs.version }}-${{ steps.openapi-pin.outputs.sha256 }}
       - name: Re-export contracts and regenerate both clients
+        env:
+          OPENAPI_GENERATOR_JAR: ${{ steps.openapi-pin.outputs.jar }}
         run: |
           source "$FERTILE_ROOT/env.sh"
           (cd frontend && pnpm install --frozen-lockfile)
