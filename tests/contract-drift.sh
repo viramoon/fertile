@@ -43,3 +43,25 @@ expect_failure 'generated Rust client drift' 'deliberate Rust client drift'
 git -C "$target/web" restore crates/finance-client/src/lib.rs
 printf '\n// deliberate TypeScript client drift\n' >> "$target/frontend/src/api/generated/index.ts"
 expect_failure 'generated TypeScript client drift' 'deliberate TypeScript client drift'
+git -C "$target/frontend" restore src/api/generated/index.ts
+
+if [[ $(git -C "$target/frontend" rev-parse HEAD) == 3788ae986ea61762b4219fd17547b5e2840c93cb ]]; then
+    # The old W4 frontend baseline is allowed only with the reviewed W2a gitlink.
+    review_pin=$(git -C "$target/web" rev-parse HEAD)
+    next_web=$(git -C "$target/web" -c user.name='Contract test' -c user.email='contract-test@example.invalid' \
+        commit-tree 'HEAD^{tree}' -p HEAD -m 'Fixture outside the reviewed W2a pin')
+    git -C "$target/web" checkout --quiet --detach "$next_web"
+    git -C "$target" add web
+    expect_failure 'stale frontend baseline used outside the W2a pin' 'has a different tree from gitlink'
+    git -C "$target/web" checkout --quiet --detach "$review_pin"
+    git -C "$target" add web
+fi
+
+git -C "$target/finance" rev-parse HEAD > "$target/web/openapi/finance.commit"
+stream=protocol/v1/market-status-sse.schema.json
+sed -i '1s/^/ /' "$target/finance/$stream"
+git -C "$target/finance" add -- "$stream"
+git -C "$target/finance" -c user.name='Contract test' -c user.email='contract-test@example.invalid' \
+    commit --quiet -m 'Fixture with changed versioned stream schema'
+git -C "$target" add finance
+expect_failure 'finance ancestor differs in stream schema' 'differ in versioned protocol files'
