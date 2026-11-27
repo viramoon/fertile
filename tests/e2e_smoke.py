@@ -183,6 +183,9 @@ def await_stack(protocol_fixture=False, *, paper_only=False):
             if name in PAPER_SERVICES and svc["state"] in {"disabled", "missing_binary", "needs_credentials"}:
                 skipped[name] = svc["state"]
                 continue
+            # The skipped map is used for paper/Gateway checks.
+            if name not in required and svc["state"] == "disabled" and svc["pid"] == 0:
+                continue
             running = svc["state"] == "RUNNING" and svc["pid"] > 1
             ready_codes = (200, 503) if paper_only and name == "finance-collector" else (200,)
             endpoints_ok = ((svc.get("live_url") is None or svc["live"] == 200)

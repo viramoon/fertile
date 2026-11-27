@@ -413,6 +413,8 @@ tests/simulate-reboot.sh
 
 先生成示例回测，再用持久目录的 web 管理令牌运行本机冒烟。脚本检查系统分项、市场数据年龄、首页 JS/CSS，并实际提交一个幂等回测，直到取得带精确数值的成功摘要。
 
+本机冒烟仍会记录关闭的可选进程。就绪检查跳过状态为 `disabled` 且 PID 为 0 的可选进程，例如默认关闭的 projector 和 notifier。必需进程和已启用的可选进程须通过各自的进程与 HTTP 检查。
+
 首页必须至少声明一个同源 JavaScript 模块和一个同源样式表，所有同源模块和样式表都要通过 HTTP 状态、媒体类型和响应内容检查。同源比较中，HTTP 的 `:80` 和 HTTPS 的 `:443` 各自与省略端口等价。脚本跳过所有跨域 `<script src>` 和样式表，包括 Cloudflare Insights 注入的脚本，并写入 `event` 为 `skipped cross-origin asset` 的 JSON 日志，包含资源类型 `kind`（`js` 或 `css`）和主机名 `host`。
 
 本机冒烟还按[许可证 HTTP 路径](#第三方许可证复验)验证两个第三方路径均返回 200 和预期许可证文本，根路径 `/NOTICE` 返回 200 且正文与第三方 NOTICE 响应逐字节一致，误加 `/static` 前缀的两个路径均返回 404。
