@@ -51,7 +51,7 @@ python3 scripts/backup_remote.py status --cached
 
 F3 接口使用 `finance-market-wal --data-root <FERTILE_DATA_ROOT>` 的 `products` 与 `manifest`，并消费封段清单 v1 和清单枚举的文件。该接口必须返回获准用于私人 Drive 备份的已封段前缀。活动段、内部 checkpoint、锁和可重建的 market projection 不进入异地包。配置了 F3 的实例需提供 `FERTILE_BACKUP_WAL_BIN`。默认检查 CLI 枚举的全部产品，其中任一产品缺少许可即停止发布。许可混合时，用 `FERTILE_BACKUP_WAL_PRODUCTS` 以逗号分隔列出获准备份的准确 `source/product` 对。所选产品不存在或缺少 `ProductPolicy` 许可时停止发布。
 
-生产者活跃时先由其 `seal_for_backup()` 发布封段。备份 CLI 此时读取可见的已封段前缀。写者已停时，可向 `full` 或 `hourly` 传 `--seal-wal` 让 CLI 封段。快照内 `wal/manifests/<source>/<product>.json` 保留 F3 清单，`wal/segments/` 内依清单相对路径保存段文件。`snapshot.wal` 按源、产品记录十进制字符串 `sealed_through`。正式恢复核对这些截点，通过 F3 的 `restore --manifest PATH` 在暂存根激活 WAL。核对业务前在隔离根重放投影。 [F3 WAL 接口](https://github.com/viramoon/finance/pull/47)
+生产者活跃时先由其 `seal_for_backup()` 发布封段。备份 CLI 此时读取可见的已封段前缀。写者已停时，可向 `full` 或 `hourly` 传 `--seal-wal` 让 CLI 封段。快照内 `wal/manifests/{source}/{product}.json` 保留 F3 清单，`wal/segments/` 内依清单相对路径保存段文件。`snapshot.wal` 按源、产品记录十进制字符串 `sealed_through`。正式恢复核对这些截点，通过 F3 的 `restore --manifest PATH` 在暂存根激活 WAL。核对业务前在隔离根重放投影。 [F3 WAL 接口](https://github.com/viramoon/finance/pull/47)
 
 ### 从远端恢复到指定水位
 
