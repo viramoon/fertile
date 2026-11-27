@@ -90,16 +90,18 @@ curl -fsS http://127.0.0.1:8090/api/v1/backtests/sample
 
 ## v1 T3a 首批运行时核对
 
-选用通过集成检查的完整制品。维护前备份 web 库、回测队列和已授权数据，记录旧制品与数据根。当前三个 gitlink、待 W6 与 U5 后统一前移的范围和后续批次见 [T3a 集成说明](../docs/v1-integration.md)。
+选用通过集成检查的完整制品。维护前备份 web 库、回测队列和已授权数据，记录旧制品与数据根。当前 U5 客户端记录 W2a，W6 导出已有差异。待 frontend 对 W6 再生成并通过契约复验后再选择该批制品。[T3a 集成说明](../docs/v1-integration.md)
 
 | 项目 | 操作 |
 | --- | --- |
-| web 与前端 | 重建 `web`、`web-notifier` 与完整前端 `dist`。先在同一 web 库运行新版 `web migrate`，确认成功应用至 `20261127074531`，再切换 web 与启用中的 notifier。受管库由现有准备流程迁移，外部库由管理员显式执行。既有端口仍提供 HTTP、SSE 和 WebSocket，代理要保留 WebSocket 升级头与 Origin。 |
-| finance | 采集、API、回测 worker 保留原入口。F3 的 `finance-market-wal` 与 Python 投影随候选制品构建。要启用投影，设置 `FERTILE_ENABLE_FINANCE_PROJECTOR=1`，核对产品记录许可、单写者和 WAL/投影水位。保留旧 bar catalog 与队列。 |
+| web 与前端 | 重建 `web`、`web-notifier` 与完整前端 `dist`。W6 沿用迁移终点 `20261127074531`，切换前确认同一 web 库已应用。受管库由现有准备流程迁移，外部库由管理员显式执行。既有端口继续提供 HTTP、SSE 和 WebSocket，代理保留 WebSocket 升级头与 Origin。使用已配置的 `WEB_PUBLIC_ORIGIN` 管理会话验证 U5 默认同源行情。 |
+| finance 与 F3 | 采集和 API 使用原入口。F6 bars 与指标 REST 读取受控投影视图。F3 的 `finance-market-wal` 与 Python 投影随候选制品构建。启用投影用 `FERTILE_ENABLE_FINANCE_PROJECTOR=1`，核对产品记录许可、单写者和 WAL/投影水位。保留旧 bar catalog 与队列。 |
+| F4 与 F12 | `bin/finance-binance` 和两种关闭的 profile 随发布交付，独立服务模板默认关闭。启用前核对产品许可、`FINANCE_BINANCE_CONFIG`、专用数据根和退避策略。F12 是现有 finance 进程内的期权历史库，借用 paper 只读会话和历史任务节流；Databento 默认关闭。 |
+| F13 worker 与决策 | 先排空并停止旧 worker，保留 SQLite 队列及锁文件。现有 `finance-backtest-worker` launcher 启动 F13，在既有队列中自动创建 `job_leases`，租约默认 15 秒。配置策略求值使用同发布的 `FINANCE_STRATEGY_BIN`。额外 worker 与 `finance-live-decision` 模板默认关闭。独立 `finance/scripts/finance-decision` 使用明确的 `--plan`、`--replay` 与绝对数据根，将目标和检查点写入本地决策库。 |
 | 邮件 | `FERTILE_ENABLE_WEB_NOTIFIER=1` 时由守护器启动 `web-notifier`。与 web 共用已迁移数据库，无监听端口。先用专属 `web-notifier.env` 配好固定 SMTP 中继、发件地址、本人收件地址和可选凭据文件引用。启用前用隔离 outbox 复验状态。[进程条件](../deploy/hot-upgrade.md#宿主与持久目录) |
 | 备份 | offsite 默认关闭。仅在确认产品云端备份许可、接收方账户与离线密钥安排后配置 T2b，接入 F3 时显式设置 `FERTILE_BACKUP_WAL_BIN`，按产品授权选择封段。远端和收件人由 vira 决定。[备份与恢复](backup.md#私人-google-drive-加密备份) |
 
-两个可选进程默认关闭。当前候选验证 W3 邮件 worker 组件，生产业务事件进入 outbox、W4 SMTP 候选快照与备份/采集状态文件仍待接线。当前进程清单使用 W3 固定中继设置。Binance 与独立实时决策模板默认关闭。IBKR 允许范围为 paper 只读行情。九标的回放与现网实例使用独立数据根。
+F3 投影和 W3 notifier 默认关闭。当前候选验证 W3 邮件 worker 组件，生产业务事件进入 outbox、W4 SMTP 候选快照与备份/采集状态文件仍待接线。当前进程清单使用 W3 固定中继设置。IBKR 使用 paper 只读行情。九标的回放与现网实例使用独立数据根。进程环境、默认值和独立运行边界见 [finance 配置](../docs/configuration.md#finance-独立程序参数)。
 
 回退前先暂停 notifier，清点待发与已静默记录。保留升级后的 PostgreSQL、已授权 WAL 和回测结果；需要运行旧 SQLx 迁移器时用升级前快照恢复兼容的独立库，再恢复旧制品。投影可以在隔离根从已封段 WAL 重建。详见[跨版本恢复](#从升级前快照回滚并切回新版)与[单写者交接](../deploy/hot-upgrade.md)。
 

@@ -29,6 +29,7 @@
     {
       "name": "finance-backtest-worker", "systemd": true, "role": "worker", "after": ["finance-collector"],
       "directory": "${release}/finance", "command": ["${release}/finance/scripts/finance-backtest-worker"],
+      "environment": {"FINANCE_STRATEGY_BIN": "${release}/bin/finance-strategy"},
       "requires_bins": ["${release}/runtime/venv/bin/python", "uv"],
       "volumes": {"${data}": "rw", "${research}": "ro"},
       "limits": {"nofile": 8192, "stop_seconds": 60}
@@ -64,7 +65,8 @@
     {
       "name": "finance-collector-binance", "systemd": true, "enabled": false, "role": "collector",
       "source": "binance", "availability": "finance-f4-template",
-      "directory": "${release}/finance", "command": ["${release}/bin/finance-collector-binance"],
+      "directory": "${release}/finance", "command": ["${release}/bin/finance-binance"],
+      "environment": {"PYTHONPATH": "${release}/finance/python"},
       "volumes": {"${data}/finance-state/market-wal/binance": "rw"},
       "limits": {"nofile": 4096}
     },
@@ -79,13 +81,15 @@
       "name": "finance-backtest-worker-f13", "systemd": true, "enabled": false, "role": "worker",
       "availability": "finance-f13-template", "replaces": "finance-backtest-worker",
       "directory": "${release}/finance", "command": ["${release}/finance/scripts/finance-backtest-worker"],
+      "environment": {"FINANCE_STRATEGY_BIN": "${release}/bin/finance-strategy"},
       "volumes": {"${data}/finance-state/backtests": "rw", "${research}": "ro"},
       "limits": {"nofile": 8192, "stop_seconds": 60}
     },
     {
       "name": "finance-live-decision", "systemd": true, "enabled": false, "role": "decision",
       "availability": "finance-f13-template",
-      "directory": "${release}/finance", "command": ["${release}/bin/finance-decision"],
+      "directory": "${release}/finance", "command": ["${release}/finance/scripts/finance-decision"],
+      "environment": {"FINANCE_STRATEGY_BIN": "${release}/bin/finance-strategy"},
       "volumes": {"${data}/finance-state/market-wal": "ro", "${data}/finance-state/decisions": "rw"},
       "limits": {"nofile": 4096}
     },

@@ -52,7 +52,7 @@ def main():
     if command == "optional-bins":
         component, source = args
         allowed = {
-            "finance": {"finance-decision", "finance-market-wal"},
+            "finance": {"finance-binance", "finance-decision", "finance-market-wal", "finance-strategy"},
             "web": {"web-notifier"},
         }[component]
         packages = json.loads(Path(source).read_text())["packages"]

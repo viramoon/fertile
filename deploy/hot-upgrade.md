@@ -21,10 +21,10 @@
 | --- | --- |
 | `finance-api`、`web` | 环回 HTTP 读者候选检查 live、ready 和运行时兼容性。web 候选使用本次发布的静态制品。 |
 | `finance-collector` | 从实例配置选择 `ib` 或 `replay`。IBKR 只允许 paper 只读，切换中维持单一订阅拥有者。 |
-| `finance-collector-binance`、`finance-collector-hyperliquid` | 独立行情源的部署模板，默认关闭，待来源适配器按各自的快照、连续性和补数语义接入。 |
+| `finance-collector-binance`、`finance-collector-hyperliquid` | 独立行情源的部署模板，默认关闭。Binance 的 finance 制品为 `bin/finance-binance`，`cloudbox` 和 `stable` 配置均为 `enabled: false`。首次启用前确认产品用途许可与来源交接条件。 |
 | `finance-projector` | F3 制品带 `fertile_finance.market_projector` 和 `bin/finance-market-wal` 时，可用 `FERTILE_ENABLE_FINANCE_PROJECTOR=1` 显式启用。使用 WAL 水位与投影游标判断就绪，活动投影的发布权只交给一个进程。 |
-| `finance-backtest-worker` | 已有回测消费进程。升级先停止领取新作业，等待完成或确认释放仍可重领的作业。 |
-| `finance-backtest-worker-f13`、`finance-live-decision` | F13 模板项。目标 worker 沿用 launcher 并使用共享 SQLite 的 `job_leases`，由 `FINANCE_WORKER_LEASE_SECONDS` 配置租约（默认 15 秒）。决策进程目标为 `finance-decision`，以显式数据根启动，写 `finance-state/decisions/decisions.sqlite3`。决策进程无端口，只输出信号。 |
+| `finance-backtest-worker` | 现有 launcher 接入所选发布的 F13 worker 及同一发布的 `finance-strategy`。worker 启动时创建 SQLite `job_leases`，租约默认 15 秒。升级先排空并停止旧 worker，再启动新版。 |
+| `finance-backtest-worker-f13`、`finance-live-decision` | 独立模板均默认关闭。启动 `finance/scripts/finance-decision` 需要已获准计算和留存的 `--plan`、`--replay` 及绝对数据根。决策进程无端口，输出到本地 `finance-state/decisions/decisions.sqlite3`。 |
 | `web-notifier` | W3 进程，以 `FERTILE_ENABLE_WEB_NOTIFIER=1` 显式开启。制品需带 `bin/web-notifier`。依赖同一目标库完成 `web migrate`、系统 CA、Linux `/proc` 与支持 SMTP/SMTPS 的 `/usr/bin/curl`。无监听端口，投递状态留在 outbox。 |
 
 W3 配置由部署账户将 SMTP 中继、固定发件人、自己的邮箱及可选的凭据文件引用写入属主可读写的 0600 `secrets/web-notifier.env`。启动时同时加载 web 的数据库设置。受管 PostgreSQL 的 W3 迁移状态在启动前做只读检查，外部 PostgreSQL 由数据库管理员按 web 的迁移流程准备。等待当前邮件尝试结算的时限见清单。先在隔离实例复验 outbox 和停止行为，再决定何时启用。[W3 邮件进程](https://github.com/viramoon/web/blob/4c966be/RUNBOOK.md#告警与邮件进程)
@@ -89,7 +89,7 @@ hook 是部署账户认可的绝对路径可执行文件，使用常规文件，
 
 本地单调水位可证明写入进度。源连续性需要源级序号或补数证据，例如 Binance 重建快照后的更新 ID、Hyperliquid 快照与成交覆盖、IBKR 市场深度 reset 与可取得的历史窗口。事务的 `gap.opened_at` 和 `gap.ready_at` 是控制器观察到的封段前和新进程就绪后时间。
 
-当前 fertile 针对基准 gitlink 继续运行原有五个核心进程。F3 与 W3 已合并到子仓，需在 gitlink 升级并构建带相应制品的候选后才能启用。F13 和其它来源模板等待对应接入。当前交付验证使用隔离进程和生成模板。真实 paper 的连续性由获授权人员另在私有实例核实。[契约更新顺序](../contracts/README.md#更新)
+T3a 的五个核心服务入口继续沿用，其中回测 launcher 加载 F13 worker。带 F3、W3 制品的发布支持各自的显式启用开关。独立行情、额外 worker 和实时决策模板维持默认关闭。交付验证使用隔离进程和生成模板，真实 paper 的连续性由获授权人员另在私有实例核实。[T3a 运行时核对](../ops/ruler-runbook.md#v1-t3a-首批运行时核对)
 
 ## 隔离验证
 

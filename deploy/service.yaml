@@ -24,13 +24,14 @@ components:
     processes:
       finance-api: {command: current/bin/finance-api, host: 127.0.0.1, port: 8081}
       finance-collector: {command: current/bin/finance-collector, host: 127.0.0.1, port: 8082, sources: [ib, replay]}
-      finance-collector-binance: {status: integration-template, default_enabled: false}
+      finance-collector-binance: {command: current/bin/finance-binance, status: integration-template, profile_config: finance/config/binance, config_env: FINANCE_BINANCE_CONFIG, default_enabled: false}
       finance-collector-hyperliquid: {status: integration-template, default_enabled: false}
       finance-projector: {module: fertile_finance.market_projector, wal_command: current/bin/finance-market-wal, status: optional, enable_env: FERTILE_ENABLE_FINANCE_PROJECTOR, default_enabled: false}
-      finance-backtest-worker: {command: current/finance/scripts/finance-backtest-worker}
+      finance-backtest-worker: {command: current/finance/scripts/finance-backtest-worker, indicator_command: current/bin/finance-strategy, lease_seconds: 15}
       finance-backtest-worker-f13: {status: integration-template, default_enabled: false}
-      finance-live-decision: {status: integration-template, default_enabled: false}
+      finance-live-decision: {command: current/finance/scripts/finance-decision, status: integration-template, required_args: [--plan, --replay], default_enabled: false}
     market_state: {wal: finance-state/market-wal, projection: finance-state/market-projection, catalog: catalog/market-events}
+    option_history: {mode: in-process-paper-read-only, databento_default: disabled}
     health: {live: /healthz/live, ready: /healthz/ready, market: /api/v1/market/status}
   - name: web
     submodule: web
