@@ -20,6 +20,7 @@ SUPERVISION_ADR = "docs/adr/ADR-002-process-supervision.md"
 SHA = "0123456789abcdef0123456789abcdef01234567"
 NORMAL_SHA = "a" * 40
 
+OBSOLETE_ROLLBACK_GUIDANCE = ("WEB_AUTO_MIGRATE", "保留前向迁移", "保留扩展后的数据与迁移账本")
 OLD_RELEASE = re.compile(r"旧\s*(?:web\s*)?(?:发布|版本?|代码|制品)|上(?:一版|一个版本|一个发布)")
 LIVE_DATABASE = re.compile(
     r"(?:现网|线上|生产|原(?:有)?|已迁移|迁移后|升级后|新版写过的|共享)(?:\s*(?:的|web|PostgreSQL))*\s*(?:数据库|库)"
@@ -39,8 +40,9 @@ def section(document, heading):
 
 def unsafe_migration_guidance(document):
     sentences = re.split(r"[。！？；\n]", document.replace("`", " "))
-    return [line.strip() for line in sentences if "WEB_AUTO_MIGRATE" in line or all(
-        pattern.search(line) for pattern in (OLD_RELEASE, LIVE_DATABASE, PERMISSION, DB_ACTION)
+    return [line.strip() for line in sentences if (
+        any(phrase in line for phrase in OBSOLETE_ROLLBACK_GUIDANCE)
+        or all(pattern.search(line) for pattern in (OLD_RELEASE, LIVE_DATABASE, PERMISSION, DB_ACTION))
     )]
 
 
@@ -89,6 +91,25 @@ class RollbackPolicyTests(unittest.TestCase):
                     self.assertIn(conflict, unsafe_migration_guidance(contaminated))
         self.assertEqual(unsafe_migration_guidance("旧代码不得连接现网 web 数据库。"), [])
         self.assertEqual(unsafe_migration_guidance("旧发布不能直接连接现网 web 数据库。"), [])
+
+    def test_policy_rejects_legacy_migration_rollback_steps(self):
+        # Include the command from the baseline hot-upgrade step in the fixture.
+        baseline_step = '''5. 对已证明可兼容同一数据根的旧制品，使用同样的角色就绪或交接流程回退。回退保留扩展后的数据与迁移账本。回读失败时保留两套数据，沿用隔离恢复流程。[从升级前快照回滚](../ops/ruler-runbook.md#从升级前快照回滚并切回新版)
+
+   ```sh
+   scripts/fertile hot-upgrade finance-api "$previous" --rollback --hook "$approved_hook"
+   ```'''
+        for document, heading, guidance, violation in (
+            (RUNBOOK, RECOVERY, "保留前向迁移。", "保留前向迁移"),
+            (RUNBOOK, RECOVERY, "保留前向迁移后运行旧版。", "保留前向迁移后运行旧版"),
+            (HOT_UPGRADE, "升级与兼容回退", "回退保留扩展后的数据与迁移账本。", "回退保留扩展后的数据与迁移账本"),
+            (HOT_UPGRADE, "升级与兼容回退", baseline_step, "回退保留扩展后的数据与迁移账本"),
+        ):
+            with self.subTest(document=document, guidance=guidance):
+                content = (ROOT / document).read_text()
+                guide = section(document, heading)
+                contaminated = content.replace(guide, f"{guide}\n{guidance}\n\n", 1)
+                self.assertEqual(unsafe_migration_guidance(contaminated), [violation])
 
     def test_bootstrap_and_maintenance_refer_to_checked_restart(self):
         for document, heading in ((BOOTSTRAP, "重启后恢复工具链"), (RUNBOOK, "整栈维护")):
