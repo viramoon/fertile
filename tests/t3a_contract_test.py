@@ -3,10 +3,12 @@
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
+import venv
 
 from data_policy_workflows_test import ROOT, step_script
 
@@ -15,6 +17,14 @@ W2A = "9132c5dc2e40f94d96151fbcc2989abbbb53d778"
 QUALITY_GAPS = "/api/v1/quality/gaps"
 WATERMARK_FIELDS = {"local_durable", "projected", "remote_verified", "source_latest"}
 OBSERVATION_FIELDS = {"channel", "instrument_id", "epoch", "seq", "exchange_ts", "receive_ts"}
+
+
+def write_python_launcher(directory, executable):
+    launcher = directory / "python"
+    # Run Python from its original path so it finds the virtualenv's pyvenv.cfg.
+    launcher.write_text(f'#!/bin/sh\nexec {shlex.quote(str(executable))} "$@"\n', encoding="utf-8")
+    launcher.chmod(0o700)
+    return launcher
 
 
 def resolve(document, schema):
@@ -51,7 +61,7 @@ class T3aContractTests(unittest.TestCase):
         script = step_script("docs-check", "docs", "检查文档与 PR 描述")
         details = "Refs #44\n\n## 测试结果\n合成检查。"
         with tempfile.TemporaryDirectory() as directory:
-            (Path(directory) / "python").symlink_to(sys.executable)
+            write_python_launcher(Path(directory), sys.executable)
             env = {**os.environ, "PATH": f"{directory}:{os.environ['PATH']}",
                    "HEAD_REF": "issue-44-contracts-gitlinks-e2e"}
             for body, expected in ((details, 1), (f"Closes #53\n{details}", 0)):
@@ -63,6 +73,16 @@ class T3aContractTests(unittest.TestCase):
                     self.assertEqual(result.returncode, expected, result.stderr)
                     if expected:
                         self.assertIn("PR 描述缺少 Closes #<号>", result.stderr)
+
+    def test_docs_python_launcher_preserves_virtualenv(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            virtualenv = directory / "docs venv"
+            venv.create(virtualenv, symlinks=True)
+            launcher = write_python_launcher(directory, virtualenv / "bin/python")
+            result = subprocess.run([launcher, "-s", "-c", "import sys; print(sys.prefix)"],
+                                    check=True, capture_output=True, text=True, timeout=15)
+            self.assertEqual(Path(result.stdout.strip()).resolve(), virtualenv.resolve())
 
     def assert_quality_response_shape(self, document):
         # web/tests/quality_publish.rs also exercises the router with a synthetic

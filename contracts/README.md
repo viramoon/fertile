@@ -13,7 +13,7 @@
 
 ## 验证
 
-检出 fertile 对应的子模块，使用锁定的 Rust（含 rustfmt）、Node 和 pnpm，准备 JDK 17 或更高版本（含 `javac`）、`unzip`、`patch` 和 `flock`。T3a 回归测试还使用 Python 3 和 PyYAML。在仓库根目录运行下列命令。
+检出 fertile 对应的子模块，使用锁定的 Rust（含 rustfmt）、Node 和 pnpm，准备 JDK 17 或更高版本（含 `javac`）、`unzip`、`patch` 和 `flock`。T3a 回归使用 Python 3 和 `PyYAML==6.0.3`。Integration 通过 `scripts/setup-supervisor.sh` 安装锁定依赖，文档门禁的子进程从同一虚拟环境的解释器路径启动。在仓库根目录运行下列命令。
 
 ```sh
 git submodule update --init --recursive
