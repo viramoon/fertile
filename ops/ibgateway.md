@@ -15,8 +15,9 @@ scripts/install-ibgateway.sh --verify-only
 
 用 `install -d -m 700 "$FERTILE_ROOT/secrets"` 建立私有目录，在 `umask 077` 的会话中用本地编辑器填写 `$FERTILE_ROOT/secrets/ibkr-paper.env`。需要两行 `IBKR_USERNAME=完整用户名` 和 `IBKR_PASSWORD=完整密码`。等号右侧按字面读取，支持空格与符号，不加 shell 引号，不使用 export。运行用户必须拥有该常规文件，权限为 0600。不要把凭据写入命令参数、聊天、日志或 PR。缺少凭据时状态为 `needs_credentials`，supervisor 跳过两个进程。
 
+按 [Ruler 重启检查](ruler-runbook.md#重启与外部入口) 启动服务，再核对 Gateway。
+
 ```sh
-scripts/fertile ensure
 scripts/fertile status --json
 scripts/ibgateway.sh status
 scripts/ib-check.sh
@@ -26,13 +27,7 @@ scripts/ib-check.sh
 
 ## 故障与演练
 
-`startup` 表示已尝试启动；`ready` 表示成功完成账户和时间握手。登录窗口最多等待 150 秒，失败后按 5 秒、20 秒退避。三次未成功后进入 `needs_attention`，即使主管重启也沿用已记录预算。查 `logs/ibgateway/events.jsonl` 中的脱敏原因及 `run/ibgateway/state.json`。遇到安装、Xvfb、读权限、回环限制或账户身份问题，先解决原因。重新核准登录后使用：
-
-```sh
-scripts/ibgateway.sh reset
-scripts/fertile ensure
-scripts/ib-check.sh
-```
+`startup` 表示已尝试启动；`ready` 表示成功完成账户和时间握手。登录窗口最多等待 150 秒，失败后按 5 秒、20 秒退避。三次未成功后进入 `needs_attention`，即使主管重启也沿用已记录预算。查 `logs/ibgateway/events.jsonl` 中的脱敏原因及 `run/ibgateway/state.json`。遇到安装、Xvfb、读权限、回环限制或账户身份问题，先解决原因。重新核准登录后执行 `scripts/ibgateway.sh reset`，按 [Ruler 重启检查](ruler-runbook.md#重启与外部入口) 恢复服务，再运行 `scripts/ib-check.sh`。
 
 守护进程会重新读取预算；若手动停止过服务，先恢复主管。状态 `orphaned_gateway_group` 时，核对运行用户的 IBC/JVM 进程组及 4002 的持有者，终止确认属于旧部署的组，勿误停其它进程。若需手动检查监听，使用 `ss -ltn '( sport = :4002 or sport = :4001 )'`；只允许 `127.0.0.1:4002`。直启调试时先停主管对应的服务，分别运行 `scripts/ibgateway.sh xvfb`、`scripts/ibgateway.sh run`，停止顺序相反；正常运行使用主管。
 

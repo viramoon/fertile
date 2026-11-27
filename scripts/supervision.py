@@ -22,7 +22,7 @@ import sys
 import tempfile
 import time
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from xmlrpc.client import Fault, ServerProxy
 
@@ -67,6 +67,7 @@ NOTIFIER_SETTINGS = {
     "WEB_NOTIFIER_URGENT_BYPASS_QUIET",
 }
 ENABLE_SETTINGS = {"FERTILE_ENABLE_FINANCE_PROJECTOR", "FERTILE_ENABLE_WEB_NOTIFIER"}
+ROLLBACK_DB_ENV_FILE = "web-rollback-database.env"
 SUPPORTED = {
     *WEB_RUNTIME_SETTINGS, *ENABLE_SETTINGS,
     "FERTILE_PROFILE", "FERTILE_MARKET_SOURCE", "FERTILE_DATA_ROOT", "FERTILE_POSTGRES_PORT",
@@ -205,7 +206,11 @@ def manifest_rows(path):
 def local_environment(service):
     env = dict(service["env"])
     if service["env_file"]:
-        env.update(read_env(ROOT / "secrets" / service["env_file"], secret=True))
+        settings = read_env(ROOT / "secrets" / service["env_file"], secret=True)
+        if database := service.get("rollback_external_database"):
+            if settings.keys() != {"DATABASE_URL"} or not rollback_database_url(settings["DATABASE_URL"], database):
+                raise ValueError("external rollback DATABASE_URL must explicitly select the restored database")
+        env.update(settings)
     if local_file := service.get("local_env_file"):
         local = read_env(ROOT / "secrets" / local_file, secret=True)
         if local.keys() - NOTIFIER_SETTINGS or not all(local.get(key) for key in
@@ -215,6 +220,15 @@ def local_environment(service):
     if service.get("pinned") and "WEB_STATIC_ROOT" in env:
         env["WEB_AUTO_MIGRATE"] = "false"
     return env
+
+
+def rollback_database_url(value, database):
+    try:
+        url = urlsplit(value)
+        return (url.scheme in {"postgres", "postgresql"} and url.path == f"/{database}"
+                and not any(key == "dbname" for key, _ in parse_qsl(url.query, keep_blank_values=True)))
+    except ValueError:
+        return False
 
 
 def build_plan(*, release=None, names=None, use_pins=None, settings_overrides=None):
@@ -243,6 +257,10 @@ def build_plan(*, release=None, names=None, use_pins=None, settings_overrides=No
         raise ValueError("FERTILE_RESEARCH_ROOT must be a concrete path within fertile data/research or at FERTILE_DATA_ROOT/research")
     web_db = settings.get("FERTILE_WEB_DATABASE", "web")
     validate_web_database(web_db)
+    rollback_mode = os.environ.get("FERTILE_ROLLBACK_EXTERNAL_DB", "")
+    external_rollback = rollback_mode == "1"
+    if rollback_mode and (not external_rollback or custom or not re.fullmatch(r"web_rollback_[0-9a-f]{40}", web_db)):
+        raise ValueError("FERTILE_ROLLBACK_EXTERNAL_DB requires an explicit web_rollback_<sha> database and the release manifest")
     fields = dict(root=str(ROOT), data=str(data), research=str(research), run=str(RUN), logs=str(LOGS),
                   market_source=source, finance_port=port(settings.get("FINANCE_API_PORT", 8081)),
                   collector_port=port(settings.get("FINANCE_COLLECTOR_PORT", 8082)), web_port=port(settings.get("WEB_PORT", 8090)))
@@ -289,6 +307,7 @@ def build_plan(*, release=None, names=None, use_pins=None, settings_overrides=No
             cmd[0] = str(SCRIPTS / "healthwatch")
         directory = expand(row.get("directory", str(service_release)))
         env = {**base, **common}
+        rollback_web_process = external_rollback and name in {"web", "web-notifier"}
         if name.startswith("finance-") or name == "healthwatch":
             env.update(FINANCE_CONFIG_DIR=str(service_release / "finance/config"), FINANCE_API_PORT=fields["finance_port"],
                        FINANCE_COLLECTOR_BIND=f"127.0.0.1:{fields['collector_port']}",
@@ -306,7 +325,8 @@ def build_plan(*, release=None, names=None, use_pins=None, settings_overrides=No
                     raise ValueError("incomplete or unsupported web database provisioning in release")
                 database = "managed" if sql_available else "legacy"
             authority = "fertile_web@localhost" if database == "managed" else "localhost"
-            env.update(DATABASE_URL=f"postgresql://{authority}/{web_db}?host={quote(common['PGHOST'], safe='')}&port={common['PGPORT']}")
+            if not rollback_web_process:
+                env.update(DATABASE_URL=f"postgresql://{authority}/{web_db}?host={quote(common['PGHOST'], safe='')}&port={common['PGPORT']}")
         if name == "web":
             env.update(WEB_PORT=fields["web_port"], WEB_CONFIG_DIR=str(service_release / "web/config"),
                        WEB_STATIC_ROOT=str(service_release / "static"), WEB_ADMIN_TOKEN_FILE=str(ROOT / "secrets/web.env"),
@@ -342,7 +362,9 @@ def build_plan(*, release=None, names=None, use_pins=None, settings_overrides=No
             elif yaml.safe_load(cfg.read_text()).get("source") != source:
                 raise ValueError(f"{cfg}: collector source must match FERTILE_MARKET_SOURCE")
         env_file = row.get("env_file", rows[name].get("env_file")) if pin else row.get("env_file")
-        if env_file and (not skip or not setting):
+        if rollback_web_process:
+            env_file = ROLLBACK_DB_ENV_FILE
+        elif env_file and (not skip or not setting):
             if Path(env_file).name != env_file or env_file == "ibkr-paper.env":
                 raise ValueError("invalid service env_file")
             secret_path = ROOT / "secrets" / env_file
@@ -377,8 +399,13 @@ def build_plan(*, release=None, names=None, use_pins=None, settings_overrides=No
                               limits={"nofile": nofile, "stop_seconds": stop_seconds}, volumes=volumes,
                               live_url=expand(row["live"]) if row.get("live") else None,
                               ready_url=expand(row["ready"]) if row.get("ready") else None)
+        if rollback_web_process:
+            services[name]["rollback_external_database"] = web_db
     web = services.get("web")
-    if not custom and web and not web["skip"] and "postgres" in services:
+    if external_rollback and web:
+        local_environment(web)
+        database = "external"
+    elif not custom and web and not web["skip"] and "postgres" in services:
         file = web["env_file"]
         external = file and "DATABASE_URL" in read_env(ROOT / "secrets" / file, secret=True)
         if external:
@@ -424,21 +451,25 @@ def render(plan):
     runtime = Path(plan["release"]) / "fertile" if plan["default"] else SCRIPTS.parent
     templates = runtime / "deploy/supervisor"
     program = Template((templates / "program.conf.tmpl").read_text())
-    # Keep each child launcher pinned to the bundle when a release switches.
-    code = (runtime / "scripts/supervision.py").read_text()
-    child_script = RUN / "programs" / ("launcher-" + hashlib.sha256(code.encode()).hexdigest() + ".py")
-    atomic(child_script, code)
+    launchers = {}
     chunks = []
     for idx, (name, svc) in enumerate(plan["services"].items(), 1):
         if svc["skip"]:
             continue
+        # Only processes using the external rollback URL need the validating launcher.
+        controller = SCRIPTS if svc.get("rollback_external_database") else runtime / "scripts"
+        if controller not in launchers:
+            code = (controller / "supervision.py").read_text()
+            child_script = RUN / "programs" / ("launcher-" + hashlib.sha256(code.encode()).hexdigest() + ".py")
+            atomic(child_script, code)
+            launchers[controller] = child_script
         logfile = LOGS / name / "stdout.log"
         logfile.parent.mkdir(parents=True, exist_ok=True)
         text = json.dumps(svc, sort_keys=True)
         digest = hashlib.sha256(text.encode()).hexdigest()
         launcher = RUN / "programs" / f"{name}-{digest}.json"
         atomic(launcher, text)
-        argv = [sys.executable, str(child_script), "_exec", str(launcher), name]
+        argv = [sys.executable, str(launchers[controller]), "_exec", str(launcher), name]
         if (runtime / "scripts/handoff_start.py").is_file():
             argv.append(str(runtime / "scripts"))
         command = shlex.join(argv)
@@ -951,7 +982,7 @@ def main():
             if not daemon_pid():
                 if args.action == "stop":
                     return
-                raise ValueError("supervisord is stopped; use fertile ensure")
+                raise ValueError("supervisord is stopped; follow the Ruler runbook restart checks")
             plan = json.loads(SNAPSHOT.read_text())
             svc = plan["services"].get(args.name)
             if not svc or svc["skip"]:

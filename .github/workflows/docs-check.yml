@@ -137,3 +137,5 @@ jobs:
           PY
       - name: 复测数据制品与步骤日志
         run: python -B tests/data_policy_workflows_test.py -v
+      - name: 检查迁移回退文档与命令
+        run: python -B tests/rollback_docs_test.py -v

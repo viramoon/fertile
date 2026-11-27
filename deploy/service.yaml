@@ -112,13 +112,13 @@ operations:
     install_systemd: scripts/fertile install-systemd --root <root> --user <user> --group <group>
     uninstall_systemd: scripts/fertile uninstall-systemd --root <root>
     verify_systemd: scripts/fertile verify-systemd
-    up: scripts/fertile up
+    up: scripts/fertile up # 已有实例先执行 Ruler 手册的「重启与外部入口」检查。
     down: scripts/fertile down
-    ensure: scripts/fertile ensure-up
+    ensure: scripts/fertile ensure-up # 已有实例先执行 Ruler 手册的「重启与外部入口」检查。
     status: scripts/fertile status --json
-    restart: scripts/fertile restart <service>
+    restart: scripts/fertile restart <service> # 已有实例的启动目标见 Ruler 手册「重启与外部入口」。
     logs: scripts/fertile logs <service>
-    rollback: scripts/fertile rollback <commit>
+    rollback: scripts/fertile rollback <commit> # 共享目标仅限无新增迁移且新版未写过该库。迁移回退见 runbook。
   restart_policy: # supervisord 的选项，systemd 见 deploy/systemd
     autorestart: true
     stopsignal: TERM

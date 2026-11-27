@@ -25,7 +25,7 @@ healthwatch 的 HTTP 探针和 webhook 投递均发送 `fertile-healthwatch/<VER
 
 ## 运行与配置
 
-supervisord 模式下，在部署环境中安装控制端 Python 依赖并运行 `scripts/fertile ensure-up`。默认设置见 [deploy/healthwatch.yaml](../deploy/healthwatch.yaml)。如需覆盖，在 `config/runtime.env` 的 `FERTILE_HEALTH_CONFIG` 中填入 `$FERTILE_ROOT/config/healthwatch.yaml` 对应的绝对路径。覆盖文件接受同名配置、`disk_path` 和 `public_origin`。本地压测保持 `FERTILE_PUBLIC_ORIGIN` 未设置，覆盖文件中的 `public_origin` 省略或设为 `null`。普通服务器可在覆盖文件中填 `public_origin: "https://<your-origin>"`，或在运行环境中设置 `FERTILE_PUBLIC_ORIGIN=https://<your-origin>`。非空环境变量优先。配置更改后重启 healthwatch 并核对采样结果。
+supervisord 模式下，在部署环境中安装控制端 Python 依赖，经 [Ruler 重启检查](ruler-runbook.md#重启与外部入口)启动服务。默认设置见 [deploy/healthwatch.yaml](../deploy/healthwatch.yaml)。如需覆盖，在 `config/runtime.env` 的 `FERTILE_HEALTH_CONFIG` 中填入 `$FERTILE_ROOT/config/healthwatch.yaml` 对应的绝对路径。覆盖文件接受同名配置、`disk_path` 和 `public_origin`。本地压测保持 `FERTILE_PUBLIC_ORIGIN` 未设置，覆盖文件中的 `public_origin` 省略或设为 `null`。普通服务器可在覆盖文件中填 `public_origin: "https://<your-origin>"`，或在运行环境中设置 `FERTILE_PUBLIC_ORIGIN=https://<your-origin>`。非空环境变量优先。配置更改后重启 healthwatch 并核对采样结果。
 
 ```sh
 root=${FERTILE_ROOT:?先加载实例的 env.sh}

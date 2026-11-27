@@ -19,4 +19,4 @@ scripts/release.sh --dry-run
 
 在含有完整历史和发布 tag 的 checkout 运行 dry-run，并确保 `gh` 已登录 GitHub。预览读取 HEAD:VERSION、三个 gitlink 和最近可达的系统版本标签，查询三个公开子仓库，列出新增提交关联的目标为 main 的 PR、合并状态和 GitHub 记录的关闭 issue。首次发布使用各锁定提交的全部祖先。标准输出可重定向到审阅文件；查询失败会以非零退出。
 
-正式发布另行授权。发布变更需在同一 PR 固定 VERSION、指针和脚本生成的 RELEASES.md，经集成验证再创建不可移动的系统标签 vX.Y.Z 和子模块内部标签 fertile-vX.Y.Z。当前命令仅接受 --dry-run。数据库与 catalog 格式兼容以及对应备份是回滚的前提，详见 [Ruler 手册](../ops/ruler-runbook.md)。
+正式发布另行授权。发布变更需在同一 PR 固定 VERSION、指针和脚本生成的 RELEASES.md，经集成验证再创建不可移动的系统标签 vX.Y.Z 和子模块内部标签 fertile-vX.Y.Z。当前命令仅接受 --dry-run。含新增迁移的发布，回退时将迁移前备份恢复到 `data-paper-rollback-<sha>` 和 `web_rollback_<sha>`，在这对目标上运行旧发布。[Ruler 回退步骤](../ops/ruler-runbook.md#从升级前快照回滚并切回新版)

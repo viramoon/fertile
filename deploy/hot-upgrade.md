@@ -35,14 +35,20 @@ F3 投影候选使用隔离的投影状态和 catalog。用 `finance-market-wal 
 
 首次采用本控制器时，先在维护窗口安装包含启动许可检查的整栈基准。热切换沿用基准的进程拓扑、运行卷、限额、持久根和端口。变更这些条件时安排整栈维护。直接调用 systemctl 启停及 systemd 安装和卸载均安排在热升级事务之外。要用同一发布统一启动全部服务，在停栈的维护窗口先将 `config/service-releases.json` 移入私有归档，再启动所选基准。
 
+含新增迁移的发布走整栈维护窗口。停旧服务后应用迁移，再启动新版。需要回退时，将迁移前备份恢复到新建的 `data-paper-rollback-<sha>` 数据根和 `web_rollback_<sha>` 数据库，在这对目标上运行旧发布。`<sha>` 为升级前的 fertile 提交号。旧代码不得连接新版写过的数据库。原数据和迁移台账由新版继续使用，切回前保全回退窗口的写入并对账。[从升级前快照回滚并切回新版](../ops/ruler-runbook.md#从升级前快照回滚并切回新版)
+
+回退期间，supervisord 的重启和巡检须按 `migration-rollback.sha` 选回旧发布的隔离根和库。[Ruler 重启检查](../ops/ruler-runbook.md#重启与外部入口)
+
+下列热切换步骤用于无新增迁移的发布。控制器的 `--migrate` 仍是 hook 接口的一部分，在隔离演练中使用。现网迁移按相应发布的维护窗口流程执行。
+
 1. 保留两版制品和可恢复的升级前备份。用已锁定的子模块构建完整候选并保留原基准。候选必须使用完整 fertile 提交号。
 
    ```sh
    scripts/fertile build --stage-only --ref "$candidate"
    ```
 
-2. 在独立数据根和独立数据库演练旧版读原数据、新版读原数据及旧版读扩展后的数据。核对 API 与消费者、旧回测摘要、队列与租约、已验证 WAL 及投影水位。验证环境只接合成或回放 fixture，保留版本、计数和通过状态。出现破坏性变更时安排独立迁移窗口和隔离恢复目标。应用 schema 先扩展、兼容读取，回填和切读后另期清理旧字段。
-3. 在目标实例记录服务 PID、路由、当前版本、数据根和采集水位。准备应用特定的可执行 hook，由其读取本机已授权的状态并实现下节接口。需要扩展迁移时加 `--migrate`，hook 应按目标数据库的权限流程应用迁移。web 热切换时关闭自动迁移，通过已验证的扩展步骤管理版本。逐个服务执行，先准备并验证其依赖。
+2. 用独立的合成或回放 fixture 验证两版的读写与依赖。含迁移的演练为两版分别准备数据根和数据库，旧版使用从迁移前快照恢复的目标。核对 API 与消费者、旧回测摘要、队列与租约、已验证 WAL 及投影水位，保留版本、计数和通过状态。应用 schema 先扩展、兼容读取，回填和切读后另期清理旧字段。
+3. 在目标实例记录服务 PID、路由、当前版本、数据根和采集水位。准备应用特定的可执行 hook，由其读取本机已授权的状态并实现下节接口。逐个服务执行，先准备并验证其依赖。
 
    ```sh
    scripts/fertile hot-upgrade finance-api "$candidate" --hook "$approved_hook"
@@ -50,7 +56,7 @@ F3 投影候选使用隔离的投影状态和 catalog。用 `finance-market-wal 
    ```
 
 4. 对读者核对原入口恢复就绪、选中的制品及游标，再检查 collector 进程仍在且水位持续推进。控制器先确认候选进程拥有临时监听端口并通过 live、ready，然后仅替换目标进程，再核对原入口的进程归属与就绪。对 collector 按源和产品记录封段截点、租约释放、重新订阅和缺口结论。切换 collector 期间存在采集窗口，系统记录恢复程度。
-5. 对已证明可兼容同一数据根的旧制品，使用同样的角色就绪或交接流程回退。回退保留扩展后的数据与迁移账本。回读失败时保留两套数据，沿用隔离恢复流程。[从升级前快照回滚](../ops/ruler-runbook.md#从升级前快照回滚并切回新版)
+5. `--rollback` 热回退仅适用于无新增迁移、同一数据根已验证兼容、且旧发布所连接的数据库未被新版写过的场景。满足这些条件时，复用角色就绪或交接流程。
 
    ```sh
    scripts/fertile hot-upgrade finance-api "$previous" --rollback --hook "$approved_hook"
@@ -74,8 +80,8 @@ hook 是部署账户认可的绝对路径可执行文件，使用常规文件，
 
 | 步骤 | 输入约束与成功字段 |
 | --- | --- |
-| `compatibility` | 检查两版对共享数据、迁移状态与依赖的兼容，并用真实旧版读取路径验证回退条件后返回 `{"compatible":true}`。 |
-| `migrate` | 显式执行扩展迁移，保留旧版读取与写入所需的形态，确认后返回 `{"expanded":true}`。 |
+| `compatibility` | 检查两版的格式、迁移状态与依赖，按各自制品验证读取路径，确认后返回 `{"compatible":true}`。热回退还须满足上节的数据库隔离条件。 |
+| `migrate` | 隔离演练显式执行扩展迁移，确认后返回 `{"expanded":true}`。旧制品使用从迁移前备份恢复的另一套目标。 |
 | `reader-checkpoint` | 返回 `watermark` 字典，键为 `source/product`，值为本地 WAL 水位的十进制字符串。projector 使用非空水位。 |
 | `candidate-start`、`candidate-ready` | 控制器启动 HTTP 读者候选。projector hook 以隔离状态启动候选并返回 `{}`。候选就绪后 hook 返回 `{"ready":true,"watermark":{...}}`，各产品水位至少达到原检查点。 |
 | `reader-cutover`、`reader-ready`、`candidate-abort` | 控制器回收 HTTP 候选，projector hook 负责回收隔离候选。projector 切换时，控制器收到 `{}` 确认后才停止旧 projector 并启动新进程。应用在原入口重新就绪后返回 `ready:true` 与 `watermark`，水位继续满足检查点。切换前失败时，按同样分工终止候选并清理隔离状态。 |
@@ -95,7 +101,8 @@ T3a 的五个核心服务入口继续沿用，其中回测 launcher 加载 F13 w
 
 演练只使用临时根、合成输入和本机环回。守护 CI 及集成 CI 要求实际入口演练通过。依赖准备与演练分开执行。[守护 CI](../.github/workflows/supervisor.yml) · [集成 CI](../.github/workflows/integration.yml)
 
+- `python3 -B tests/rollback_docs_test.py -v` 核对文档规定的恢复顺序，并用本地替身检查手册示例的恢复目标、启停环境和失败退出。[文档 CI](../.github/workflows/docs-check.yml)
 - `python -B tests/container_hot_upgrade_test.py --require-native` 以锁定的控制端 Python 运行真实 `scripts/fertile container` 入口。用进程树核对 tini、控制器和 supervisord，再用真实 `hot-upgrade` 切换及回退 API。核对候选读到的水位、原端口恢复以及同一 collector 的追加序列贯穿切换。集成 CI 用 `--finance-api` 和 `--finance-config` 传入构建产物及其配置，采集端仍使用合成生成器。[容器与热切换演练](../tests/container_hot_upgrade_test.py)
 - `python3 -B tests/systemd_process_test.py --image fertile-systemd-drill` 使用预先准备的镜像，在禁网的独立容器内运行 systemd。生产安装入口生成 unit，容器内管理器实际启动、重启和停止合成进程。核对 cgroup、运行账户、限额、collector PID 和 TERM 退出证据。只校验夹具时使用 `--validate-fixture`。[原生 systemd 演练](../tests/systemd_process_test.py)
-- `python3 -B tests/published_queue_readback.py --finance-source PATH --candidate BINARY` 从本地 Git 对象离线构建此前发布的 finance `7600be4`，与本次构建的 API 分别运行。集成 CI 在依赖准备阶段用同一脚本的 `--fetch-published-dependencies TARGET` 按宿主平台预取已发布 gitlink 对应的 `Cargo.lock`，并预取当前 gitlink 的依赖。演练构建仍使用 `cargo build --offline --locked`。先由旧版写入作业，扩展独立 SQLite 夹具，再经新版 API 写入另一作业。重启旧制品后，由其 HTTP 读回新版写入的作业并列出两条记录。缺少 socket 的环境可用 `--build-only` 核对两份制品。[已发布制品回读演练](../tests/published_queue_readback.py)
+- `python3 -B tests/published_queue_readback.py --finance-source PATH --candidate BINARY` 用合成 SQLite 夹具验证队列格式兼容。从本地 Git 对象离线构建此前发布的 finance `7600be4`，与本次构建的 API 分别运行。集成 CI 在依赖准备阶段用同一脚本的 `--fetch-published-dependencies TARGET` 按宿主平台预取已发布 gitlink 对应的 `Cargo.lock`，并预取当前 gitlink 的依赖。演练构建仍使用 `cargo build --offline --locked`。先由旧版写入作业，扩展独立 SQLite 夹具，再经新版 API 写入另一作业。重启旧制品后，由其 HTTP 读回新版写入的作业并列出两条记录。缺少 socket 的环境可用 `--build-only` 核对两份制品。含迁移发布的回退测试使用迁移前备份恢复的目标。[已发布制品回读演练](../tests/published_queue_readback.py)
 - 快速回归覆盖合成水位、单写者释放、半段恢复、按产品记录缺口和中断重试。paper 冷恢复使用模拟 Gateway 和就绪状态。可用 `scripts/fertile verify-systemd` 检查渲染的 unit。[热升级事务演练](../tests/hot_upgrade_test.py) · [命令与管理器演练](../tests/hot_upgrade_cli_test.py) · [中断恢复](../tests/hot_upgrade_recovery_test.py)
