@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+from textwrap import dedent
 import unittest
 from unittest.mock import Mock, call, patch
 
@@ -17,6 +18,39 @@ import t7_backtest_acceptance as t7
 
 
 class IsolatedAcceptance(unittest.TestCase):
+    def test_worker_descendant_leaves_writable_candidate_free_of_bytecode(self):
+        with tempfile.TemporaryDirectory(prefix="fertile-t7-worker.", dir="/tmp") as directory:
+            root = Path(directory)
+            release, work = root / "candidate", root / "acceptance"
+            data, research = work / "replay", work / "research"
+            data.mkdir(parents=True)
+            research.mkdir()
+            interpreter = release / "runtime/venv/bin/python"
+            interpreter.parent.mkdir(parents=True)
+            interpreter.symlink_to(sys.executable)
+            package = release / "finance/python/fertile_finance"
+            package.mkdir(parents=True)
+            (package / "__init__.py").touch()
+            (package / "backtest_job.py").write_text(dedent("""
+                from pathlib import Path
+
+                Path("synthetic-job-ran").touch()
+            """), encoding="utf-8")
+            # The locked worker also launches a new interpreter with -m and no -B.
+            (package / "worker.py").write_text(dedent("""
+                import signal
+                import subprocess
+                import sys
+
+                signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+                subprocess.run([sys.executable, "-m", "fertile_finance.backtest_job"], check=True)
+                print("finance-backtest-worker ready", flush=True)
+                signal.pause()
+            """), encoding="utf-8")
+            with t7.isolated_strategy_worker(release, work, data, research):
+                self.assertTrue((work / "synthetic-job-ran").is_file())
+            self.assertEqual(list(release.rglob("__pycache__")), [])
+
     def test_cli_refuses_caller_supplied_targets(self):
         for option, value in {
             "--data-root": "/decoy/data-paper",
@@ -177,6 +211,9 @@ class IsolatedAcceptance(unittest.TestCase):
                 "NO_PROXY": "",
             }
             before = {path.relative_to(decoy) for path in decoy.rglob("*")}
+            candidate_bytecode = {
+                path: path.lstat().st_mtime_ns for path in release.rglob("*.pyc")
+            }
             with subprocess.Popen(
                 [sys.executable, "-EB", t7.__file__, "--release", release],
                 cwd=t7.ROOT, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -194,6 +231,8 @@ class IsolatedAcceptance(unittest.TestCase):
             self.assertEqual(process.returncode, 0, output)
             self.assertIn("T7 isolated replay submission and result readback passed", output)
             self.assertIn("T7 anonymous pagination passed", output)
+            self.assertEqual({path: path.lstat().st_mtime_ns for path in release.rglob("*.pyc")},
+                             candidate_bytecode)
             self.assertEqual({path.relative_to(decoy) for path in decoy.rglob("*")}, before)
             for name in markers:
                 self.assertEqual((decoy / name).read_text(encoding="utf-8"), "synthetic decoy\n")

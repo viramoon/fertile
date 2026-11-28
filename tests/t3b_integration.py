@@ -136,6 +136,25 @@ def gateway(release, work, database, finance_origin, *, port=None):
         yield http, token
 
 
+def isolated_strategy_worker(release, work, data_root, research_root):
+    finance_python = release / "runtime/venv/bin/python"
+    worker_env = {
+        **local_env(work),
+        "FERTILE_DATA_ROOT": str(data_root),
+        "FERTILE_RESEARCH_ROOT": str(research_root),
+        "FINANCE_STRATEGY_BIN": str(release / "bin/finance-strategy"),
+        "PYTHONPATH": str(release / "finance/python"),
+        # The worker launches the engine in a new interpreter without -B.
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "TMPDIR": str(work),
+    }
+    worker = [finance_python, "-B", "-m", "fertile_finance.worker", "--isolated", "--timeout", "45"]
+    return child(worker, work, worker_env, "worker", lambda log: b"finance-backtest-worker ready\n" in log)
+
+
 def run(release, work):
     finance_source = ROOT / "finance"
     finance_python = release / "runtime/venv/bin/python"
@@ -145,21 +164,10 @@ def run(release, work):
     target = os.environ.get("CARGO_TARGET_DIR") or work / "target"
     owner = build_owner(finance_source, work, target)
     snapshot = publish_strategy_replay(finance_source, finance_python, data_root, research_root)
-    worker_env = {
-        **local_env(work),
-        "FERTILE_DATA_ROOT": str(data_root),
-        "FERTILE_RESEARCH_ROOT": str(research_root),
-        "FINANCE_STRATEGY_BIN": str(release / "bin/finance-strategy"),
-        "PYTHONPATH": str(release / "finance/python"),
-        "OPENBLAS_NUM_THREADS": "1",
-        "OMP_NUM_THREADS": "1",
-        "TMPDIR": str(work),
-    }
-    worker = [finance_python, "-B", "-m", "fertile_finance.worker", "--isolated", "--timeout", "45"]
     with (postgres(work) as database,
           running_owner(owner, work, data_root, research_root) as finance_origin,
           gateway(release, work, database, finance_origin) as (http, token),
-          child(worker, work, worker_env, "worker", lambda log: b"finance-backtest-worker ready\n" in log)):
+          isolated_strategy_worker(release, work, data_root, research_root)):
         exercise_strategy(http, token, finance_source, snapshot)
         check_market(http, token, finance_origin)
 

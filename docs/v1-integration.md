@@ -6,7 +6,7 @@ T3b 部署的验收区间缺少已发布快照，提交曾返回 `422 no_data`�
 
 策略与回放取自锁定的 finance 提交。生成器 `tests/config_strategy_replay_fixture.py` 用 2024 年上半年 XNYS 会话序号生成三个合成标的的整数价格与固定成交量，在两个指定会话延迟报价。总仓 `tests/research-fixture.py` 用固定 XNYS 窗口和整数折线价量生成 `FIXTURE.XNYS` 日线。两份生成过程均无随机种子或外部数据输入。结果核对策略内容与快照 SHA-256、模拟成交的精确价格，以及权益与盈亏的十进制一致性。
 
-Integration 作业在受监管服务启动前运行 T7 回归。回归向验收入口传入合成的 `data-paper` 路径、默认研究根、数据库 `web` 的 Unix socket、HTTP 入口和代理，核对这些诱饵目录未改变且监听器未收到连接。[验收命令](../ops/ruler-runbook.md#v1-t7-隔离合成回放验收) · [回测接口核对](../contracts/README.md#t7-回测提交与匿名续页) · [验收合同](https://github.com/viramoon/fertile/issues/61)
+Integration 作业在受监管服务启动前运行 T7 回归。回归向验收入口传入合成的 `data-paper` 路径、默认研究根、数据库 `web` 的 Unix socket、HTTP 入口和代理，核对这些诱饵目录未改变且监听器未收到连接。离线回归使用可写的合成制品，通过与真实验收共用的 worker 启动入口执行第二个 Python 解释器，核对制品目录无字节码缓存写入。真实回归另比对候选制品内的字节码文件清单及修改时间。[验收命令](../ops/ruler-runbook.md#v1-t7-隔离合成回放验收) · [回测接口核对](../contracts/README.md#t7-回测提交与匿名续页) · [验收合同](https://github.com/viramoon/fertile/issues/61)
 
 ## T3b 第 2 批
 

@@ -10,7 +10,7 @@ import tempfile
 
 from e2e_smoke import HTTP, SmokeError, log, require
 from published_queue_readback import archive_finance, ephemeral_port
-from t3b_integration import COMPONENTS, ROOT, child, gateway, local_env, postgres
+from t3b_integration import COMPONENTS, ROOT, child, gateway, isolated_strategy_worker, local_env, postgres
 from t3b_strategy import (
     BACKTESTS, FIXTURE, post, publish_strategy_replay, read_strategy_result,
     select_uploaded_version, submit,
@@ -119,19 +119,7 @@ def exercise_backtests(release, work, data_root, research_root, source, upstream
     selected_id = submit(http, headers, SUBMISSION_KEY, request)
     require(http.read(BACKTESTS + "/by-key", headers={**headers, "Idempotency-Key": SUBMISSION_KEY})
             == {"id": selected_id}, "backtest key did not resolve to the selected strategy job")
-    worker_env = {
-        **local_env(work),
-        "FERTILE_DATA_ROOT": str(data_root),
-        "FERTILE_RESEARCH_ROOT": str(research_root),
-        "FINANCE_STRATEGY_BIN": str(release / "bin/finance-strategy"),
-        "PYTHONPATH": str(release / "finance/python"),
-        "PYTHONNOUSERSITE": "1",
-        "OPENBLAS_NUM_THREADS": "1",
-        "OMP_NUM_THREADS": "1",
-        "TMPDIR": str(work),
-    }
-    worker = [python, "-B", "-m", "fertile_finance.worker", "--isolated", "--timeout", "45"]
-    with child(worker, work, worker_env, "worker", lambda output: b"finance-backtest-worker ready\n" in output):
+    with isolated_strategy_worker(release, work, data_root, research_root):
         read_strategy_result(http, headers, selected_id, {**request, "content_sha256": version["content_sha256"]},
                              selected["plan"], snapshot)
     log("T7 isolated replay submission and result readback passed")

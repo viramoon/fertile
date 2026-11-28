@@ -114,7 +114,7 @@ python3 -EB tests/t7_backtest_acceptance.py --release "$release"
 FERTILE_T7_TEST_RELEASE="$release" python3 -EB tests/t7_backtest_acceptance_test.py -v
 ~~~
 
-每次执行都在 `/tmp/fertile-t7.*` 下新建绝对数据根、研究根和 PostgreSQL 集群。验收库为 `t3b`，只通过该目录中的 Unix socket 连接。finance API 和 web 使用随机 IPv4 回环端口并确认本次进程已绑定后才发起请求。脚本现场生成一次性管理令牌，退出时停止临时进程并清除目录。入口仅接受制品路径。
+每次执行都在 `/tmp/fertile-t7.*` 下新建绝对数据根、研究根和 PostgreSQL 集群。验收库为 `t3b`，只通过该目录中的 Unix socket 连接。finance API 和 web 使用随机 IPv4 回环端口并确认本次进程已绑定后才发起请求。脚本现场生成一次性管理令牌，退出时停止临时进程并清除目录。入口仅接受制品路径。候选制品仅供读取，worker 与其回测引擎子进程通过继承 `PYTHONDONTWRITEBYTECODE=1` 禁用 Python 字节码缓存写入。
 
 使用这条入口处理 T3b 的临时研究验收。禁止向 `data-paper`、live 库 `web`、默认 `$FERTILE_ROOT/data/research` 或 8090 提交或导入。部署配置 `runtime.env`、`env.sh` 及现网令牌不参与验收。禁止以 `scripts/fertile up`、`ensure`、`ensure-up`、`down`、`rollback` 或 healthwatch 启动这项检查。脚本只启动 API、网关、回测 worker 和临时 PostgreSQL，使用合成数据模拟成交。部署的 IBKR 账户范围仍为 paper 只读。[四仓数据政策](../docs/data-policy.md)
 
