@@ -43,7 +43,7 @@ fertile 以 git submodule 引入 finance、web、frontend；agent 是独立仓�
 - [重启重建](../deploy/bootstrap.md)
 - [运维索引](../ops/README.md)
 - [代码导出快照](../contracts/README.md)
-- [v1 T3a（#53）首批集成与隔离验收](v1-integration.md)
+- [v1 T3b（#54）第 2 批集成与隔离验收](v1-integration.md)
 - [部署与校验脚本](../scripts/README.md)
 - [自动发布记录说明](../RELEASES.md)
 - [初始版本](../VERSION)

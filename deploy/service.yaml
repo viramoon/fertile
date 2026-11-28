@@ -22,11 +22,13 @@ components:
     manifest: finance/service.yaml
     target: cloudbox # 当前压测部署，普通服务器使用 stable profile
     processes:
+      # T3b 的 IBKR 期权与场所深度 REST 需由获授权的 paper 只读行情所有者接入。
       finance-api: {command: current/bin/finance-api, host: 127.0.0.1, port: 8081}
       finance-collector: {command: current/bin/finance-collector, host: 127.0.0.1, port: 8082, sources: [ib, replay]}
       finance-collector-binance: {command: current/bin/finance-binance, status: integration-template, profile_config: finance/config/binance, config_env: FINANCE_BINANCE_CONFIG, default_enabled: false}
       finance-collector-hyperliquid: {status: integration-template, default_enabled: false}
       finance-projector: {module: fertile_finance.market_projector, wal_command: current/bin/finance-market-wal, status: optional, enable_env: FERTILE_ENABLE_FINANCE_PROJECTOR, default_enabled: false}
+      # finance API / worker 首次打开现有 SQLite 队列时建立 F14 的公开分页索引 jobs_legacy_id。
       finance-backtest-worker: {command: current/finance/scripts/finance-backtest-worker, indicator_command: current/bin/finance-strategy, lease_seconds: 15}
       finance-backtest-worker-f13: {status: integration-template, default_enabled: false}
       finance-live-decision: {command: current/finance/scripts/finance-decision, status: integration-template, required_args: [--plan, --replay], default_enabled: false}
@@ -39,12 +41,12 @@ components:
     target: cloudbox # 当前压测部署，普通服务器使用 stable profile
     command: current/bin/web serve
     migrate: current/bin/web migrate
-    migration_head: "20261127074531" # W5 主动静默，包含此前 W3、W4 和 W2a 迁移
+    migration_head: "20261127074531" # T3b 沿用 W5 主动静默及此前 W3、W4、W2a 迁移。
     host: 127.0.0.1
     port: 8090
     health: {live: /healthz/live, ready: /healthz/ready, system: /api/v1/system/status}
     processes:
-      # FERTILE_ENABLE_WEB_NOTIFIER=0 时守护器不启动该进程，复验见 Ruler 手册的「v1 T3a 首批运行时核对」。
+      # FERTILE_ENABLE_WEB_NOTIFIER=0 时守护器不启动该进程，复验见 Ruler 手册的「v1 T3b 第 2 批运行时核对」。
       web-notifier: {command: current/bin/web-notifier, enable_env: FERTILE_ENABLE_WEB_NOTIFIER, default_enabled: false}
 artifacts:
   - name: frontend-dist
@@ -96,7 +98,7 @@ operations:
   data_publication_policy: docs/data-policy.md
   bootstrap: deploy/bootstrap.md
   server_guide: deploy/linux-server.md
-  runbook: ops/ruler-runbook.md # WebSocket 入口核对、受监管启停与手动排空
+  runbook: ops/ruler-runbook.md # 第 2 批运行时核对、WebSocket 入口核对、受监管启停与手动排空
   health_checks: ops/health-checks.md
   supervisor: supervisord
   container_init: tini

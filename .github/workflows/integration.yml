@@ -67,6 +67,7 @@ jobs:
         run: |
           gh auth setup-git --hostname github.com
           scripts/check-submodules.sh
+          bash scripts/contract-diff.sh --check-pins
           source deploy/toolchain.env
           test "$(git -C finance/vendor/nautilus_trader rev-parse HEAD)" = "$NAUTILUS_COMMIT"
           git config --global --remove-section credential.https://github.com
@@ -254,6 +255,11 @@ jobs:
           export CARGO_NET_OFFLINE=true
           python3 -B tests/published_queue_readback.py --finance-source "$PWD/finance" \
             --candidate "$FERTILE_ROOT/current/bin/finance-api"
+      - name: Exercise T3b strategy, anonymous pagination and market reads
+        run: |
+          source "$FERTILE_ROOT/env.sh"
+          export CARGO_NET_OFFLINE=true
+          python3 -B tests/t3b_integration.py --release "$FERTILE_ROOT/current"
       - name: Exercise the actual supervised local deployment with ReplaySource
         run: |
           set -eu

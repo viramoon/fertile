@@ -15,7 +15,8 @@ ln -s "$root/frontend/node_modules" "$target/frontend/node_modules"
 
 expect_failure() {
     local case_name=$1 match=$2
-    if (cd "$target" && bash scripts/contract-diff.sh) > "$work/output" 2>&1; then
+    shift 2
+    if (cd "$target" && bash scripts/contract-diff.sh "$@") > "$work/output" 2>&1; then
         echo "Unexpected pass: $case_name" >&2; return 1
     fi
     if ! grep -Fq -- "$match" "$work/output"; then
@@ -24,6 +25,19 @@ expect_failure() {
     fi
     printf 'Detected %s\n' "$case_name"
 }
+
+bash "$target/scripts/contract-diff.sh" --check-pins
+git -C "$target/finance" rev-parse HEAD^ > "$target/web/openapi/finance.commit"
+expect_failure 'finance ancestor substituted for the exact pin' 'finance.commit' --check-pins
+git -C "$target/web" restore openapi/finance.commit
+same_web_tree=$(git -C "$target/web" -c user.name='Contract test' -c user.email='contract-test@example.invalid' \
+    commit-tree 'HEAD^{tree}' -p HEAD -m 'Fixture with the same web tree and a different SHA')
+printf '%s\n' "$same_web_tree" > "$target/frontend/openapi/web.commit"
+expect_failure 'same web tree substituted for the exact pin' 'web.commit' --check-pins
+git -C "$target/frontend" restore openapi/web.commit
+sed -i '1s/^/ /' "$target/web/openapi/finance.market-status-sse.schema.json"
+expect_failure 'consumer versioned read-stream drift' 'finance.market-status-sse.schema.json' --check-pins
+git -C "$target/web" restore openapi/finance.market-status-sse.schema.json
 
 # Keep JSON valid: semantically identical reformatting still violates the byte-for-byte export.
 sed -i '1s/^/ /' "$target/contracts/finance.openapi.json"

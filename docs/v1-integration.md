@@ -1,10 +1,35 @@
-# v1 T3a 首批集成与隔离验收
+# v1 跨仓集成与隔离验收
 
-T3a 是 T3 的首批集成，PR #52 使用 `Closes #53` 与 `Refs #44`。#44 在全部批次验收后关闭。本批锁定 finance F13、web W6 和 frontend U6。运行时核对见 [Ruler 手册](../ops/ruler-runbook.md#v1-t3a-首批运行时核对)。[T3a 验收合同](https://github.com/viramoon/fertile/issues/53) · [T3 父任务](https://github.com/viramoon/fertile/issues/44)
+## T3b 第 2 批
 
-## 版本与契约
+本批集成 PR 使用 `Closes #54` 与 `Refs #44`。#44 在全部批次验收后关闭。联调版本为 `0.0.0`，部署和发版另行安排。[T3b 验收合同](https://github.com/viramoon/fertile/issues/54) · [T3 父任务](https://github.com/viramoon/fertile/issues/44)
 
-| 子仓 | 当前 gitlink | 消费方记录 |
+| 子仓 | 当前 gitlink | 交付和锁定关系 |
+| --- | --- | --- |
+| finance | `86dcc8604b6881d648418a25e6cd13c24d4a9b01` | F9e、F10b、F10c、F10d、F3b、F14。与 web 的 `openapi/finance.commit` 精确匹配。 |
+| web | `fcfda737d5152518d1d77cd55a5287c7185f3fb7` | W2b、W7、W8、W9，含 W10、W11、W13 与同源回环会话。由 frontend 的 `openapi/web.commit` 精确引用。 |
+| frontend | `731d73dfaa10e726ee60e152c3b93f591c78728f` | U7 使用锁定的生成客户端，接入策略、回测、因子与期权页面。`?market=replay` 或 `?research=replay` 分别选择显式合成回放。 |
+
+独立复验使用从干净克隆构建的锁定制品。先运行 `bash scripts/contract-diff.sh --check-pins` 和完整导出检查，再运行 `python3 -B tests/t3b_integration.py --release "$release"`，其中 `release` 指向本次构建目录。编译复用锁定的离线 Cargo 依赖。隔离验收仅使用合成回放、进程内合成行情、临时回环进程和 Unix socket PostgreSQL，退出时停止进程。IBKR 部署接入仅为 paper 只读。测试结果保留用例状态与计数，数据正文、数据库、日志和截图使用本地临时目录。[契约验证](../contracts/README.md#验证) · [跨仓集成工作流](../.github/workflows/integration.yml) · [四仓数据政策](data-policy.md)
+
+| 验收项目 | 路径与判定 |
+| --- | --- |
+| 策略上传至结果读回 | `tests/t3b_strategy.py` 经 web 上传校验、登记和选版，对照计划与内容哈希，再用同一版提交配置作业，回读 finance worker 的终态和结果。 |
+| 匿名公开作业续页 | `tests/t3b_strategy.py` 通过 `GET /api/v1/backtests` 获取并传回 `next_cursor`，核对续页跨过管理员可见的配置作业。公开作业类型为 `DemoStrategy` 和 `SmaCrossover`。续页以最后一个可见 ID 为界，终页游标为 `null`。 |
+| 期权链、场所深度和敞口 | `tests/t3b_market.py` 以合成行情所有者装配 finance 读契约，经 web 请求期权链、Nasdaq 场所深度和敞口并核对响应。frontend 的 `options-web.test.tsx`、`market-web.test.tsx` 从合成的同源响应验证浏览器适配层。 |
+| 期权流及策略页面 | `tests/t3b_market.py` 核对 W9 观察与核验的十进制证据、覆盖和续页。U7 通过生成 SDK 渲染。frontend `options-web.test.tsx` 检查来源与空白状态，`research-web.test.tsx` 检查上传、版本、作业和因子页面。 |
+
+切换时核对 web 迁移终点 `20261127074531`，finance 的 SQLite `jobs_legacy_id` 首次打开时自动建立。W2b、W8、W9 沿用现有端口、进程及环境变量。独立 finance API 在期权和场所深度来源未装配时向 web 返回来源不可用，成功响应需由获授权的行情所有者接入。F3 路径、默认关闭开关、邮件快照与回退安排见 [第 2 批运行时核对](../ops/ruler-runbook.md#v1-t3b-第-2-批运行时核对)。
+
+F12 期权历史回归继续从锁定的 finance 归档运行。锁定版本的历史期权类型使用 Chrono 时间字段，单独编译 `finance-ib` 的回归命令显式启用 `utoipa/chrono`。
+
+## T3a 首批验收
+
+T3a 是 T3 的首批集成，PR #52 使用 `Closes #53` 与 `Refs #44`。以下记录 finance F13、web W6、frontend U6 的首批范围与回归。[T3a 运行时核对](../ops/ruler-runbook.md#v1-t3a-首批运行时核对) · [T3a 验收合同](https://github.com/viramoon/fertile/issues/53)
+
+### 版本与契约
+
+| 子仓 | T3a gitlink | 消费方记录 |
 | --- | --- | --- |
 | finance | `fc5e153e9727181f5748659c0610b2fbc2b49769` | W6 的 `openapi/finance.commit` 精确匹配。包括 F6、F9b、F4、F12、F13。 |
 | web | `6e5fd80a56c3ab2fd0634fd69ecec3b7315dcd06` | U6 的 `openapi/web.commit` 精确匹配，frontend 输入快照与 W6 的导出逐字节一致。 |
@@ -14,7 +39,7 @@ T3a 是 T3 的首批集成，PR #52 使用 `Closes #53` 与 `Refs #44`。#44 在
 
 finance 新增 `/api/v1/market/bars`、`/api/v1/indicators` 与 `/api/v1/indicators/values`。价格、数量、指标值、序号及纳秒时钟均按各自契约传输精确十进制文本。W6 的现有 bars 与指标端点仍使用 WAL 视图。市场 WebSocket `/api/v1/stream/market` 继续发送 1.0 帧，对 2.0 事件发出 `unsupported_version` 重置。运维 SSE `/api/v1/events` 复用现有 web 入口。有效的期权 flow 和 exposure 查询仍返回 HTTP 503 与 `finance_contract_pending`，frontend 默认页面显示相应待接入状态。[finance API](https://github.com/viramoon/finance/blob/fc5e153e9727181f5748659c0610b2fbc2b49769/docs/api.md) · [web API](https://github.com/viramoon/web/blob/6e5fd80a56c3ab2fd0634fd69ecec3b7315dcd06/docs/api.md)
 
-## 当前候选的合成验收
+### 首批合成验收
 
 CI 的 Integration 作业从本批 gitlink 构建制品。九只股票的回放 CSV 由 `tests/replay_fixture.py` 在临时目录生成，标的及价量使用固定向量，价量由整数计算，运行时钟由 ReplaySource 处理。测试全程使用合成数据、回放或本地替身。测试目录、队列和数据库均从空隔离实例创建，IBKR 仅以合成回放或内存 paper 只读替身验证。
 
@@ -46,5 +71,5 @@ supervisord 回退期间的启动和巡检须按 `migration-rollback.sha` 重建
 ## 后续批次
 
 - **质量接口。** 断源、补数与浏览器质量报告贯通验收随上游接线推进。
-- **期权成功输出。** F9e 的观察与核验证据、F10 后续批次和 W2b 的期权读取成功响应待各子仓交付，再复验 HTTP 与浏览器路径。
+- **期权部署接线。** T3b 的期权 HTTP 路由和 U7 页面已接入。共享行情所有者的部署接线、实际纸户权限、深度 focus 到行情所有者的联动及期权流主动推送和续传待后续交付。
 - **业务邮件与私有部署。** 生产业务事件入 outbox 的接线待后续批次。SMTP/Drive 账户、容量、收件人、离线密钥和行情许可由 vira 确认。外部备份、Binance 与 notifier 保持默认关闭。

@@ -21,5 +21,7 @@ cd -- "$producer"
 # Revisions of the same Cargo packages must not share compiled artifacts.
 export CARGO_TARGET_DIR="$producer/target" CARGO_NET_OFFLINE=true
 cargo test --offline --locked --release -p finance-collector --test option_history
-cargo test --offline --locked --release -p finance-ib --lib \
+# The standalone finance-ib build needs the Chrono OpenAPI support that
+# finance-collector otherwise enables when it is selected as a test target.
+cargo test --offline --locked --release -p finance-ib --lib --features utoipa/chrono \
   verified_paper_option_history_requests_and_decodes_synthetic_bars

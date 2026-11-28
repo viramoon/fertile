@@ -88,9 +88,25 @@ curl -fsS http://127.0.0.1:8090/api/v1/backtests/sample
 )
 ```
 
+## v1 T3b 第 2 批运行时核对
+
+换版使用同一 fertile 提交构建的 `finance-api`、worker、`finance-strategy`、`web`、`web-notifier` 与完整 frontend `dist`。维护前按[受监管启停与手动排空](#受监管启停与手动排空)暂停接入，排空回测并保留已验证的备份。记录实际数据根、研究根、目标 PostgreSQL 库、迁移台账和旧制品。[T3b 集成说明](../docs/v1-integration.md)
+
+| 核对项 | 第 2 批操作 |
+| --- | --- |
+| PostgreSQL | web 的 SQLx 迁移终点为 `20261127074531`（W5 主动静默）。从 T3a 升级无新增 SQL 文件。核对已应用记录、校验和及数据库就绪，从更早版本升级时在新版业务进程启动前显式执行 `web migrate`。 |
+| 回测 SQLite | F14 在 finance API 处理作业请求或 worker 启动时运行队列建表脚本并建立 `jobs_legacy_id` 部分索引。备份 `finance-state/backtests/jobs.sqlite3`，保留其中的作业、策略版本、快照和租约。切换后核对队列复用、配置回测结果及匿名分页。匿名页只包含旧版公开作业，游标指向该页最后一个可见 ID。worker 使用同版 `FINANCE_STRATEGY_BIN` 和既有数据根。 |
+| 因子报告 | 管理员从 web 读取 finance 在 `FERTILE_DATA_ROOT` 下已发布的 `finance-state/factor-research/read-v1.json`。缺少发布快照时列表为空，`as_of` 为 `null`。核对数据根与快照版本，缺失数据时继续标记为不可用。[finance 策略与研究契约](https://github.com/viramoon/finance/blob/86dcc8604b6881d648418a25e6cd13c24d4a9b01/docs/api.md#第二批策略回测与研究契约) |
+| 环境、端口和进程 | W2b、W8、W9 共用既有 `FINANCE_BASE_URL`、同源静态目录、端口和进程。默认为 web `8090`、finance API `8081`、collector `8082`，均监听回环。HTTPS 浏览器仍设置 `WEB_PUBLIC_ORIGIN`。省略该配置时，仅接受 `Host` 匹配的同源 HTTP 回环管理会话。独立 finance API 可用已有的 `FINANCE_BINANCE_CONFIG` 选择状态读取所用的 profile 文件，默认读取发布内 profile。此批部署无需新增必填环境变量或独立卷。[运行配置](../docs/configuration.md) |
+| 行情源与 F3 | 成功读取链、场所深度、敞口及期权流需要获授权的 IBKR paper 只读行情所有者接入。独立 `finance-api` 的这些来源未装配时会经 web 返回 `503 finance_unavailable`。有来源时按已知合约和时窗核对许可、报价时间、覆盖及缺口。OPRA 历史原始证据仅在获准本机记录时写入 `finance-state/market-wal/ibkr/opra-history`。F3 数据根与投影、目录、文件均使用工作树外的实体路径，核对符号链接和路径类型。[finance 读契约](https://github.com/viramoon/finance/blob/86dcc8604b6881d648418a25e6cd13c24d4a9b01/docs/api.md#行情所有者接入) · [F3 投影路径](https://github.com/viramoon/finance/blob/86dcc8604b6881d648418a25e6cd13c24d4a9b01/docs/market-wal.md#parquet-与投影游标) |
+| 默认关闭 | 核对 `FERTILE_ENABLE_FINANCE_PROJECTOR=0`、`FERTILE_ENABLE_WEB_NOTIFIER=0`。Binance、Hyperliquid、额外 worker、实时决策模板和 Databento 维持关闭。私人 Drive 远端保持关闭，待核准许可、账户、容量和密钥后独立启用。 |
+| 邮件 | `FERTILE_ENABLE_WEB_NOTIFIER=0` 时守护器不启动 `web-notifier`，状态为 `disabled` 且 PID 为 `0`。W11 的独立二进制支持停用或缺少可用 SMTP 配置时安全空转。W13 在运行期间找不到候选绑定快照时保留该测试为 `pending`，恢复原文件后按额度及退避重试。当前总仓的受管 notifier 使用 W3 固定中继，W4 绑定快照环境和停止宽限（上游要求至少 85 秒）需先完成总仓接线与复验。[web 邮件运行手册](https://github.com/viramoon/web/blob/fcfda737d5152518d1d77cd55a5287c7185f3fb7/RUNBOOK.md#告警与邮件进程) |
+
+回退前暂停 notifier，清点 outbox。凡含新增迁移的发布，把迁移前备份恢复到独立 `data-paper-rollback-<sha>` 和 `web_rollback_<sha>`，再在这对目标上运行旧发布。旧代码不得连接新版写过的数据库。保留新版数据和台账，恢复后核对实际连接、队列和采集水位。切回新版时恢复原目标并对账。[隔离回退步骤](#从升级前快照回滚并切回新版)
+
 ## v1 T3a 首批运行时核对
 
-选用通过集成检查的完整制品。维护前备份 web 库、回测队列和已授权数据，记录旧制品与数据根。U6 的生成客户端锁定本批 web W6，选用同一发布的 web 和前端 dist。[T3a 集成说明](../docs/v1-integration.md)
+下列核对用于首批 T3a 制品。维护前备份 web 库、回测队列和已授权数据，记录旧制品与数据根。U6 的生成客户端锁定 web W6，选用同一发布的 web 和前端 dist。[T3a 集成说明](../docs/v1-integration.md#t3a-首批验收)
 
 | 项目 | 操作 |
 | --- | --- |
@@ -101,7 +117,7 @@ curl -fsS http://127.0.0.1:8090/api/v1/backtests/sample
 | 邮件 | `FERTILE_ENABLE_WEB_NOTIFIER=1` 时由守护器启动 `web-notifier`。与 web 共用已迁移数据库，无监听端口。先用专属 `web-notifier.env` 配好固定 SMTP 中继、发件地址、本人收件地址和可选凭据文件引用。启用前用隔离 outbox 复验状态。[进程条件](../deploy/hot-upgrade.md#宿主与持久目录) |
 | 备份 | offsite 默认关闭。仅在确认产品云端备份许可、接收方账户与离线密钥安排后配置 T2b，接入 F3 时显式设置 `FERTILE_BACKUP_WAL_BIN`，按产品授权选择封段。远端和收件人由 vira 决定。[备份与恢复](backup.md#私人-google-drive-加密备份) |
 
-F3 投影和 W3 notifier 默认关闭。`FERTILE_ENABLE_WEB_NOTIFIER=0` 时守护器不启动 `web-notifier`。在应用该配置后，核对 `status --json` 中 notifier 为 `disabled` 且 PID 为 `0`。当前候选验证 W3 邮件 worker 组件，生产业务事件进入 outbox、W4 SMTP 候选快照与备份/采集状态文件仍待接线。当前进程清单使用 W3 固定中继设置。Web W11 另行说明直接启动其新版二进制时，显式禁用或缺少可用 SMTP 配置如何安全空转、保留 outbox 且不发送邮件。[web W11 notifier 禁用说明](https://github.com/viramoon/web/blob/be78e8de19754f728710e21294c59fcda6aeb997/RUNBOOK.md#告警与邮件进程)
+F3 投影和 W3 notifier 默认关闭。`FERTILE_ENABLE_WEB_NOTIFIER=0` 时守护器不启动 `web-notifier`。在应用该配置后，核对 `status --json` 中 notifier 为 `disabled` 且 PID 为 `0`。T3a 验证 W3 邮件 worker 组件，进程清单使用 W3 固定中继设置。Web W11 另行说明直接启动其新版二进制时，显式禁用或缺少可用 SMTP 配置如何安全空转、保留 outbox 且不发送邮件。[web W11 notifier 禁用说明](https://github.com/viramoon/web/blob/be78e8de19754f728710e21294c59fcda6aeb997/RUNBOOK.md#告警与邮件进程)
 
 IBKR 使用 paper 只读行情。九标的回放与现网实例使用独立数据根。进程环境、默认值和独立运行边界见 [finance 配置](../docs/configuration.md#finance-独立程序参数)。
 
@@ -112,7 +128,7 @@ IBKR 使用 paper 只读行情。九标的回放与现网实例使用独立数�
 按实际客户端入口和路由判断。先比对 WS 请求的主机、端口和连接路径与运行中 web 的监听地址，再查入口配置或路由记录。客户端直接连接 web 的回环监听端口（本机默认 `127.0.0.1:8090`），且中途无 HTTP 反向代理，属于直连。即使上游最终也指向回环端口，只要请求先经过 nginx、Caddy 或隧道路由等反向代理，就按反代入口核对。
 
 - **前置反向代理时**，才核对代理转发的 WebSocket 升级头和 `Origin`。确认到 web 的 HTTP/1.1 上游保留 `Upgrade: websocket`、`Connection: Upgrade` 的语义，并原样传递浏览器 `Origin`。使用已配置的 `WEB_PUBLIC_ORIGIN` 管理会话从实际入口连接 `/api/v1/stream/market`，核对握手返回 `101 Switching Protocols`，收到预期市场帧并能断线重连。
-- **直连回环端口时**，跳过代理升级头和 `Origin` 转发核对。使用与该监听端口同一入口的 `/healthz/ready` 和 `/api/v1/system/status` 核对 web 与 finance，再用支持现有鉴权方式的 WebSocket 客户端直连 `/api/v1/stream/market`，确认 `101 Switching Protocols`、预期市场帧及断线重连。T3a 纯 HTTP 直连且未配置 `WEB_PUBLIC_ORIGIN` 时，用本机非浏览器客户端携带获授权的 Bearer 凭据发起原生 WS 握手，省略 `Origin`。使用浏览器管理会话时仍须满足 web 的应用层 `Origin` 校验。[web 行情网关说明](https://github.com/viramoon/web/blob/6e5fd80a56c3ab2fd0634fd69ecec3b7315dcd06/RUNBOOK.md#行情网关与运维事件)
+- **直连回环端口时**，跳过代理升级头和 `Origin` 转发核对。使用与该监听端口同一入口的 `/healthz/ready` 和 `/api/v1/system/status` 核对 web 与 finance，再用支持现有鉴权方式的 WebSocket 客户端直连 `/api/v1/stream/market`，确认 `101 Switching Protocols`、预期市场帧及断线重连。非浏览器客户端可用获授权的 Bearer 凭据发起省略 `Origin` 的原生握手。未配置 `WEB_PUBLIC_ORIGIN` 时，T3b 的浏览器管理会话使用同源 HTTP 回环地址，握手仍须满足 web 的应用层 `Origin` 校验。[web 行情网关说明](https://github.com/viramoon/web/blob/fcfda737d5152518d1d77cd55a5287c7185f3fb7/RUNBOOK.md#行情网关与运维事件)
 
 ## 部署后的隔离历史日线验收
 
