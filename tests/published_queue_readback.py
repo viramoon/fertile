@@ -27,13 +27,14 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
-def archive_finance(source, revision, work):
+def archive_finance(source, revision, work, *, env=None):
     checkout = work / revision
     checkout.mkdir()
-    with subprocess.Popen(["git", "-C", source, "archive", revision], stdout=subprocess.PIPE) as archive:
+    with subprocess.Popen(["git", "-C", source, "archive", revision],
+                          stdout=subprocess.PIPE, env=env) as archive:
         # Fresh source mtimes prevent Cargo from reusing the other revision's
         # older workspace artifacts when the caller supplies a shared target.
-        subprocess.run(["tar", "-xm", "-C", checkout], stdin=archive.stdout, check=True)
+        subprocess.run(["tar", "-xm", "-C", checkout], stdin=archive.stdout, env=env, check=True)
         require(archive.wait() == 0, "failed to archive the pinned finance source")
     return checkout
 

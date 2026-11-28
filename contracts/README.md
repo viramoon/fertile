@@ -30,6 +30,12 @@ T3b 的 `--check-pins` 先要求两份消费方提交文件精确等于生产者
 
 负向演练在一次性克隆中分别改动快照格式、生产者提交号、Rust 和 TypeScript 生成代码及版本化读流文件。生产者提交号用例覆盖缺失提交和非祖先的不同 Git 树。W4 过渡条件只接受此前核对的固定提交组合。锁定 W6 时，演练还会切换至仍使用 W2a 快照的 U5 gitlink，核对契约检查拒绝该组合。
 
+### T7 回测提交与匿名续页
+
+隔离验收经 web 的 `POST /api/v1/strategies/validate`、`POST /api/v1/strategies` 和版本详情选中已登记的策略。以 `Idempotency-Key` 调用 `POST /api/v1/backtests`，核对快照发布前的 `422 no_data` 和发布后的 `202`。通过 `/api/v1/backtests/by-key` 找回作业 ID，在详情核对选中版本、策略哈希、快照哈希和模拟结果。
+
+匿名 `GET /api/v1/backtests?limit=1` 的下一页传回 `next_cursor`。非空游标为本页最后一个公开作业的整数 ID。私有作业间隔超过 100 条时仍须取全公开作业，只有私有尾部时游标为 `null`。匿名读取私有作业详情返回 `404 job_not_found`。这项验收复用现有 HTTP 契约及版本化流协议。[T7 隔离运行命令](../ops/ruler-runbook.md#v1-t7-隔离合成回放验收)
+
 ### T3b（#54）第 2 批
 
 finance 新增 F10b 的策略版本、因子详情、回测取消与 worker 状态、决策信号；F14 增加回测列表可见范围。F10c 加入 Binance profile 状态、Nasdaq 场所深度、订阅预算和覆盖、期权链、敞口与期权历史批次。F10d 增加 OPRA 观察与历史核验读取。[finance HTTP 契约](https://github.com/viramoon/finance/blob/86dcc8604b6881d648418a25e6cd13c24d4a9b01/docs/api.md)
