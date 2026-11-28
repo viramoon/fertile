@@ -43,7 +43,7 @@
 | F13 `finance-backtest-worker` | 原 launcher 读取所选发布的 `FINANCE_BUILD_ROOT`，与 API 使用同一 `FERTILE_DATA_ROOT` 的 SQLite 队列。`FINANCE_WORKER_LEASE_SECONDS` 默认 15 秒，`FINANCE_WORKER_CONCURRENCY` 默认 1，`FINANCE_JOB_TIMEOUT_SECONDS` 默认 600，`FINANCE_JOB_MEMORY_MB` 默认 8192。配置作业通过 `FINANCE_STRATEGY_BIN` 指向同一 finance 制品。替代 worker 模板默认关闭。 |
 | F13 `finance-decision` | 总仓模板默认关闭。独立 launcher 默认 `python3`，`FINANCE_PYTHON` 可指定构建的 Python 解释器。要求 `FERTILE_DATA_ROOT`、`--plan` 和 `--replay`，可用 `--follow` 跟随追加文件。配置策略使用同构建的 `FINANCE_STRATEGY_BIN` 或从 `PATH` 查找。结果写入实例的 `finance-state/decisions/decisions.sqlite3`。 |
 
-程序参数以锁定 finance 文档为准。[Binance 公共行情](https://github.com/viramoon/finance/blob/fc5e153e9727181f5748659c0610b2fbc2b49769/docs/integrations/binance.md) · [历史期权链](https://github.com/viramoon/finance/blob/fc5e153e9727181f5748659c0610b2fbc2b49769/docs/option-history.md) · [回测作业](https://github.com/viramoon/finance/blob/fc5e153e9727181f5748659c0610b2fbc2b49769/docs/backtest-jobs.md#worker-运行与恢复) · [实时决策](https://github.com/viramoon/finance/blob/fc5e153e9727181f5748659c0610b2fbc2b49769/docs/decision-process.md)
+独立 `finance-api` 也读取 `FINANCE_BINANCE_CONFIG`，默认读取发布内 `config/binance/<profile>.yaml`。该读取仅报告配置状态。IBKR 期权和场所深度由获授权的 paper 只读行情所有者接入，沿用既有数据根和端口。[Binance 公共行情](https://github.com/viramoon/finance/blob/86dcc8604b6881d648418a25e6cd13c24d4a9b01/docs/integrations/binance.md) · [期权流](https://github.com/viramoon/finance/blob/86dcc8604b6881d648418a25e6cd13c24d4a9b01/docs/option-flow.md) · [回测作业](https://github.com/viramoon/finance/blob/86dcc8604b6881d648418a25e6cd13c24d4a9b01/docs/backtest-jobs.md#worker-运行与恢复) · [实时决策](https://github.com/viramoon/finance/blob/86dcc8604b6881d648418a25e6cd13c24d4a9b01/docs/decision-process.md)
 
 ## web 管理会话与集成凭据
 
@@ -51,12 +51,12 @@
 
 | 参数 | 用途和默认行为 |
 | --- | --- |
-| `WEB_PUBLIC_ORIGIN` | 启用浏览器管理会话。填写与浏览器 `Origin` 完全一致的 HTTPS origin，省略默认端口、路径和尾部斜杠。未设置时浏览器管理会话关闭，已配置的 Bearer 令牌仍可用于支持它的接口。此设置独立于 `FERTILE_PUBLIC_ORIGIN` 公网巡检。 |
+| `WEB_PUBLIC_ORIGIN` | HTTPS 入口填写与浏览器 `Origin` 完全一致的值，省略默认端口、路径和尾部斜杠。未设置时，浏览器管理会话限同源 `http://127.0.0.1:<port>` 或 `http://localhost:<port>`，须精确匹配请求的 `Host`。此设置独立于 `FERTILE_PUBLIC_ORIGIN` 公网巡检。 |
 | `WEB_ADMIN_SESSION_TTL_SECONDS` | 会话期限，默认 900 秒，允许 1 至 900 秒。重启 web 后已有会话需要重新登录。 |
 | `WEB_CREDENTIAL_DIR` | 与公钥路径成对设置。填写 web 运行账户所有的 0700 持久绝对目录，例如 `$FERTILE_ROOT/secrets/web-credentials`。目录须避开版本、静态资源及整栈备份采集路径。两项均省略时，集成凭据录入返回 503。 |
 | `WEB_CREDENTIAL_RECIPIENT_PUBLIC_KEY_FILE` | 与密文目录成对设置。填写 web 可读的 RSA 公钥 PEM 绝对路径。公钥由 web 运行账户或 root 所有，组和其他用户不可写。私钥由获授权的接收方保管。 |
 
-`runtime.env` 只放 origin、期限和路径等非机密值。启用凭据录入后，在 PostgreSQL 备份之外单独保管配套 JWE 密文和接收方私钥。权限、密钥轮换和备份说明见 [web 运行手册](https://github.com/viramoon/web/blob/90662dbb904724f119814576cb98128d8cb9ed05/RUNBOOK.md#集成配置及凭据)。
+`runtime.env` 只放 origin、期限和路径等非机密值。启用凭据录入后，在 PostgreSQL 备份之外单独保管配套 JWE 密文和接收方私钥。权限、密钥轮换和备份说明见 [web 运行手册](https://github.com/viramoon/web/blob/fcfda737d5152518d1d77cd55a5287c7185f3fb7/RUNBOOK.md#集成配置及凭据)。
 
 ## 隔离历史验收的路径
 

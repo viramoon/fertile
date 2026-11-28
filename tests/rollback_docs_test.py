@@ -51,6 +51,7 @@ class RollbackPolicyTests(unittest.TestCase):
         for document, heading in (
             (RUNBOOK, RECOVERY),
             (RUNBOOK, "v1 T3a 首批运行时核对"),
+            (RUNBOOK, "v1 T3b 第 2 批运行时核对"),
             ("docs/v1-integration.md", "含迁移发布的回退"),
             ("deploy/hot-upgrade.md", "升级与兼容回退"),
         ):
