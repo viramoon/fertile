@@ -23,6 +23,7 @@ SNAPSHOT = ("finance-state/backtests/strategy-inputs/example.reviewed-us-daily@1
 def publish_strategy_replay(finance_source, finance_python, data_root, research_root):
     """Generate the configured replay and the legacy daily catalog in disposable roots."""
     env = {"PYTHONPATH": str(finance_source / "python"), "FERTILE_RESEARCH_ROOT": str(research_root),
+           "HOME": str(research_root.parent), "TMPDIR": str(research_root.parent), "PYTHONNOUSERSITE": "1",
            "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1"}
     subprocess.run(
         [finance_python, "-B", finance_source / "tests/config_strategy_replay_fixture.py", data_root],

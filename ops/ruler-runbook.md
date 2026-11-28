@@ -104,6 +104,22 @@ curl -fsS http://127.0.0.1:8090/api/v1/backtests/sample
 
 回退前暂停 notifier，清点 outbox。凡含新增迁移的发布，把迁移前备份恢复到独立 `data-paper-rollback-<sha>` 和 `web_rollback_<sha>`，再在这对目标上运行旧发布。旧代码不得连接新版写过的数据库。保留新版数据和台账，恢复后核对实际连接、队列和采集水位。切回新版时恢复原目标并对账。[隔离回退步骤](#从升级前快照回滚并切回新版)
 
+## v1 T7 隔离合成回放验收
+
+从检出本次验收代码且已初始化锁定子模块的 fertile 仓库根启动。将 `release` 设为可信候选制品的绝对目录，包含 manifest、`bin/finance-api`、`bin/finance-strategy`、`bin/web`、应用源码与配置、静态文件和 finance 的 Python 运行环境。T3b 制品也可使用，前提是 manifest 中三个组件的提交号与当前 checkout 的 gitlinks 一致。将本机 PostgreSQL 工具 `initdb`、`pg_ctl` 和 `createdb` 加入 PATH。
+
+~~~sh
+python3 -EB tests/t7_backtest_acceptance.py --release "$release"
+# CI 同款回归，额外用本次新建的诱饵目录和监听 socket 检查对部署配置的隔离。
+FERTILE_T7_TEST_RELEASE="$release" python3 -EB tests/t7_backtest_acceptance_test.py -v
+~~~
+
+每次执行都在 `/tmp/fertile-t7.*` 下新建绝对数据根、研究根和 PostgreSQL 集群。验收库为 `t3b`，只通过该目录中的 Unix socket 连接。finance API 和 web 使用随机 IPv4 回环端口并确认本次进程已绑定后才发起请求。脚本现场生成一次性管理令牌，退出时停止临时进程并清除目录。入口仅接受制品路径。
+
+使用这条入口处理 T3b 的临时研究验收。禁止向 `data-paper`、live 库 `web`、默认 `$FERTILE_ROOT/data/research` 或 8090 提交或导入。部署配置 `runtime.env`、`env.sh` 及现网令牌不参与验收。禁止以 `scripts/fertile up`、`ensure`、`ensure-up`、`down`、`rollback` 或 healthwatch 启动这项检查。脚本只启动 API、网关、回测 worker 和临时 PostgreSQL，使用合成数据模拟成交。部署的 IBKR 账户范围仍为 paper 只读。[四仓数据政策](../docs/data-policy.md)
+
+通过时输出 `T7 isolated replay submission and result readback passed` 与 `T7 anonymous pagination passed`。首次提交应在空快照根得到 `422 no_data`，发布后复用同一幂等键读回成功结果。管理员列表须见到三个公开作业、夹在第一与第二个之间的 110 个私有作业以及尾部 8 个私有作业。匿名客户端以 `limit=1` 逐页取全三个公开作业，终页游标为 `null`。[T7 集成说明](../docs/v1-integration.md#t7-合成回放验收) · [回测接口核对](../contracts/README.md#t7-回测提交与匿名续页)
+
 ## v1 T3a 首批运行时核对
 
 下列核对用于首批 T3a 制品。维护前备份 web 库、回测队列和已授权数据，记录旧制品与数据根。U6 的生成客户端锁定 web W6，选用同一发布的 web 和前端 dist。[T3a 集成说明](../docs/v1-integration.md#t3a-首批验收)

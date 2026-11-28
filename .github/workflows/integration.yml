@@ -260,6 +260,11 @@ jobs:
           source "$FERTILE_ROOT/env.sh"
           export CARGO_NET_OFFLINE=true
           python3 -B tests/t3b_integration.py --release "$FERTILE_ROOT/current"
+      - name: Exercise T7 backtests and pagination with decoy live targets
+        run: |
+          source deploy/toolchain.env
+          export PATH="$FERTILE_ROOT/tools/postgresql-$POSTGRES_VERSION/bin:$PATH"
+          FERTILE_T7_TEST_RELEASE="$FERTILE_ROOT/current" python3 -EB tests/t7_backtest_acceptance_test.py -v
       - name: Exercise the actual supervised local deployment with ReplaySource
         run: |
           set -eu

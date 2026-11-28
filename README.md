@@ -43,6 +43,7 @@ curl -fsS http://127.0.0.1:8090/api/v1/system/status
 | 私人 Google Drive 加密备份、恢复点和离线演练 | [异地备份](ops/backup.md#私人-google-drive-加密备份) |
 | OpenAPI 与生成客户端 | [契约快照与验证](contracts/README.md) |
 | v1 T3b（#54）第 2 批集成与隔离验收 | [集成说明](docs/v1-integration.md) · [运行时核对](ops/ruler-runbook.md#v1-t3b-第-2-批运行时核对) |
+| v1 T7（#61）合成回放、结果读回和匿名分页 | [隔离验收命令](ops/ruler-runbook.md#v1-t7-隔离合成回放验收) |
 | 工具链、配置与密钥 | [开发环境](docs/dev-environment.md) · [配置](docs/configuration.md) |
 | 合成 fixture、私有数据与 Git/PR 检查 | [四仓数据发布政策](docs/data-policy.md) |
 | 版本、子模块指针与脚本 | [发版规则](docs/release.md) · [脚本](scripts/README.md) |

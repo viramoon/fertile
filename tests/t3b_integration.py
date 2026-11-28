@@ -31,8 +31,9 @@ def verify_release(release):
             "T3b requires the release built from this fertile commit and its locked gitlinks")
 
 
-def local_env():
-    return {"PATH": os.environ.get("PATH", os.defpath), "LANG": "C.UTF-8"}
+def local_env(work):
+    # libpq and SQLx can look for .pgpass even with a fully specified local DSN.
+    return {"PATH": os.environ.get("PATH", os.defpath), "LANG": "C.UTF-8", "HOME": str(work)}
 
 
 @contextmanager
@@ -40,7 +41,7 @@ def postgres(work):
     socket_dir = work / "pg"
     socket_dir.mkdir()
     pgdata = work / "pgdata"
-    env = {**local_env(), "PGHOST": str(socket_dir), "PGPORT": "5432", "PGUSER": "t3b"}
+    env = {**local_env(work), "PGHOST": str(socket_dir), "PGPORT": "5432", "PGUSER": "t3b"}
 
     def run(*command):
         subprocess.run(command, cwd=work, env=env, check=True, timeout=45)
@@ -98,14 +99,14 @@ def web_listening(log, port):
 
 
 @contextmanager
-def gateway(release, work, database, finance_origin):
-    port = ephemeral_port()
+def gateway(release, work, database, finance_origin, *, port=None):
+    port = ephemeral_port() if port is None else port
     token = secrets.token_hex(32)
     token_file = work / "web-token"
     with os.fdopen(os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
         stream.write(f"WEB_ADMIN_TOKEN={token}\n")
     env = {
-        **local_env(),
+        **local_env(work),
         "DATABASE_URL": database,
         "FERTILE_PROFILE": "stable",
         "FINANCE_BASE_URL": finance_origin,
@@ -145,7 +146,7 @@ def run(release, work):
     owner = build_owner(finance_source, work, target)
     snapshot = publish_strategy_replay(finance_source, finance_python, data_root, research_root)
     worker_env = {
-        **local_env(),
+        **local_env(work),
         "FERTILE_DATA_ROOT": str(data_root),
         "FERTILE_RESEARCH_ROOT": str(research_root),
         "FINANCE_STRATEGY_BIN": str(release / "bin/finance-strategy"),

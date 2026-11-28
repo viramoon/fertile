@@ -1,5 +1,13 @@
 # v1 跨仓集成与隔离验收
 
+## T7 合成回放验收
+
+T3b 部署的验收区间缺少已发布快照，提交曾返回 `422 no_data`。T7 在新建的独立根复现这一响应，然后发布合成快照，使用候选 API、worker 与 web 完成选版、提交、幂等查找和结果读回。匿名列表用真实 API 队列验证超过接口最大页宽的私有作业间隔。用于大间隔与尾部的私有种子作业经本次 finance API 的普通提交入口加入队列，提交发生在 worker 停止后。
+
+策略与回放取自锁定的 finance 提交。生成器 `tests/config_strategy_replay_fixture.py` 用 2024 年上半年 XNYS 会话序号生成三个合成标的的整数价格与固定成交量，在两个指定会话延迟报价。总仓 `tests/research-fixture.py` 用固定 XNYS 窗口和整数折线价量生成 `FIXTURE.XNYS` 日线。两份生成过程均无随机种子或外部数据输入。结果核对策略内容与快照 SHA-256、模拟成交的精确价格，以及权益与盈亏的十进制一致性。
+
+Integration 作业在受监管服务启动前运行 T7 回归。回归向验收入口传入合成的 `data-paper` 路径、默认研究根、数据库 `web` 的 Unix socket、HTTP 入口和代理，核对这些诱饵目录未改变且监听器未收到连接。[验收命令](../ops/ruler-runbook.md#v1-t7-隔离合成回放验收) · [回测接口核对](../contracts/README.md#t7-回测提交与匿名续页) · [验收合同](https://github.com/viramoon/fertile/issues/61)
+
 ## T3b 第 2 批
 
 本批集成 PR 使用 `Closes #54` 与 `Refs #44`。#44 在全部批次验收后关闭。联调版本为 `0.0.0`，部署和发版另行安排。[T3b 验收合同](https://github.com/viramoon/fertile/issues/54) · [T3 父任务](https://github.com/viramoon/fertile/issues/44)

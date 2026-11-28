@@ -105,6 +105,8 @@ operations:
   systemd: deploy/systemd
   hot_upgrade: deploy/hot-upgrade.md
   v1_integration: docs/v1-integration.md
+  # T7 合成回放验收使用 /tmp 新建数据根、研究根与 Unix socket 库，入口见 Ruler 手册。
+  t7_backtest_acceptance: tests/t7_backtest_acceptance.py
   commands:
     build: scripts/fertile build
     stage: scripts/fertile build --stage-only --ref SHA
