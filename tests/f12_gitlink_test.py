@@ -85,6 +85,7 @@ with open(os.environ["F12_CALLS"], "a", encoding="utf-8") as calls:
         self.assertEqual([call["args"] for call in calls], [
             ["test", "--offline", "--locked", "--release", "-p", "finance-collector", "--test", "option_history"],
             ["test", "--offline", "--locked", "--release", "-p", "finance-ib", "--lib",
+             "--features", "utoipa/chrono",
              "verified_paper_option_history_requests_and_decodes_synthetic_bars"],
         ])
         for call in calls:

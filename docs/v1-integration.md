@@ -21,6 +21,8 @@
 
 切换时核对 web 迁移终点 `20261127074531`，finance 的 SQLite `jobs_legacy_id` 首次打开时自动建立。W2b、W8、W9 沿用现有端口、进程及环境变量。独立 finance API 在期权和场所深度来源未装配时向 web 返回来源不可用，成功响应需由获授权的行情所有者接入。F3 路径、默认关闭开关、邮件快照与回退安排见 [第 2 批运行时核对](../ops/ruler-runbook.md#v1-t3b-第-2-批运行时核对)。
 
+F12 期权历史回归继续从锁定的 finance 归档运行。锁定版本的历史期权类型使用 Chrono 时间字段，单独编译 `finance-ib` 的回归命令显式启用 `utoipa/chrono`。
+
 ## T3a 首批验收
 
 T3a 是 T3 的首批集成，PR #52 使用 `Closes #53` 与 `Refs #44`。以下记录 finance F13、web W6、frontend U6 的首批范围与回归。[T3a 运行时核对](../ops/ruler-runbook.md#v1-t3a-首批运行时核对) · [T3a 验收合同](https://github.com/viramoon/fertile/issues/53)
