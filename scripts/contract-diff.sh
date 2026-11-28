@@ -5,18 +5,13 @@ root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 case ${1:-} in
   ''|--check) write=false ;;
   --write) write=true ;;
-  *) echo 'Usage: scripts/contract-diff.sh [--check|--write]' >&2; exit 2 ;;
+  --check-pins) write=false ;;
+  *) echo 'Usage: scripts/contract-diff.sh [--check|--write|--check-pins]' >&2; exit 2 ;;
 esac
 [[ $# -le 1 ]] || exit 2
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
-export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/fertile/contract-target}
-CARGO_TARGET_DIR=$(realpath -m "$CARGO_TARGET_DIR/contract-exports")
-mkdir -p "$CARGO_TARGET_DIR"
-exec {export_lock}>"$CARGO_TARGET_DIR/.contract-diff.lock"
-flock "$export_lock"
-cargo_args=(--quiet --locked --release)
-if [[ ${CARGO_NET_OFFLINE:-false} == true ]]; then cargo_args+=(--offline); fi
+stream_files=(market-ws.schema.json market-status-sse.schema.json read-stream-examples.json)
 
 # The consumer working trees are also checked: a local edit to generated code is drift.
 for repo in finance web frontend; do
@@ -28,6 +23,28 @@ for repo in finance web frontend; do
     echo "$repo: checkout differs from gitlink $pin" >&2; exit 1; }
   printf '%s\n' "$pin" > "$work/$repo.commit"
 done
+
+if [[ ${1:-} == --check-pins ]]; then
+  cmp "$work/finance.commit" "$root/web/openapi/finance.commit"
+  cmp "$work/web.commit" "$root/frontend/openapi/web.commit"
+  cmp "$root/contracts/finance.openapi.json" "$root/web/openapi/finance.openapi.json"
+  cmp "$root/contracts/web.openapi.json" "$root/web/openapi/web.openapi.json"
+  cmp "$root/contracts/web.openapi.json" "$root/frontend/openapi/web.openapi.json"
+  for file in "${stream_files[@]}"; do
+    cmp "$root/finance/protocol/v1/$file" "$root/web/openapi/finance.$file"
+  done
+  printf 'Exact contract pins match; finance=%s web=%s frontend=%s\n' \
+    "$(cat "$work/finance.commit")" "$(cat "$work/web.commit")" "$(cat "$work/frontend.commit")"
+  exit 0
+fi
+
+export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/fertile/contract-target}
+CARGO_TARGET_DIR=$(realpath -m "$CARGO_TARGET_DIR/contract-exports")
+mkdir -p "$CARGO_TARGET_DIR"
+exec {export_lock}>"$CARGO_TARGET_DIR/.contract-diff.lock"
+flock "$export_lock"
+cargo_args=(--quiet --locked --release)
+if [[ ${CARGO_NET_OFFLINE:-false} == true ]]; then cargo_args+=(--offline); fi
 
 record_batch_one_web_baseline() {
   local recorded=$1 pin=$2
@@ -106,7 +123,7 @@ check_finance_stream() {
     cd "$work/$source"
     cargo run "${cargo_args[@]}" -p finance-api -- export-read-stream "$work/$source-stream"
   )
-  for file in market-ws.schema.json market-status-sse.schema.json read-stream-examples.json; do
+  for file in "${stream_files[@]}"; do
     cmp "$work/$source-stream/$file" "$work/$source/protocol/v1/$file"
   done
   printf '%s: regenerated v1 read-stream schemas and examples match commit %s\n' \
